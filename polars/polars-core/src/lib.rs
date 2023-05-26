@@ -62,7 +62,10 @@ pub static POOL: Lazy<ThreadPool> = Lazy::new(|| {
 });
 
 #[cfg(target_family = "wasm")] // instead use this on wasm targets
-pub static POOL: Lazy<polars_utils::wasm::Pool> = Lazy::new(|| polars_utils::wasm::Pool);
+pub static POOL: Lazy<polars_utils::wasm::Pool> = Lazy::new(|| {
+    // debug!("new polars pool");
+    polars_utils::wasm::Pool
+});
 
 // utility for the tests to ensure a single thread can execute
 pub static SINGLE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
