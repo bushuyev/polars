@@ -25,12 +25,13 @@ members = [
 version = "0.28.0"
 
 [workspace.dependencies]
-rayon = "1.6"
+#rayon = "1.6"
+rayon = {path= "/enc/my-dev/rayon"}
 thiserror = "^1"
 num-traits = "0.2"
 ahash = "0.8"
 xxhash-rust = { version = "0.8.6", features = ["xxh3"] }
-hashbrown = { version = "0.13.1", features = ["rayon", "ahash"] }
+hashbrown = { version = "0.13.1", features = ["ahash"] }
 bitflags = "1.3"
 once_cell = "1"
 memchr = "2"

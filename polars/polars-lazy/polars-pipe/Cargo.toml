@@ -11,7 +11,7 @@ description = "Lazy query engine for the Polars DataFrame library"
 [dependencies]
 crossbeam-channel = "0.5"
 enum_dispatch = "0.3"
-hashbrown.workspace = true
+#hashbrown.workspace = true
 num-traits.workspace = true
 polars-arrow = { version = "0.28.0", path = "../../polars-arrow", default-features = false }
 polars-core = { version = "0.28.0", path = "../../polars-core", features = ["lazy", "private", "zip_with", "random"], default-features = false }
@@ -29,7 +29,7 @@ csv = ["polars-plan/csv", "polars-io/csv"]
 parquet = ["polars-plan/parquet", "polars-io/parquet"]
 ipc = ["polars-plan/ipc", "polars-io/ipc"]
 async = ["polars-plan/async", "polars-io/async"]
-nightly = ["polars-core/nightly", "polars-utils/nightly", "hashbrown/nightly"]
+#nightly = ["polars-core/nightly", "polars-utils/nightly", "hashbrown/nightly"]
 cross_join = ["polars-core/cross_join"]
 dtype-u8 = ["polars-core/dtype-u8"]
 dtype-u16 = ["polars-core/dtype-u16"]

@@ -44,6 +44,7 @@ pub static PROCESS_ID: Lazy<u128> = Lazy::new(|| {
         .as_nanos()
 });
 
+
 // this is re-exported in utils for polars child crates
 #[cfg(not(target_family = "wasm"))] // only use this on non wasm targets
 pub static POOL: Lazy<ThreadPool> = Lazy::new(|| {
@@ -61,10 +62,37 @@ pub static POOL: Lazy<ThreadPool> = Lazy::new(|| {
         .expect("could not spawn threads")
 });
 
+// #[cfg(target_family = "wasm")] // instead use this on wasm targets
+// pub static POOL: Lazy<polars_utils::wasm::Pool> = Lazy::new(|| {
+//     // debug!("new polars pool");
+//     polars_utils::wasm::Pool
+// });
+
+// 
+#[cfg(target_family = "wasm")]
+extern "C" {
+    fn get_pool()->ThreadPool;
+}
+
 #[cfg(target_family = "wasm")] // instead use this on wasm targets
-pub static POOL: Lazy<polars_utils::wasm::Pool> = Lazy::new(|| {
+pub static POOL: Lazy<ThreadPool> = Lazy::new(|| {
     // debug!("new polars pool");
-    polars_utils::wasm::Pool
+    unsafe {
+        get_pool()
+        // todo!()
+    }
+    // ThreadPoolBuilder::new()
+    //     .num_threads(
+    //         std::env::var("POLARS_MAX_THREADS")
+    //             .map(|s| s.parse::<usize>().expect("integer"))
+    //             .unwrap_or_else(|_| {
+    //                 std::thread::available_parallelism()
+    //                     .unwrap_or(std::num::NonZeroUsize::new(1).unwrap())
+    //                     .get()
+    //             }),
+    //     )
+    //     .build()
+    //     .expect("could not spawn threads")
 });
 
 // utility for the tests to ensure a single thread can execute
