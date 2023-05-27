@@ -1,9 +1,11 @@
 from polars.datatypes.classes import (
+    Array,
     Binary,
     Boolean,
     Categorical,
     DataType,
     DataTypeClass,
+    DataTypeGroup,
     Date,
     Datetime,
     Decimal,
@@ -72,11 +74,13 @@ from polars.type_aliases import (
 
 __all__ = [
     # classes
+    "Array",
     "Binary",
     "Boolean",
     "Categorical",
     "DataType",
     "DataTypeClass",
+    "DataTypeGroup",
     "Date",
     "Datetime",
     "Decimal",

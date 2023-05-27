@@ -144,7 +144,7 @@ def test_lazy_map_schema() -> None:
 def test_join_as_of_by_schema() -> None:
     a = pl.DataFrame({"a": [1], "b": [2], "c": [3]}).lazy()
     b = pl.DataFrame({"a": [1], "b": [2], "d": [4]}).lazy()
-    q = a.join_asof(b, on="a", by="b")
+    q = a.join_asof(b, on=pl.col("a").set_sorted(), by="b")
     assert q.collect().columns == q.columns
 
 
@@ -302,7 +302,7 @@ def test_all_null_cast_5826() -> None:
 def test_empty_list_eval_schema_5734() -> None:
     df = pl.DataFrame({"a": [[{"b": 1, "c": 2}]]})
     assert df.filter(False).select(
-        pl.col("a").arr.eval(pl.element().struct.field("b"))
+        pl.col("a").list.eval(pl.element().struct.field("b"))
     ).schema == {"a": pl.List(pl.Int64)}
 
 

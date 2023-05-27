@@ -15,7 +15,7 @@ fn test_date_range() {
         .unwrap()
         .and_hms_opt(0, 0, 0)
         .unwrap();
-    let dates = date_range_vec(
+    let dates = temporal_range_vec(
         start.timestamp_nanos(),
         end.timestamp_nanos(),
         Duration::parse("1mo"),
@@ -46,7 +46,7 @@ fn test_feb_date_range() {
         .unwrap()
         .and_hms_opt(0, 0, 0)
         .unwrap();
-    let dates = date_range_vec(
+    let dates = temporal_range_vec(
         start.timestamp_nanos(),
         end.timestamp_nanos(),
         Duration::parse("1mo"),
@@ -167,7 +167,7 @@ fn test_boundaries() {
         .and_hms_opt(3, 0, 0)
         .unwrap();
 
-    let ts = date_range_vec(
+    let ts = temporal_range_vec(
         start.timestamp_nanos(),
         stop.timestamp_nanos(),
         Duration::parse("30m"),
@@ -343,7 +343,7 @@ fn test_boundaries_2() {
         .and_hms_opt(4, 0, 0)
         .unwrap();
 
-    let ts = date_range_vec(
+    let ts = temporal_range_vec(
         start.timestamp_nanos(),
         stop.timestamp_nanos(),
         Duration::parse("30m"),
@@ -451,7 +451,7 @@ fn test_boundaries_ms() {
         .and_hms_opt(3, 0, 0)
         .unwrap();
 
-    let ts = date_range_vec(
+    let ts = temporal_range_vec(
         start.timestamp_millis(),
         stop.timestamp_millis(),
         Duration::parse("30m"),
@@ -627,7 +627,7 @@ fn test_rolling_lookback() {
         .unwrap()
         .and_hms_opt(4, 0, 0)
         .unwrap();
-    let dates = date_range_vec(
+    let dates = temporal_range_vec(
         start.timestamp_millis(),
         end.timestamp_millis(),
         Duration::parse("30m"),
@@ -645,7 +645,8 @@ fn test_rolling_lookback() {
         ClosedWindow::Right,
         TimeUnit::Milliseconds,
         NO_TIMEZONE.copied(),
-    );
+    )
+    .unwrap();
     assert_eq!(dates.len(), groups.len());
     assert_eq!(groups[0], [0, 1]); // bound: 22:00 -> 24:00     time: 24:00
     assert_eq!(groups[1], [0, 2]); // bound: 22:30 -> 00:30     time: 00:30
@@ -665,7 +666,8 @@ fn test_rolling_lookback() {
         ClosedWindow::Right,
         TimeUnit::Milliseconds,
         NO_TIMEZONE.copied(),
-    );
+    )
+    .unwrap();
     assert_eq!(dates.len(), groups.len());
     assert_eq!(groups[0], [0, 3]);
     assert_eq!(groups[1], [0, 4]);
@@ -685,7 +687,8 @@ fn test_rolling_lookback() {
         ClosedWindow::Right,
         TimeUnit::Milliseconds,
         NO_TIMEZONE.copied(),
-    );
+    )
+    .unwrap();
     assert_eq!(dates.len(), groups.len());
     assert_eq!(groups[0], [0, 5]);
     assert_eq!(groups[1], [1, 5]);
@@ -716,7 +719,8 @@ fn test_rolling_lookback() {
             0,
             None,
         )
-        .collect::<Vec<_>>();
+        .collect::<PolarsResult<Vec<_>>>()
+        .unwrap();
         let g1 = groupby_values_iter_partial_lookbehind(
             period,
             offset,
@@ -725,7 +729,8 @@ fn test_rolling_lookback() {
             tu,
             NO_TIMEZONE.copied(),
         )
-        .collect::<Vec<_>>();
+        .collect::<PolarsResult<Vec<_>>>()
+        .unwrap();
         assert_eq!(g0, g1);
 
         let offset = Duration::parse("-2h");
@@ -738,7 +743,8 @@ fn test_rolling_lookback() {
             NO_TIMEZONE.copied(),
             0,
         )
-        .collect::<Vec<_>>();
+        .collect::<PolarsResult<Vec<_>>>()
+        .unwrap();
         let g1 = groupby_values_iter_partial_lookbehind(
             period,
             offset,
@@ -747,7 +753,8 @@ fn test_rolling_lookback() {
             tu,
             NO_TIMEZONE.copied(),
         )
-        .collect::<Vec<_>>();
+        .collect::<PolarsResult<Vec<_>>>()
+        .unwrap();
         assert_eq!(g0, g1);
     }
 }

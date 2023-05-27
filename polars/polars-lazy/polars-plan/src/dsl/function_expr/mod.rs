@@ -2,6 +2,8 @@
 mod abs;
 #[cfg(feature = "arg_where")]
 mod arg_where;
+#[cfg(feature = "dtype-array")]
+mod array;
 mod binary;
 mod boolean;
 mod bounds;
@@ -14,6 +16,8 @@ mod cum;
 mod datetime;
 mod dispatch;
 mod fill_null;
+#[cfg(feature = "fused")]
+mod fused;
 mod list;
 #[cfg(feature = "log")]
 mod log;
@@ -44,6 +48,10 @@ mod unique;
 
 use std::fmt::{Display, Formatter};
 
+#[cfg(feature = "dtype-array")]
+pub(super) use array::ArrayFunction;
+#[cfg(feature = "fused")]
+pub(crate) use fused::FusedOperator;
 pub(super) use list::ListFunction;
 use polars_core::prelude::*;
 use schema::FieldsMapper;
@@ -107,6 +115,8 @@ pub enum FunctionExpr {
         max: Option<AnyValue<'static>>,
     },
     ListExpr(ListFunction),
+    #[cfg(feature = "dtype-array")]
+    ArrayExpr(ArrayFunction),
     #[cfg(feature = "dtype-struct")]
     StructExpr(StructFunction),
     #[cfg(feature = "top_k")]
@@ -142,8 +152,6 @@ pub enum FunctionExpr {
     Diff(i64, NullBehavior),
     #[cfg(feature = "interpolate")]
     Interpolate(InterpolationMethod),
-    #[cfg(feature = "dot_product")]
-    Dot,
     #[cfg(feature = "log")]
     Entropy {
         base: f64,
@@ -168,6 +176,8 @@ pub enum FunctionExpr {
     Ceil,
     UpperBound,
     LowerBound,
+    #[cfg(feature = "fused")]
+    Fused(fused::FusedOperator),
 }
 
 impl Display for FunctionExpr {
@@ -231,8 +241,6 @@ impl Display for FunctionExpr {
             Diff(_, _) => "diff",
             #[cfg(feature = "interpolate")]
             Interpolate(_) => "interpolate",
-            #[cfg(feature = "dot_product")]
-            Dot => "dot",
             #[cfg(feature = "log")]
             Entropy { .. } => "entropy",
             #[cfg(feature = "log")]
@@ -256,6 +264,10 @@ impl Display for FunctionExpr {
             Ceil => "ceil",
             UpperBound => "upper_bound",
             LowerBound => "lower_bound",
+            #[cfg(feature = "fused")]
+            Fused(fused) => return Display::fmt(fused, f),
+            #[cfg(feature = "dtype-array")]
+            ArrayExpr(af) => return Display::fmt(af, f),
         };
         write!(f, "{s}")
     }
@@ -411,6 +423,15 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
                     Sum => map!(list::sum),
                 }
             }
+            #[cfg(feature = "dtype-array")]
+            ArrayExpr(lf) => {
+                use ArrayFunction::*;
+                match lf {
+                    Min => map!(array::min),
+                    Max => map!(array::max),
+                    Sum => map!(array::sum),
+                }
+            }
             #[cfg(feature = "dtype-struct")]
             StructExpr(sf) => {
                 use StructFunction::*;
@@ -443,10 +464,6 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
             Interpolate(method) => {
                 map!(dispatch::interpolate, method)
             }
-            #[cfg(feature = "dot_product")]
-            Dot => {
-                map_as_slice!(dispatch::dot_impl)
-            }
             #[cfg(feature = "log")]
             Entropy { base, normalize } => map!(log::entropy, base, normalize),
             #[cfg(feature = "log")]
@@ -464,6 +481,8 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
             Ceil => map!(round::ceil),
             UpperBound => map!(bounds::upper_bound),
             LowerBound => map!(bounds::lower_bound),
+            #[cfg(feature = "fused")]
+            Fused(op) => map_as_slice!(fused::fused, op),
         }
     }
 }
@@ -499,8 +518,8 @@ impl From<StringFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
                 map!(strings::rjust, width, fillchar)
             }
             #[cfg(feature = "temporal")]
-            Strptime(options) => {
-                map!(strings::strptime, &options)
+            Strptime(dtype, options) => {
+                map!(strings::strptime, dtype.clone(), &options)
             }
             #[cfg(feature = "concat_str")]
             ConcatVertical(delimiter) => map!(strings::concat, &delimiter),
@@ -515,6 +534,8 @@ impl From<StringFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
             RStrip(matches) => map!(strings::rstrip, matches.as_deref()),
             #[cfg(feature = "string_from_radix")]
             FromRadix(radix, strict) => map!(strings::from_radix, radix, strict),
+            Slice(start, length) => map!(strings::str_slice, start, length),
+            Explode => map!(strings::explode),
         }
     }
 }
@@ -562,6 +583,10 @@ impl From<TemporalFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
             Nanosecond => map!(datetime::nanosecond),
             TimeStamp(tu) => map!(datetime::timestamp, tu),
             Truncate(every, offset) => map!(datetime::truncate, &every, &offset),
+            #[cfg(feature = "date_offset")]
+            MonthStart => map!(datetime::month_start),
+            #[cfg(feature = "date_offset")]
+            MonthEnd => map!(datetime::month_end),
             Round(every, offset) => map!(datetime::round, &every, &offset),
             #[cfg(feature = "timezones")]
             CastTimezone(tz, use_earliest) => {
@@ -570,18 +595,22 @@ impl From<TemporalFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
             #[cfg(feature = "timezones")]
             TzLocalize(tz) => map!(datetime::tz_localize, &tz),
             Combine(tu) => map_as_slice!(temporal::combine, tu),
-            DateRange {
-                name,
-                every,
-                closed,
-                tz,
-            } => {
+            DateRange { every, closed, tz } => {
                 map_as_slice!(
-                    datetime::date_range_dispatch,
-                    name.as_ref(),
+                    temporal::temporal_range_dispatch,
+                    "date",
                     every,
                     closed,
                     tz.clone()
+                )
+            }
+            TimeRange { every, closed } => {
+                map_as_slice!(
+                    temporal::temporal_range_dispatch,
+                    "time",
+                    every,
+                    closed,
+                    None
                 )
             }
         }

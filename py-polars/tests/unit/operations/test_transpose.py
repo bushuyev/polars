@@ -1,7 +1,10 @@
 from datetime import date, datetime
 from typing import Iterator
 
+import pytest
+
 import polars as pl
+from polars.exceptions import ComputeError
 from polars.testing import assert_frame_equal
 
 
@@ -16,6 +19,21 @@ def test_transpose_supertype() -> None:
         }
     )
     assert_frame_equal(result, expected)
+
+
+def test_transpose_tz_naive_and_tz_aware() -> None:
+    df = pl.DataFrame(
+        {
+            "a": [datetime(2020, 1, 1)],
+            "b": [datetime(2020, 1, 1)],
+        }
+    )
+    df = df.with_columns(pl.col("b").dt.replace_time_zone("Asia/Kathmandu"))
+    with pytest.raises(
+        ComputeError,
+        match=r"failed to determine supertype of datetime\[μs\] and datetime\[μs, Asia/Kathmandu\]",
+    ):
+        df.transpose()
 
 
 def test_transpose_struct() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,23 @@ def test_write_json_categoricals() -> None:
         df.write_json(row_oriented=True, file=None)
         == '[{"column":"test1"},{"column":"test2"},{"column":"test3"},{"column":"test4"}]'
     )
+
+
+def test_json_supertype_infer() -> None:
+    json_string = """[
+{"c":[{"b": [], "a": "1"}]},
+{"c":[{"b":[]}]},
+{"c":[{"b":["1"], "a": "1"}]}]
+"""
+    python_infer = pl.from_records(json.loads(json_string))
+    polars_infer = pl.read_json(io.StringIO(json_string))
+    assert_frame_equal(python_infer, polars_infer)
+
+
+def test_json_sliced_list_serialization() -> None:
+    data = {"col1": [0, 2], "col2": [[3, 4, 5], [6, 7, 8]]}
+    df = pl.DataFrame(data)
+    f = io.BytesIO()
+    sliced_df = df[1, :]
+    sliced_df.write_ndjson(f)
+    assert f.getvalue() == b'{"col1":2,"col2":[6,7,8]}\n'

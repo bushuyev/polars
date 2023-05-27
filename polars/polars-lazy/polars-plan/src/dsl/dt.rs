@@ -7,14 +7,22 @@ use crate::prelude::function_expr::TemporalFunction;
 pub struct DateLikeNameSpace(pub(crate) Expr);
 
 impl DateLikeNameSpace {
-    /// Format Date/datetime with a formatting rule
+    /// Convert from Date/Time/Datetime into Utf8 with the given format.
     /// See [chrono strftime/strptime](https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html).
-    pub fn strftime(self, format: &str) -> Expr {
+    pub fn to_string(self, format: &str) -> Expr {
         let format = format.to_string();
-        let function = move |s: Series| s.strftime(&format).map(Some);
+        let function = move |s: Series| TemporalMethods::to_string(&s, &format).map(Some);
         self.0
             .map(function, GetOutput::from_type(DataType::Utf8))
-            .with_fmt("strftime")
+            .with_fmt("to_string")
+    }
+
+    /// Convert from Date/Time/Datetime into Utf8 with the given format.
+    /// See [chrono strftime/strptime](https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html).
+    ///
+    /// Alias for `to_string`.
+    pub fn strftime(self, format: &str) -> Expr {
+        self.to_string(format)
     }
 
     /// Change the underlying [`TimeUnit`]. And update the data accordingly.
@@ -225,6 +233,20 @@ impl DateLikeNameSpace {
             .map_private(FunctionExpr::TemporalExpr(TemporalFunction::Truncate(
                 every, offset,
             )))
+    }
+
+    // roll backward to the first day of the month
+    #[cfg(feature = "date_offset")]
+    pub fn month_start(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::TemporalExpr(TemporalFunction::MonthStart))
+    }
+
+    // roll forward to the last day of the month
+    #[cfg(feature = "date_offset")]
+    pub fn month_end(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::TemporalExpr(TemporalFunction::MonthEnd))
     }
 
     pub fn round<S: AsRef<str>>(self, every: S, offset: S) -> Expr {

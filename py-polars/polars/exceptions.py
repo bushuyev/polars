@@ -66,10 +66,31 @@ class TooManyRowsReturnedError(RowsError):
     """Exception raised when more rows than expected are returned."""
 
 
+class TimeZoneAwareConstructorWarning(Warning):
+    """
+    Warning raised when constructing a Series from time-zone-aware datetimes.
+
+    In a future version of polars, these will be converted to UTC.
+    """
+
+
+class ChronoFormatWarning(Warning):
+    """
+    Warning raised when a chrono format string contains dubious patterns.
+
+    Polars uses Rust's chrono crate to convert between string data and temporal data.
+    The patterns used by chrono differ slightly from Python's built-in datetime module.
+    Refer to the `chrono strftime documentation
+    <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>`_ for the full
+    specification.
+    """
+
+
 __all__ = [
     "ArrowError",
     "ColumnNotFoundError",
     "ComputeError",
+    "ChronoFormatWarning",
     "DuplicateError",
     "InvalidOperationError",
     "NoDataError",

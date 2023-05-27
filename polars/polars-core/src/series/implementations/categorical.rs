@@ -107,11 +107,10 @@ impl private::PrivateSeries for SeriesWrap<CategoricalChunked> {
 
     unsafe fn agg_list(&self, groups: &GroupsProxy) -> Series {
         // we cannot cast and dispatch as the inner type of the list would be incorrect
-        self.0
-            .logical()
-            .agg_list(groups)
-            .cast(&DataType::List(Box::new(self.dtype().clone())))
-            .unwrap()
+        let list = self.0.logical().agg_list(groups);
+        let mut list = list.list().unwrap().clone();
+        list.to_physical(self.dtype().clone());
+        list.into_series()
     }
 
     fn zip_outer_join_column(
@@ -149,8 +148,8 @@ impl private::PrivateSeries for SeriesWrap<CategoricalChunked> {
         }
     }
 
-    fn arg_sort_multiple(&self, by: &[Series], descending: &[bool]) -> PolarsResult<IdxCa> {
-        self.0.arg_sort_multiple(by, descending)
+    fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
+        self.0.arg_sort_multiple(options)
     }
 }
 
@@ -234,11 +233,6 @@ impl SeriesTrait for SeriesWrap<CategoricalChunked> {
     fn take_iter(&self, iter: &mut dyn TakeIterator) -> PolarsResult<Series> {
         let cats = self.0.logical().take(iter.into())?;
         Ok(self.finish_with_state(false, cats).into_series())
-    }
-
-    fn take_every(&self, n: usize) -> Series {
-        self.with_state(true, |cats| cats.take_every(n))
-            .into_series()
     }
 
     unsafe fn take_iter_unchecked(&self, iter: &mut dyn TakeIterator) -> Series {

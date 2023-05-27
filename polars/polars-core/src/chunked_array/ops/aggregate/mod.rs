@@ -106,7 +106,7 @@ where
     }
 
     fn min(&self) -> Option<T::Native> {
-        match self.is_sorted_flag2() {
+        match self.is_sorted_flag() {
             IsSorted::Ascending => {
                 self.first_non_null().and_then(|idx| {
                     // Safety:
@@ -135,7 +135,7 @@ where
     }
 
     fn max(&self) -> Option<T::Native> {
-        match self.is_sorted_flag2() {
+        match self.is_sorted_flag() {
             IsSorted::Ascending => {
                 self.last_non_null().and_then(|idx| {
                     // Safety:
@@ -444,7 +444,7 @@ impl ChunkAggSeries for BooleanChunked {
 
 impl Utf8Chunked {
     pub(crate) fn max_str(&self) -> Option<&str> {
-        match self.is_sorted_flag2() {
+        match self.is_sorted_flag() {
             IsSorted::Ascending => self.get(self.len() - 1),
             IsSorted::Descending => self.get(0),
             IsSorted::Not => self
@@ -454,7 +454,7 @@ impl Utf8Chunked {
         }
     }
     pub(crate) fn min_str(&self) -> Option<&str> {
-        match self.is_sorted_flag2() {
+        match self.is_sorted_flag() {
             IsSorted::Ascending => self.get(0),
             IsSorted::Descending => self.get(self.len() - 1),
             IsSorted::Not => self
@@ -510,6 +510,22 @@ impl ChunkAggSeries for ListChunked {
     }
     fn min_as_series(&self) -> Series {
         ListChunked::full_null_with_dtype(self.name(), 1, &self.inner_dtype()).into_series()
+    }
+}
+
+#[cfg(feature = "dtype-array")]
+impl ChunkAggSeries for ArrayChunked {
+    fn sum_as_series(&self) -> Series {
+        ArrayChunked::full_null_with_dtype(self.name(), 1, &self.inner_dtype(), self.width())
+            .into_series()
+    }
+    fn max_as_series(&self) -> Series {
+        ArrayChunked::full_null_with_dtype(self.name(), 1, &self.inner_dtype(), self.width())
+            .into_series()
+    }
+    fn min_as_series(&self) -> Series {
+        ArrayChunked::full_null_with_dtype(self.name(), 1, &self.inner_dtype(), self.width())
+            .into_series()
     }
 }
 

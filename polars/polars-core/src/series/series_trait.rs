@@ -17,6 +17,17 @@ pub enum IsSorted {
     Not,
 }
 
+impl IsSorted {
+    pub(crate) fn reverse(self) -> Self {
+        use IsSorted::*;
+        match self {
+            Ascending => Descending,
+            Descending => Ascending,
+            Not => Not,
+        }
+    }
+}
+
 macro_rules! invalid_operation_panic {
     ($op:ident, $s:expr) => {
         panic!(
@@ -167,7 +178,7 @@ pub(crate) mod private {
             invalid_operation_panic!(zip_with_same_type, self)
         }
 
-        fn arg_sort_multiple(&self, _by: &[Series], _descending: &[bool]) -> PolarsResult<IdxCa> {
+        fn arg_sort_multiple(&self, _options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
             polars_bail!(opq = arg_sort_multiple, self._dtype());
         }
     }
@@ -298,9 +309,6 @@ pub trait SeriesTrait:
 
     /// Aggregate all chunks to a contiguous array of memory.
     fn rechunk(&self) -> Series;
-
-    /// Take every nth value as a new Series
-    fn take_every(&self, n: usize) -> Series;
 
     /// Drop all null values and return a new Series.
     fn drop_nulls(&self) -> Series {
@@ -532,6 +540,10 @@ pub trait SeriesTrait:
     /// * `delimiter` - A string that will act as delimiter between values.
     fn str_concat(&self, _delimiter: &str) -> Utf8Chunked {
         invalid_operation_panic!(str_concat, self);
+    }
+
+    fn tile(&self, _n: usize) -> Series {
+        invalid_operation_panic!(tile, self);
     }
 }
 

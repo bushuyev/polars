@@ -37,6 +37,8 @@ use smartstring::alias::String as SmartString;
 use crate::frame::groupby::GroupsIndicator;
 #[cfg(feature = "row_hash")]
 use crate::hashing::df_rows_to_hashes_threaded_vertical;
+#[cfg(feature = "zip_with")]
+use crate::prelude::min_max_binary::min_max_binary_series;
 use crate::prelude::sort::{argsort_multiple_row_fmt, prepare_arg_sort};
 use crate::series::IsSorted;
 use crate::POOL;
@@ -51,7 +53,6 @@ pub enum NullStrategy {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum UniqueKeepStrategy {
     /// Keep the first unique row.
-    #[default]
     First,
     /// Keep the last unique row.
     Last,
@@ -59,6 +60,7 @@ pub enum UniqueKeepStrategy {
     None,
     /// Keep any of the unique rows
     /// This allows more optimizations
+    #[default]
     Any,
 }
 
@@ -137,7 +139,6 @@ pub enum UniqueKeepStrategy {
 /// # Ok::<(), PolarsError>(())
 /// ```
 #[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct DataFrame {
     pub(crate) columns: Vec<Series>,
 }
@@ -477,7 +478,7 @@ impl DataFrame {
     }
 
     /// Ensure all the chunks in the DataFrame are aligned.
-    pub fn rechunk(&mut self) -> &mut Self {
+    pub fn align_chunks(&mut self) -> &mut Self {
         if self.should_rechunk() {
             self.as_single_chunk_par()
         } else {
@@ -496,13 +497,13 @@ impl DataFrame {
     ///
     /// let f1: Field = Field::new("Thing", DataType::Utf8);
     /// let f2: Field = Field::new("Diameter (m)", DataType::Float64);
-    /// let sc: Schema = Schema::from(vec![f1, f2].into_iter());
+    /// let sc: Schema = Schema::from_iter(vec![f1, f2]);
     ///
     /// assert_eq!(df.schema(), sc);
     /// # Ok::<(), PolarsError>(())
     /// ```
     pub fn schema(&self) -> Schema {
-        Schema::from(self.iter().map(|s| s.field().into_owned()))
+        self.iter().map(|s| s.field().into_owned()).collect()
     }
 
     /// Get a reference to the `DataFrame` columns.
@@ -818,7 +819,7 @@ impl DataFrame {
 
     /// Concatenate a `DataFrame` to this `DataFrame` and return as newly allocated `DataFrame`.
     ///
-    /// If many `vstack` operations are done, it is recommended to call [`DataFrame::rechunk`].
+    /// If many `vstack` operations are done, it is recommended to call [`DataFrame::align_chunks`].
     ///
     /// # Example
     ///
@@ -864,7 +865,7 @@ impl DataFrame {
 
     /// Concatenate a DataFrame to this DataFrame
     ///
-    /// If many `vstack` operations are done, it is recommended to call [`DataFrame::rechunk`].
+    /// If many `vstack` operations are done, it is recommended to call [`DataFrame::align_chunks`].
     ///
     /// # Example
     ///
@@ -948,7 +949,7 @@ impl DataFrame {
     ///
     /// Prefer `vstack` over `extend` when you want to append many times before doing a query. For instance
     /// when you read in multiple files and when to store them in a single `DataFrame`. In the latter case, finish the sequence
-    /// of `append` operations with a [`rechunk`](Self::rechunk).
+    /// of `append` operations with a [`rechunk`](Self::align_chunks).
     pub fn extend(&mut self, other: &DataFrame) -> PolarsResult<()> {
         polars_ensure!(
             self.width() == other.width(),
@@ -1794,8 +1795,34 @@ impl DataFrame {
         slice: Option<(i64, usize)>,
         parallel: bool,
     ) -> PolarsResult<Self> {
+        // note that the by_column argument also contains evaluated expression from polars-lazy
+        // that may not even be present in this dataframe.
+
+        // therefore when we try to set the first columns as sorted, we ignore the error
+        // as expressions are not present (they are renamed to _POLARS_SORT_COLUMN_i.
+        let first_descending = descending[0];
+        let first_by_column = by_column[0].name().to_string();
+
+        let set_sorted = |df: &mut DataFrame| {
+            // Mark the first sort column as sorted
+            // if the column did not exists it is ok, because we sorted by an expression
+            // not present in the dataframe
+            let _ = df.apply(&first_by_column, |s| {
+                let mut s = s.clone();
+                if first_descending {
+                    s.set_sorted_flag(IsSorted::Descending)
+                } else {
+                    s.set_sorted_flag(IsSorted::Ascending)
+                }
+                s
+            });
+        };
+
         if self.height() == 0 {
-            return Ok(self.clone());
+            let mut out = self.clone();
+            set_sorted(&mut out);
+
+            return Ok(out);
         }
 
         if let Some((0, k)) = slice {
@@ -1814,13 +1841,6 @@ impl DataFrame {
         // a lot of indirection in both sorting and take
         let mut df = self.clone();
         let df = df.as_single_chunk_par();
-        // note that the by_column argument also contains evaluated expression from polars-lazy
-        // that may not even be present in this dataframe.
-
-        // therefore when we try to set the first columns as sorted, we ignore the error
-        // as expressions are not present (they are renamed to _POLARS_SORT_COLUMN_i.
-        let first_descending = descending[0];
-        let first_by_column = by_column[0].name().to_string();
         let mut take = match (by_column.len(), has_struct) {
             (1, false) => {
                 let s = &by_column[0];
@@ -1846,8 +1866,13 @@ impl DataFrame {
                 if nulls_last || has_struct || std::env::var("POLARS_ROW_FMT_SORT").is_ok() {
                     argsort_multiple_row_fmt(&by_column, descending, nulls_last, parallel)?
                 } else {
-                    let (first, by_column, descending) = prepare_arg_sort(by_column, descending)?;
-                    first.arg_sort_multiple(&by_column, &descending)?
+                    let (first, other, descending) = prepare_arg_sort(by_column, descending)?;
+                    let options = SortMultipleOptions {
+                        other,
+                        descending,
+                        multithreaded: parallel,
+                    };
+                    first.arg_sort_multiple(&options)?
                 }
             }
         };
@@ -1859,18 +1884,7 @@ impl DataFrame {
         // Safety:
         // the created indices are in bounds
         let mut df = unsafe { df.take_unchecked_impl(&take, parallel) };
-        // Mark the first sort column as sorted
-        // if the column did not exists it is ok, because we sorted by an expression
-        // not present in the dataframe
-        let _ = df.apply(&first_by_column, |s| {
-            let mut s = s.clone();
-            if first_descending {
-                s.set_sorted_flag(IsSorted::Descending)
-            } else {
-                s.set_sorted_flag(IsSorted::Ascending)
-            }
-            s
-        });
+        set_sorted(&mut df);
         Ok(df)
     }
 
@@ -2784,10 +2798,7 @@ impl DataFrame {
     /// Aggregate the column horizontally to their min values.
     #[cfg(feature = "zip_with")]
     pub fn hmin(&self) -> PolarsResult<Option<Series>> {
-        let min_fn = |acc: &Series, s: &Series| {
-            let mask = acc.lt(s)? & acc.is_not_null() | s.is_null();
-            acc.zip_with(&mask, s)
-        };
+        let min_fn = |acc: &Series, s: &Series| min_max_binary_series(acc, s, true);
 
         match self.columns.len() {
             0 => Ok(None),
@@ -2813,10 +2824,7 @@ impl DataFrame {
     /// Aggregate the column horizontally to their max values.
     #[cfg(feature = "zip_with")]
     pub fn hmax(&self) -> PolarsResult<Option<Series>> {
-        let max_fn = |acc: &Series, s: &Series| {
-            let mask = acc.gt(s)? & acc.is_not_null() | s.is_null();
-            acc.zip_with(&mask, s)
-        };
+        let max_fn = |acc: &Series, s: &Series| min_max_binary_series(acc, s, false);
 
         match self.columns.len() {
             0 => Ok(None),

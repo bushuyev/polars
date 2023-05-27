@@ -198,8 +198,8 @@ impl private::PrivateSeries for SeriesWrap<DurationChunked> {
         self.0.group_tuples(multithreaded, sorted)
     }
 
-    fn arg_sort_multiple(&self, by: &[Series], descending: &[bool]) -> PolarsResult<IdxCa> {
-        self.0.deref().arg_sort_multiple(by, descending)
+    fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
+        self.0.deref().arg_sort_multiple(options)
     }
 }
 
@@ -290,13 +290,6 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
             .map(|ca| ca.into_duration(self.0.time_unit()).into_series())
     }
 
-    fn take_every(&self, n: usize) -> Series {
-        self.0
-            .take_every(n)
-            .into_duration(self.0.time_unit())
-            .into_series()
-    }
-
     unsafe fn take_iter_unchecked(&self, iter: &mut dyn TakeIterator) -> Series {
         ChunkTake::take_unchecked(self.0.deref(), iter.into())
             .into_duration(self.0.time_unit())
@@ -309,7 +302,7 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
         if self.0.is_sorted_ascending_flag()
             && (idx.is_sorted_ascending_flag() || idx.is_sorted_descending_flag())
         {
-            out.set_sorted_flag(idx.is_sorted_flag2())
+            out.set_sorted_flag(idx.is_sorted_flag())
         }
 
         Ok(out.into_duration(self.0.time_unit()).into_series())
@@ -429,28 +422,23 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
         self.0.min_as_series().into_duration(self.0.time_unit())
     }
     fn median_as_series(&self) -> Series {
-        Int32Chunked::full_null(self.name(), 1)
-            .cast(self.dtype())
+        self.0
+            .median_as_series()
+            .cast(&self.dtype().to_physical())
             .unwrap()
-    }
-    fn var_as_series(&self, _ddof: u8) -> Series {
-        Int32Chunked::full_null(self.name(), 1)
-            .cast(self.dtype())
-            .unwrap()
-    }
-    fn std_as_series(&self, _ddof: u8) -> Series {
-        Int32Chunked::full_null(self.name(), 1)
             .cast(self.dtype())
             .unwrap()
     }
     fn quantile_as_series(
         &self,
-        _quantile: f64,
-        _interpol: QuantileInterpolOptions,
+        quantile: f64,
+        interpol: QuantileInterpolOptions,
     ) -> PolarsResult<Series> {
-        Ok(Int32Chunked::full_null(self.name(), 1)
+        self.0
+            .quantile_as_series(quantile, interpol)?
+            .cast(&self.dtype().to_physical())
+            .unwrap()
             .cast(self.dtype())
-            .unwrap())
     }
 
     fn clone_inner(&self) -> Arc<dyn SeriesTrait> {

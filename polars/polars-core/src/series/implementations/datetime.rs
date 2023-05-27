@@ -162,8 +162,8 @@ impl private::PrivateSeries for SeriesWrap<DatetimeChunked> {
         self.0.group_tuples(multithreaded, sorted)
     }
 
-    fn arg_sort_multiple(&self, by: &[Series], descending: &[bool]) -> PolarsResult<IdxCa> {
-        self.0.deref().arg_sort_multiple(by, descending)
+    fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
+        self.0.deref().arg_sort_multiple(options)
     }
 }
 
@@ -261,13 +261,6 @@ impl SeriesTrait for SeriesWrap<DatetimeChunked> {
         })
     }
 
-    fn take_every(&self, n: usize) -> Series {
-        self.0
-            .take_every(n)
-            .into_datetime(self.0.time_unit(), self.0.time_zone().clone())
-            .into_series()
-    }
-
     unsafe fn take_iter_unchecked(&self, iter: &mut dyn TakeIterator) -> Series {
         ChunkTake::take_unchecked(self.0.deref(), iter.into())
             .into_datetime(self.0.time_unit(), self.0.time_zone().clone())
@@ -280,7 +273,7 @@ impl SeriesTrait for SeriesWrap<DatetimeChunked> {
         if self.0.is_sorted_ascending_flag()
             && (idx.is_sorted_ascending_flag() || idx.is_sorted_descending_flag())
         {
-            out.set_sorted_flag(idx.is_sorted_flag2())
+            out.set_sorted_flag(idx.is_sorted_flag())
         }
 
         Ok(out
@@ -323,13 +316,13 @@ impl SeriesTrait for SeriesWrap<DatetimeChunked> {
     fn cast(&self, data_type: &DataType) -> PolarsResult<Series> {
         match (data_type, self.0.time_unit()) {
             (DataType::Utf8, TimeUnit::Milliseconds) => {
-                Ok(self.0.strftime("%F %T%.3f")?.into_series())
+                Ok(self.0.to_string("%F %T%.3f")?.into_series())
             }
             (DataType::Utf8, TimeUnit::Microseconds) => {
-                Ok(self.0.strftime("%F %T%.6f")?.into_series())
+                Ok(self.0.to_string("%F %T%.6f")?.into_series())
             }
             (DataType::Utf8, TimeUnit::Nanoseconds) => {
-                Ok(self.0.strftime("%F %T%.9f")?.into_series())
+                Ok(self.0.to_string("%F %T%.9f")?.into_series())
             }
             _ => self.0.cast(data_type),
         }

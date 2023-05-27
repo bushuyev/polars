@@ -341,6 +341,21 @@ fn test_new_line_escape() {
 }
 
 #[test]
+fn test_new_line_escape_on_header() {
+    let s = r#""length","header with
+new line character","width"
+5.1,3.5,1.4
+"#;
+    let file: Cursor<&str> = Cursor::new(s);
+    let df: DataFrame = CsvReader::new(file).has_header(true).finish().unwrap();
+    assert_eq!(df.shape(), (1, 3));
+    assert_eq!(
+        df.get_column_names(),
+        &["length", "header with\nnew line character", "width"]
+    );
+}
+
+#[test]
 fn test_quoted_numeric() {
     // CSV fields may be quoted
     let s = r#""foo","bar"
@@ -357,7 +372,7 @@ fn test_quoted_numeric() {
 #[test]
 fn test_empty_bytes_to_dataframe() {
     let fields = vec![Field::new("test_field", DataType::Utf8)];
-    let schema = Schema::from(fields.into_iter());
+    let schema = Schema::from_iter(fields);
     let file = Cursor::new(vec![]);
 
     let result = CsvReader::new(file)
@@ -392,14 +407,11 @@ fn test_missing_value() {
     let file = Cursor::new(csv);
     let df = CsvReader::new(file)
         .has_header(true)
-        .with_schema(Arc::new(Schema::from(
-            vec![
-                Field::new("foo", DataType::UInt32),
-                Field::new("bar", DataType::UInt32),
-                Field::new("ham", DataType::UInt32),
-            ]
-            .into_iter(),
-        )))
+        .with_schema(Arc::new(Schema::from_iter([
+            Field::new("foo", DataType::UInt32),
+            Field::new("bar", DataType::UInt32),
+            Field::new("ham", DataType::UInt32),
+        ])))
         .finish()
         .unwrap();
     assert_eq!(df.column("ham").unwrap().len(), 3)
@@ -417,13 +429,10 @@ AUDCAD,1616455921,0.96212,0.95666,1
     let file = Cursor::new(csv);
     let df = CsvReader::new(file)
         .has_header(true)
-        .with_dtypes(Some(Arc::new(Schema::from(
-            vec![Field::new(
-                "b",
-                DataType::Datetime(TimeUnit::Nanoseconds, None),
-            )]
-            .into_iter(),
-        ))))
+        .with_dtypes(Some(Arc::new(Schema::from_iter([Field::new(
+            "b",
+            DataType::Datetime(TimeUnit::Nanoseconds, None),
+        )]))))
         .finish()?;
 
     assert_eq!(

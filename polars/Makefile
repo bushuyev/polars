@@ -8,6 +8,10 @@ fmt:
 	cargo fmt --all
 	dprint fmt
 
+generate_test_files:
+	cargo run -p polars-cli "select * from read_csv('../examples/datasets/foods1.csv')" -o parquet > ../examples/datasets/foods1.parquet
+	cargo run -p polars-cli "select * from read_csv('../examples/datasets/foods1.csv')" -o arrow > ../examples/datasets/foods1.ipc
+
 check:
 	cargo check --all-features \
 		-p polars-core \
@@ -17,7 +21,8 @@ check:
 		-p polars-time \
 		-p polars-error \
 		-p polars-ops \
-		-p polars-sql
+		-p polars-sql \
+		-p polars-json
 
 clippy:
 	cargo clippy --all-features \
@@ -30,7 +35,8 @@ clippy:
 		-p polars-error \
 		-p polars-row \
 		-p polars-time \
-		-p polars-sql
+		-p polars-sql \
+		-p polars-json
 
 clippy-default:
 	cargo clippy
@@ -70,7 +76,8 @@ test-doc:
 	    -p polars-lazy \
 	    -p polars-io \
 	    -p polars-core \
-	    -p polars-arrow
+	    -p polars-arrow \
+			-p polars-sql
 
 pre-commit: fmt clippy clippy-default  ## Run autoformatting and linting
 
@@ -93,35 +100,24 @@ doctest:
 	cargo doc --all-features -p polars-io
 	cargo doc --all-features -p polars-lazy
 	cargo doc --features=docs-selection -p polars
+	cargo doc --all-features -p polars-sql
 
 publish:
-#	cargo publish --allow-dirty -p polars-error
-#	sleep 20
-#	cargo publish --allow-dirty -p polars-utils
-#	sleep 20
-#	cargo publish --allow-dirty -p polars-row
-#	sleep 20
+	cargo publish --allow-dirty -p polars-error
+	cargo publish --allow-dirty -p polars-utils
+	cargo publish --allow-dirty -p polars-row
 	cargo publish --allow-dirty -p polars-arrow
-	sleep 20
 	cargo publish --allow-dirty -p polars-core
-	sleep 20
 	cargo publish --allow-dirty -p polars-ops
-	sleep 20
 	cargo publish --allow-dirty -p polars-time
-	sleep 20
 	cargo publish --allow-dirty -p polars-io
-	sleep 20
 	cargo publish --allow-dirty -p polars-plan
-	sleep 20
 	cargo publish --allow-dirty -p polars-pipe
-	sleep 20
 	cargo publish --allow-dirty -p polars-lazy
-	sleep 20
 	cargo publish --allow-dirty -p polars-algo
-	sleep 20
 	cargo publish --allow-dirty -p polars-sql
-	sleep 20
 	cargo publish --allow-dirty -p polars
+	cd .. && cargo publish --allow-dirty -p polars-cli
 
 .PHONY: help
 help:  ## Display this help screen

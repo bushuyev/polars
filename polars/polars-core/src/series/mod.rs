@@ -342,12 +342,11 @@ impl Series {
             .and_then(|s| s.f64().unwrap().get(0).and_then(T::from))
     }
 
-    /// Explode a list or utf8 Series. This expands every item to a new row..
+    /// Explode a list Series. This expands every item to a new row..
     pub fn explode(&self) -> PolarsResult<Series> {
         match self.dtype() {
             DataType::List(_) => self.list().unwrap().explode(),
-            DataType::Utf8 => self.utf8().unwrap().explode(),
-            _ => polars_bail!(opq = explode, self.dtype()),
+            _ => Ok(self.clone()),
         }
     }
 
@@ -402,6 +401,7 @@ impl Series {
     /// * Datetime-> Int64
     /// * Time -> Int64
     /// * Categorical -> UInt32
+    /// * List(inner) -> List(physical of inner)
     ///
     pub fn to_physical_repr(&self) -> Cow<Series> {
         use DataType::*;
@@ -410,6 +410,7 @@ impl Series {
             Datetime(_, _) | Duration(_) | Time => Cow::Owned(self.cast(&Int64).unwrap()),
             #[cfg(feature = "dtype-categorical")]
             Categorical(_) => Cow::Owned(self.cast(&UInt32).unwrap()),
+            List(inner) => Cow::Owned(self.cast(&List(Box::new(inner.to_physical()))).unwrap()),
             _ => Cow::Borrowed(self),
         }
     }
@@ -1012,17 +1013,23 @@ where
     T: 'static + PolarsDataType,
 {
     fn as_ref(&self) -> &ChunkedArray<T> {
-        if &T::get_dtype() == self.dtype() ||
-            // needed because we want to get ref of List no matter what the inner type is.
-            (matches!(T::get_dtype(), DataType::List(_)) && matches!(self.dtype(), DataType::List(_)))
-        {
-            unsafe { &*(self as *const dyn SeriesTrait as *const ChunkedArray<T>) }
-        } else {
-            panic!(
-                "implementation error, cannot get ref {:?} from {:?}",
-                T::get_dtype(),
-                self.dtype()
-            )
+        match T::get_dtype() {
+            #[cfg(feature = "dtype-decimal")]
+            DataType::Decimal(None, None) => panic!("impl error"),
+            _ => {
+                if &T::get_dtype() == self.dtype() ||
+                    // needed because we want to get ref of List no matter what the inner type is.
+                    (matches!(T::get_dtype(), DataType::List(_)) && matches!(self.dtype(), DataType::List(_)))
+                {
+                    unsafe { &*(self as *const dyn SeriesTrait as *const ChunkedArray<T>) }
+                } else {
+                    panic!(
+                        "implementation error, cannot get ref {:?} from {:?}",
+                        T::get_dtype(),
+                        self.dtype()
+                    );
+                }
+            }
         }
     }
 }

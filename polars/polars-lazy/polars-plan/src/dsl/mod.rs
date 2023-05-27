@@ -5,6 +5,9 @@ pub mod cat;
 #[cfg(feature = "dtype-categorical")]
 pub use cat::*;
 mod arithmetic;
+mod arity;
+#[cfg(feature = "dtype-array")]
+mod array;
 pub mod binary;
 #[cfg(feature = "temporal")]
 pub mod dt;
@@ -26,6 +29,7 @@ mod struct_;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+pub use arity::*;
 pub use expr::*;
 pub use function_expr::*;
 pub use functions::*;
@@ -46,146 +50,6 @@ use crate::prelude::*;
 use crate::utils::has_expr;
 #[cfg(feature = "is_in")]
 use crate::utils::has_root_literal_expr;
-
-/// Compute `op(l, r)` (or equivalently `l op r`). `l` and `r` must have types compatible with the Operator.
-pub fn binary_expr(l: Expr, op: Operator, r: Expr) -> Expr {
-    Expr::BinaryExpr {
-        left: Box::new(l),
-        op,
-        right: Box::new(r),
-    }
-}
-
-/// Intermediate state of `when(..).then(..).otherwise(..)` expr.
-#[derive(Clone)]
-pub struct When {
-    predicate: Expr,
-}
-
-/// Intermediate state of `when(..).then(..).otherwise(..)` expr.
-#[derive(Clone)]
-pub struct WhenThen {
-    predicate: Expr,
-    then: Expr,
-}
-
-/// Intermediate state of chain when then exprs.
-///
-/// ```text
-/// when(..).then(..)
-/// when(..).then(..)
-/// when(..).then(..)
-/// .otherwise(..)`
-/// ```
-#[derive(Clone)]
-#[must_use]
-pub struct WhenThenThen {
-    predicates: Vec<Expr>,
-    thens: Vec<Expr>,
-}
-
-impl When {
-    pub fn then<E: Into<Expr>>(self, expr: E) -> WhenThen {
-        WhenThen {
-            predicate: self.predicate,
-            then: expr.into(),
-        }
-    }
-}
-
-impl WhenThen {
-    pub fn when<E: Into<Expr>>(self, predicate: E) -> WhenThenThen {
-        WhenThenThen {
-            predicates: vec![self.predicate, predicate.into()],
-            thens: vec![self.then],
-        }
-    }
-
-    pub fn otherwise<E: Into<Expr>>(self, expr: E) -> Expr {
-        Expr::Ternary {
-            predicate: Box::new(self.predicate),
-            truthy: Box::new(self.then),
-            falsy: Box::new(expr.into()),
-        }
-    }
-}
-
-impl WhenThenThen {
-    pub fn then(mut self, expr: Expr) -> Self {
-        self.thens.push(expr);
-        self
-    }
-
-    pub fn when(mut self, predicate: Expr) -> Self {
-        self.predicates.push(predicate);
-        self
-    }
-
-    pub fn otherwise(self, expr: Expr) -> Expr {
-        // we iterate the preds/ exprs last in first out
-        // and nest them.
-        //
-        // // this expr:
-        //   when((col('x') == 'a')).then(1)
-        //         .when(col('x') == 'a').then(2)
-        //         .when(col('x') == 'b').then(3)
-        //         .otherwise(4)
-        //
-        // needs to become:
-        //       when((col('x') == 'a')).then(1)                        -
-        //         .otherwise(                                           |
-        //             when(col('x') == 'a').then(2)            -        |
-        //             .otherwise(                               |       |
-        //                 pl.when(col('x') == 'b').then(3)      |       |
-        //                 .otherwise(4)                         | inner | outer
-        //             )                                         |       |
-        //         )                                            _|      _|
-        //
-        // by iterating lifo we first create
-        // `inner` and then assign that to `otherwise`,
-        // which will be used in the next layer `outer`
-        //
-
-        let pred_iter = self.predicates.into_iter().rev();
-        let mut then_iter = self.thens.into_iter().rev();
-
-        let mut otherwise = expr;
-
-        for e in pred_iter {
-            otherwise = Expr::Ternary {
-                predicate: Box::new(e),
-                truthy: Box::new(
-                    then_iter
-                        .next()
-                        .expect("expr expected, did you call when().then().otherwise?"),
-                ),
-                falsy: Box::new(otherwise),
-            }
-        }
-        if then_iter.next().is_some() {
-            panic!(
-                "this expr is not properly constructed. \
-            Every `when` should have an accompanied `then` call."
-            )
-        }
-        otherwise
-    }
-}
-
-/// Start a when-then-otherwise expression
-pub fn when<E: Into<Expr>>(predicate: E) -> When {
-    When {
-        predicate: predicate.into(),
-    }
-}
-
-pub fn ternary_expr(predicate: Expr, truthy: Expr, falsy: Expr) -> Expr {
-    Expr::Ternary {
-        predicate: Box::new(predicate),
-        truthy: Box::new(truthy),
-        falsy: Box::new(falsy),
-    }
-}
 
 impl Expr {
     /// Modify the Options passed to the `Function` node.
@@ -392,34 +256,7 @@ impl Expr {
 
     /// Explode the utf8/ list column
     pub fn explode(self) -> Self {
-        let has_filter = has_expr(&self, |e| matches!(e, Expr::Filter { .. }));
-
-        // if we explode right after a window function we don't self join, but just flatten
-        // the expression
-        if let Expr::Window {
-            function,
-            partition_by,
-            order_by,
-            mut options,
-        } = self
-        {
-            if has_filter {
-                panic!("A Filter of a window function is not allowed in combination with explode/flatten.\
-                The resulting column may not fit the DataFrame/ or the groups
-                ")
-            }
-
-            options.explode = true;
-
-            Expr::Explode(Box::new(Expr::Window {
-                function,
-                partition_by,
-                order_by,
-                options,
-            }))
-        } else {
-            Expr::Explode(Box::new(self))
-        }
+        Expr::Explode(Box::new(self))
     }
 
     /// Slice the Series.
@@ -655,12 +492,8 @@ impl Expr {
             output_type,
             options: FunctionOptions {
                 collect_groups: ApplyOptions::ApplyFlat,
-                input_wildcard_expansion: false,
-                auto_explode: false,
                 fmt_str: "map",
-                cast_to_supertypes: false,
-                allow_rename: false,
-                pass_name_to_apply: false,
+                ..Default::default()
             },
         }
     }
@@ -671,10 +504,6 @@ impl Expr {
             function: function_expr,
             options: FunctionOptions {
                 collect_groups: ApplyOptions::ApplyFlat,
-                input_wildcard_expansion: false,
-                auto_explode: false,
-                cast_to_supertypes: false,
-                allow_rename: false,
                 ..Default::default()
             },
         }
@@ -1059,6 +888,14 @@ impl Expr {
     /// ╰────────┴────────╯
     /// ```
     pub fn over<E: AsRef<[IE]>, IE: Into<Expr> + Clone>(self, partition_by: E) -> Self {
+        self.over_with_options(partition_by, Default::default())
+    }
+
+    pub fn over_with_options<E: AsRef<[IE]>, IE: Into<Expr> + Clone>(
+        self,
+        partition_by: E,
+        options: WindowOptions,
+    ) -> Self {
         let partition_by = partition_by
             .as_ref()
             .iter()
@@ -1068,7 +905,7 @@ impl Expr {
             function: Box::new(self),
             partition_by,
             order_by: None,
-            options: WindowOptions { explode: false },
+            options,
         }
     }
 
@@ -1245,12 +1082,10 @@ impl Expr {
         self.apply_private(BooleanFunction::IsFirst.into())
     }
 
-    #[cfg(feature = "dot_product")]
     fn dot_impl(self, other: Expr) -> Expr {
-        self.apply_many_private(FunctionExpr::Dot, &[other], true, true)
+        (self * other).sum()
     }
 
-    #[cfg(feature = "dot_product")]
     pub fn dot<E: Into<Expr>>(self, other: E) -> Expr {
         self.dot_impl(other.into())
     }
@@ -1885,6 +1720,20 @@ impl Expr {
         )
     }
 
+    /// Cache this expression, so that it is executed only once per context.
+    pub fn cache(self) -> Expr {
+        match &self {
+            // don't cache cheap no-ops
+            Expr::Column(_) => self,
+            Expr::Alias(input, _) if matches!(**input, Expr::Column(_)) => self,
+            _ => {
+                let input = Box::new(self);
+                let id = input.as_ref() as *const Expr as usize;
+                Self::Cache { input, id }
+            }
+        }
+    }
+
     #[cfg(feature = "row_hash")]
     /// Compute the hash of every element
     pub fn hash(self, k0: u64, k1: u64, k2: u64, k3: u64) -> Expr {
@@ -1904,17 +1753,30 @@ impl Expr {
     pub fn dt(self) -> dt::DateLikeNameSpace {
         dt::DateLikeNameSpace(self)
     }
-    pub fn arr(self) -> list::ListNameSpace {
+
+    pub fn list(self) -> list::ListNameSpace {
         list::ListNameSpace(self)
     }
+
+    /// Get the [`ArrayNameSpace`]
+    #[cfg(feature = "dtype-array")]
+    pub fn arr(self) -> array::ArrayNameSpace {
+        array::ArrayNameSpace(self)
+    }
+
+    /// Get the [`CategoricalNameSpace`]
     #[cfg(feature = "dtype-categorical")]
     pub fn cat(self) -> cat::CategoricalNameSpace {
         cat::CategoricalNameSpace(self)
     }
+
+    /// Get the [`StructNameSpace`]
     #[cfg(feature = "dtype-struct")]
     pub fn struct_(self) -> struct_::StructNameSpace {
         struct_::StructNameSpace(self)
     }
+
+    /// Get the [`MetaNameSpace`]
     #[cfg(feature = "meta")]
     pub fn meta(self) -> meta::MetaNameSpace {
         meta::MetaNameSpace(self)

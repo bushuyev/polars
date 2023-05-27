@@ -173,12 +173,12 @@ impl LazyFrame {
         self
     }
 
-    /// Describe the logical plan.
+    /// Explain the naive logical plan.
     pub fn describe_plan(&self) -> String {
         self.logical_plan.describe()
     }
 
-    /// Describe the optimized logical plan.
+    /// Explain the optimized logical plan.
     pub fn describe_optimized_plan(&self) -> PolarsResult<String> {
         let mut expr_arena = Arena::with_capacity(64);
         let mut lp_arena = Arena::with_capacity(64);
@@ -190,6 +190,15 @@ impl LazyFrame {
         )?;
         let logical_plan = node_to_lp(lp_top, &expr_arena, &mut lp_arena);
         Ok(logical_plan.describe())
+    }
+
+    /// Explain the logical plan.
+    pub fn explain(&self, optimized: bool) -> PolarsResult<String> {
+        if optimized {
+            self.describe_optimized_plan()
+        } else {
+            Ok(self.describe_plan())
+        }
     }
 
     /// Add a sort operation to the logical plan.
@@ -729,9 +738,18 @@ impl LazyFrame {
     #[cfg(feature = "dynamic_groupby")]
     pub fn groupby_rolling<E: AsRef<[Expr]>>(
         self,
+        index_column: Expr,
         by: E,
-        options: RollingGroupOptions,
+        mut options: RollingGroupOptions,
     ) -> LazyGroupBy {
+        if let Expr::Column(name) = index_column {
+            options.index_column = name.as_ref().into();
+        } else {
+            let name = expr_output_name(&index_column).unwrap();
+            return self
+                .with_column(index_column)
+                .groupby_rolling(Expr::Column(name), by, options);
+        }
         let opt_state = self.get_opt_state();
         LazyGroupBy {
             logical_plan: self.logical_plan,
@@ -761,9 +779,18 @@ impl LazyFrame {
     #[cfg(feature = "dynamic_groupby")]
     pub fn groupby_dynamic<E: AsRef<[Expr]>>(
         self,
+        index_column: Expr,
         by: E,
-        options: DynamicGroupOptions,
+        mut options: DynamicGroupOptions,
     ) -> LazyGroupBy {
+        if let Expr::Column(name) = index_column {
+            options.index_column = name.as_ref().into();
+        } else {
+            let name = expr_output_name(&index_column).unwrap();
+            return self
+                .with_column(index_column)
+                .groupby_dynamic(Expr::Column(name), by, options);
+        }
         let opt_state = self.get_opt_state();
         LazyGroupBy {
             logical_plan: self.logical_plan,
@@ -1006,6 +1033,11 @@ impl LazyFrame {
         Self::from_logical_plan(lp, opt_state)
     }
 
+    /// Aggregate all the columns as the sum of their null value count.
+    pub fn null_count(self) -> LazyFrame {
+        self.select_local(vec![col("*").null_count()])
+    }
+
     /// Keep unique rows and maintain order
     pub fn unique_stable(
         self,
@@ -1167,7 +1199,10 @@ impl LazyFrame {
 
         let name2: SmartString = name.into();
         let udf_schema = move |s: &Schema| {
-            let new = s.insert_index(0, name2.clone(), IDX_DTYPE).unwrap();
+            // Can't error, index 0 is always in bounds
+            let new = s
+                .new_inserting_at_index(0, name2.clone(), IDX_DTYPE)
+                .unwrap();
             Ok(Arc::new(new))
         };
 
@@ -1310,8 +1345,8 @@ impl LazyGroupBy {
     {
         #[cfg(feature = "dynamic_groupby")]
         let options = GroupbyOptions {
-            dynamic: None,
-            rolling: None,
+            dynamic: self.dynamic_options,
+            rolling: self.rolling_options,
             slice: None,
         };
 
@@ -1394,8 +1429,8 @@ impl JoinBuilder {
     }
 
     /// Force parallel table evaluation.
-    pub fn force_parallel(mut self, allow: bool) -> Self {
-        self.allow_parallel = allow;
+    pub fn force_parallel(mut self, force: bool) -> Self {
+        self.force_parallel = force;
         self
     }
 

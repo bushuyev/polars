@@ -87,7 +87,11 @@ impl DataFrame {
                 }
             }
             let keys_df = prepare_dataframe_unsorted(&by);
-            groupby_threaded_multiple_keys_flat(keys_df, n_partitions, sorted)
+            if multithreaded {
+                groupby_threaded_multiple_keys_flat(keys_df, n_partitions, sorted)
+            } else {
+                groupby_multiple_keys(keys_df, sorted)
+            }
         };
         Ok(GroupBy::new(self, by, groups?, None))
     }
@@ -261,7 +265,7 @@ impl<'df> GroupBy<'df> {
                 .map(|s| {
                     match groups {
                         GroupsProxy::Idx(groups) => {
-                            let mut iter = groups.iter().map(|(first, _idx)| first as usize);
+                            let mut iter = groups.first().iter().map(|first| *first as usize);
                             // Safety:
                             // groups are always in bounds
                             let mut out = unsafe { s.take_iter_unchecked(&mut iter) };
@@ -804,7 +808,7 @@ impl<'df> GroupBy<'df> {
             .collect::<PolarsResult<Vec<_>>>()?;
 
         let mut df = accumulate_dataframes_vertical(dfs)?;
-        df.as_single_chunk();
+        df.as_single_chunk_par();
         Ok(df)
     }
 
@@ -826,7 +830,7 @@ impl<'df> GroupBy<'df> {
             .collect::<PolarsResult<Vec<_>>>()?;
 
         let mut df = accumulate_dataframes_vertical(dfs)?;
-        df.as_single_chunk();
+        df.as_single_chunk_par();
         Ok(df)
     }
 }
@@ -910,9 +914,7 @@ pub fn fmt_groupby_column(name: &str, method: GroupByMethod) -> String {
 mod test {
     use num_traits::FloatConst;
 
-    use crate::frame::groupby::groupby;
     use crate::prelude::*;
-    use crate::utils::split_ca;
 
     #[test]
     #[cfg(feature = "dtype-date")]

@@ -16,11 +16,7 @@ from typing import (
     Optional,
     TypeVar,
     Union,
-    cast,
     overload,
-)
-from typing import (
-    List as TypingList,
 )
 
 from polars.datatypes import (
@@ -54,7 +50,6 @@ from polars.datatypes import (
 )
 from polars.dependencies import numpy as np
 from polars.dependencies import pyarrow as pa
-from polars.type_aliases import PolarsDataType
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import dtype_str_repr as _dtype_str_repr
@@ -77,7 +72,7 @@ else:
     UnionType = type(Union[int, float])
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PythonDataType, SchemaDict, TimeUnit
+    from polars.type_aliases import PolarsDataType, PythonDataType, SchemaDict, TimeUnit
 
     if sys.version_info >= (3, 8):
         from typing import Literal
@@ -144,6 +139,21 @@ def map_py_type_to_dtype(python_dtype: PythonDataType | type[object]) -> PolarsD
         return Object
     if python_dtype is None.__class__:
         return Null
+
+    # cover generic typing aliases, such as 'list[str]'
+    if hasattr(python_dtype, "__origin__") and hasattr(python_dtype, "__args__"):
+        base_type = python_dtype.__origin__
+        if base_type is not None:
+            dtype = map_py_type_to_dtype(base_type)
+            nested = python_dtype.__args__
+            if len(nested) == 1:
+                nested = nested[0]
+            return (
+                dtype
+                if nested is None
+                else dtype(map_py_type_to_dtype(nested))  # type: ignore[operator]
+            )
+
     raise TypeError("Invalid type")
 
 
@@ -160,7 +170,7 @@ def is_polars_dtype(dtype: Any, include_unknown: bool = False) -> bool:
 
 
 def unpack_dtypes(
-    dtypes: PolarsDataType | Collection[PolarsDataType] | None,
+    *dtypes: PolarsDataType | None,
     include_compound: bool = False,
 ) -> set[PolarsDataType]:
     """
@@ -168,8 +178,8 @@ def unpack_dtypes(
 
     Parameters
     ----------
-    dtypes : PolarsDataType | Collection[PolarsDataType] | None
-        polars dtype, collection of dtypes, or None.
+    *dtypes : PolarsDataType | Collection[PolarsDataType] | None
+        one or more polars dtypes.
 
     include_compound : bool, default True
         * if True, any parent/compound dtypes (List, Struct) are included in the result.
@@ -196,11 +206,11 @@ def unpack_dtypes(
     """  # noqa: W505
     if not dtypes:
         return set()
-    elif is_polars_dtype(dtypes):
-        dtypes = [dtypes]  # type: ignore[list-item]
+    elif len(dtypes) == 1 and isinstance(dtypes[0], Collection):
+        dtypes = dtypes[0]
 
     unpacked: set[PolarsDataType] = set()
-    for tp in cast(TypingList[PolarsDataType], dtypes):
+    for tp in dtypes:
         if isinstance(tp, List):
             if include_compound:
                 unpacked.add(tp)
@@ -211,7 +221,7 @@ def unpack_dtypes(
             unpacked.update(unpack_dtypes(tp.fields, include_compound=include_compound))  # type: ignore[arg-type]
         elif isinstance(tp, Field):
             unpacked.update(unpack_dtypes(tp.dtype, include_compound=include_compound))
-        elif is_polars_dtype(tp):
+        elif tp is not None and is_polars_dtype(tp):
             unpacked.add(tp)
     return unpacked
 
@@ -231,6 +241,7 @@ class _DataTypeMappings:
             UInt64: "u64",
             Float32: "f32",
             Float64: "f64",
+            Decimal: "decimal",
             Boolean: "bool",
             Utf8: "str",
             List: "list",
@@ -402,6 +413,8 @@ def py_type_to_dtype(
             if isinstance(annotation, str)  # type: ignore[redundant-expr]
             else annotation
         )
+    elif type(data_type).__name__ == "InitVar":
+        data_type = data_type.type
 
     if is_polars_dtype(data_type):
         return data_type
@@ -414,7 +427,10 @@ def py_type_to_dtype(
             data_type = possible_types[0]
 
     elif isinstance(data_type, str):
-        data_type = DataTypeMappings.REPR_TO_DTYPE.get(data_type, data_type)
+        data_type = DataTypeMappings.REPR_TO_DTYPE.get(
+            re.sub(r"^(?:dataclasses\.)?InitVar\[(.+)\]$", r"\1", data_type),
+            data_type,
+        )
         if is_polars_dtype(data_type):
             return data_type
     try:
@@ -448,9 +464,14 @@ def dtype_short_repr_to_dtype(dtype_string: str | None) -> PolarsDataType | None
     dtype_base, subtype = m.groups()
     dtype = DataTypeMappings.REPR_TO_DTYPE.get(dtype_base)
     if dtype and subtype:
-        # TODO: better-handle nested types (such as List,Struct)
-        subtype = (s.strip("""'" """) for s in subtype.replace("μs", "us").split(","))
+        # TODO: further-improve handling for nested types (such as List,Struct)
         try:
+            if dtype == Decimal:
+                subtype = (None, int(subtype))
+            else:
+                subtype = (
+                    s.strip("'\" ") for s in subtype.replace("μs", "us").split(",")
+                )
             return dtype(*subtype)  # type: ignore[operator]
         except ValueError:
             pass
@@ -469,7 +490,8 @@ def supported_numpy_char_code(dtype_char: str) -> bool:
 def numpy_char_code_to_dtype(dtype_char: str) -> PolarsDataType:
     """Convert a numpy character dtype to a Polars dtype."""
     dtype = np.dtype(dtype_char)
-
+    if dtype.kind == "U":
+        return Utf8
     try:
         return DataTypeMappings.NUMPY_KIND_AND_ITEMSIZE_TO_DTYPE[
             (dtype.kind, dtype.itemsize)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import typing
 from typing import Any
 
 import pytest
@@ -250,7 +251,7 @@ def test_cast_inner_categorical() -> None:
     with pytest.raises(
         pl.ComputeError, match=r"casting to categorical not allowed in `arr.eval`"
     ):
-        pl.Series("foo", [["a", "b"], ["a", "b"]]).arr.eval(
+        pl.Series("foo", [["a", "b"], ["a", "b"]]).list.eval(
             pl.element().cast(pl.Categorical)
         )
 
@@ -313,7 +314,7 @@ def test_err_on_categorical_asof_join_by_arg() -> None:
         pl.ComputeError,
         match=r"joins/or comparisons on categoricals can only happen if they were created under the same global string cache",
     ):
-        df1.join_asof(df2, on="time", by="cat")
+        df1.join_asof(df2, on=pl.col("time").set_sorted(), by="cat")
 
 
 def test_categorical_list_get_item() -> None:
@@ -332,7 +333,7 @@ def test_nested_categorical_aggregation_7848() -> None:
     ).with_columns([pl.col("letter").cast(pl.Categorical)]).groupby(
         maintain_order=True, by=["group"]
     ).all().with_columns(
-        [pl.col("letter").arr.lengths().alias("c_group")]
+        [pl.col("letter").list.lengths().alias("c_group")]
     ).groupby(
         by=["c_group"], maintain_order=True
     ).agg(
@@ -377,3 +378,27 @@ def test_categorical_fill_null_existing_category() -> None:
         "col": ["a", "a", "a"],
         "code": [0, 0, 0],
     }
+
+
+def test_categorical_fill_null_stringcache() -> None:
+    with pl.StringCache():
+        df = pl.LazyFrame(
+            {"index": [1, 2, 3], "cat": ["a", "b", None]},
+            schema={"index": pl.Int64(), "cat": pl.Categorical()},
+        )
+        a = df.select(pl.col("cat").fill_null("hi")).collect()
+
+    assert a.to_dict(False) == {"cat": ["a", "b", "hi"]}
+    assert a.dtypes == [pl.Categorical]
+
+
+@typing.no_type_check
+def test_fast_unique_flag_from_arrow() -> None:
+    df = pl.DataFrame(
+        {
+            "colB": ["1", "2", "3", "4", "5", "5", "5", "5"],
+        }
+    ).with_columns([pl.col("colB").cast(pl.Categorical)])
+
+    filtered = df.to_arrow().filter([True, False, True, True, False, True, True, True])
+    assert pl.from_arrow(filtered).select(pl.col("colB").n_unique()).item() == 4

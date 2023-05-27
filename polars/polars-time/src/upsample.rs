@@ -1,6 +1,7 @@
 #[cfg(feature = "timezones")]
-use arrow::temporal_conversions::parse_offset;
+use chrono_tz::Tz;
 use polars_core::prelude::*;
+use polars_core::utils::ensure_sorted_arg;
 use polars_ops::prelude::*;
 
 use crate::prelude::*;
@@ -32,6 +33,9 @@ pub trait PolarsUpsample {
     /// - 1i    (1 index count)
     /// Or combine them:
     /// "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
+    /// Suffix with `"_saturating"` to saturate dates with days too
+    /// large for their month to the last day of the month (e.g.
+    /// 2022-02-29 to 2022-02-28).
     fn upsample<I: IntoVec<String>>(
         &self,
         by: I,
@@ -106,6 +110,7 @@ fn upsample_impl(
     stable: bool,
 ) -> PolarsResult<DataFrame> {
     let s = source.column(index_column)?;
+    ensure_sorted_arg(s, "upsample")?;
     if matches!(s.dtype(), DataType::Date) {
         let mut df = source.clone();
         df.try_apply(index_column, |s| {
@@ -152,19 +157,10 @@ fn upsample_single_impl(
                 (Some(first), Some(last)) => {
                     let (first, last) = match tz {
                         #[cfg(feature = "timezones")]
-                        Some(tz) => match tz.parse::<chrono_tz::Tz>() {
-                            Ok(tz) => (
-                                unlocalize_timestamp(first, *tu, tz),
-                                unlocalize_timestamp(last, *tu, tz),
-                            ),
-                            Err(_) => match parse_offset(tz) {
-                                Ok(tz) => (
-                                    unlocalize_timestamp(first, *tu, tz),
-                                    unlocalize_timestamp(last, *tu, tz),
-                                ),
-                                Err(_) => unreachable!(),
-                            },
-                        },
+                        Some(tz) => (
+                            unlocalize_timestamp(first, *tu, tz.parse::<Tz>().unwrap()),
+                            unlocalize_timestamp(last, *tu, tz.parse::<Tz>().unwrap()),
+                        ),
                         _ => (first, last),
                     };
                     let first = match tu {

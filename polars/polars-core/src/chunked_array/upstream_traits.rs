@@ -14,9 +14,12 @@ use rayon::prelude::*;
 use crate::chunked_array::builder::{
     get_list_builder, AnonymousListBuilder, AnonymousOwnedListBuilder,
 };
+#[cfg(feature = "dtype-array")]
+use crate::chunked_array::builder::{AnonymousOwnedFixedSizeListBuilder, FixedSizeListBuilder};
 #[cfg(feature = "object")]
 use crate::chunked_array::object::ObjectArray;
 use crate::prelude::*;
+use crate::utils::flatten::flatten_par;
 use crate::utils::{get_iter_capacity, CustomIterTools, NoNull};
 
 impl<T: PolarsDataType> Default for ChunkedArray<T> {
@@ -299,6 +302,27 @@ impl FromIterator<Option<Box<dyn Array>>> for ListChunked {
     }
 }
 
+#[cfg(feature = "dtype-array")]
+impl ArrayChunked {
+    pub(crate) unsafe fn from_iter_and_args<I: IntoIterator<Item = Option<Box<dyn Array>>>>(
+        iter: I,
+        width: usize,
+        capacity: usize,
+        inner_dtype: Option<DataType>,
+        name: &str,
+    ) -> Self {
+        let mut builder =
+            AnonymousOwnedFixedSizeListBuilder::new(name, width, capacity, inner_dtype);
+        for val in iter {
+            match val {
+                None => builder.push_null(),
+                Some(arr) => builder.push_unchecked(arr.as_ref(), 0),
+            }
+        }
+        builder.finish()
+    }
+}
+
 #[cfg(feature = "object")]
 impl<T: PolarsObject> FromIterator<Option<T>> for ObjectChunked<T> {
     fn from_iter<I: IntoIterator<Item = Option<T>>>(iter: I) -> Self {
@@ -537,35 +561,6 @@ where
         let arr: LargeStringArray = builder.into();
         unsafe { Self::from_chunks("", vec![Box::new(arr)]) }
     }
-}
-
-pub fn flatten_par<T: Send + Sync + Copy>(bufs: &[&[T]]) -> Vec<T> {
-    let len = bufs.iter().map(|b| b.as_ref().len()).sum();
-    let offsets = bufs
-        .iter()
-        .scan(0usize, |acc, buf| {
-            let out = *acc;
-            *acc += buf.len();
-            Some(out)
-        })
-        .collect::<Vec<_>>();
-
-    let mut out = Vec::with_capacity(len);
-    let out_ptr = unsafe { SyncPtr::new(out.as_mut_ptr()) };
-
-    offsets.into_par_iter().enumerate().for_each(|(i, offset)| {
-        let buf = bufs[i];
-        let ptr: *mut T = out_ptr.get();
-        unsafe {
-            let dst = ptr.add(offset);
-            let src = buf.as_ptr();
-            std::ptr::copy_nonoverlapping(src, dst, buf.len())
-        }
-    });
-    unsafe {
-        out.set_len(len);
-    }
-    out
 }
 
 impl<Ptr> FromParallelIterator<Option<Ptr>> for Utf8Chunked

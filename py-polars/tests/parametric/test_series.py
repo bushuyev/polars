@@ -3,6 +3,7 @@
 # -------------------------------------------------
 from __future__ import annotations
 
+# from decimal import Decimal as D
 from typing import no_type_check
 
 import numpy as np
@@ -95,27 +96,23 @@ def test_ewm_methods(
             assert_series_equal(ewm_var_pl, ewm_var_pd, atol=1e-07)
 
 
-@given(
-    srs=series(max_size=10, dtype=pl.Int64),
-    start=sampled_from([-5, -4, -3, -2, -1, None, 0, 1, 2, 3, 4, 5]),
-    stop=sampled_from([-5, -4, -3, -2, -1, None, 0, 1, 2, 3, 4, 5]),
-    step=sampled_from([-5, -4, -3, -2, -1, None, 1, 2, 3, 4, 5]),
-)
-@settings(max_examples=500)
-def test_series_slice(
-    srs: pl.Series,
-    start: int | None,
-    stop: int | None,
-    step: int | None,
-) -> None:
-    py_data = srs.to_list()
-
-    s = slice(start, stop, step)
-    sliced_py_data = py_data[s]
-    sliced_pl_data = srs[s].to_list()
-
-    assert sliced_py_data == sliced_pl_data, f"slice [{start}:{stop}:{step}] failed"
-    assert_series_equal(srs, srs, check_exact=True)
+# TODO: once Decimal is a little further along, start actively probing it
+# @given(
+#     s=series(max_size=10, dtype=pl.Decimal, null_probability=0.1),
+# )
+# def test_series_decimal(
+#     s: pl.Series,
+# ) -> None:
+#     with pl.Config(activate_decimals=True):
+#         assert s.dtype == pl.Decimal
+#         assert s.to_list() == list(s)
+#
+#         s_div = s / D(123)
+#         s_mul = s * D(123)
+#         s_sub = s - D(123)
+#         s_add = s - D(123)
+#
+# etc...
 
 
 @given(
@@ -164,7 +161,32 @@ def test_series_duration_timeunits(
 
 
 @given(
-    s=series(min_size=1, max_size=10, excluded_dtypes=[pl.Categorical]).filter(
+    srs=series(max_size=10, dtype=pl.Int64),
+    start=sampled_from([-5, -4, -3, -2, -1, None, 0, 1, 2, 3, 4, 5]),
+    stop=sampled_from([-5, -4, -3, -2, -1, None, 0, 1, 2, 3, 4, 5]),
+    step=sampled_from([-5, -4, -3, -2, -1, None, 1, 2, 3, 4, 5]),
+)
+@settings(max_examples=500)
+def test_series_slice(
+    srs: pl.Series,
+    start: int | None,
+    stop: int | None,
+    step: int | None,
+) -> None:
+    py_data = srs.to_list()
+
+    s = slice(start, stop, step)
+    sliced_py_data = py_data[s]
+    sliced_pl_data = srs[s].to_list()
+
+    assert sliced_py_data == sliced_pl_data, f"slice [{start}:{stop}:{step}] failed"
+    assert_series_equal(srs, srs, check_exact=True)
+
+
+@given(
+    s=series(
+        min_size=1, max_size=10, excluded_dtypes=[pl.Categorical, pl.List, pl.Struct]
+    ).filter(
         lambda x: (
             getattr(x.dtype, "time_unit", None) in (None, "us", "ns")
             and (x.dtype != pl.Utf8 or not x.str.contains("\x00").any())

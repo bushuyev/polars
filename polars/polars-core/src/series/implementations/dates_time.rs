@@ -154,20 +154,14 @@ macro_rules! impl_dyn_series {
                 self.0.group_tuples(multithreaded, sorted)
             }
 
-            fn arg_sort_multiple(&self, by: &[Series], descending: &[bool]) -> PolarsResult<IdxCa> {
-                self.0.deref().arg_sort_multiple(by, descending)
+            fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
+                self.0.deref().arg_sort_multiple(options)
             }
         }
 
         impl SeriesTrait for SeriesWrap<$ca> {
             fn is_sorted_flag(&self) -> IsSorted {
-                if self.0.is_sorted_ascending_flag() {
-                    IsSorted::Ascending
-                } else if self.0.is_sorted_descending_flag() {
-                    IsSorted::Descending
-                } else {
-                    IsSorted::Not
-                }
+                self.0.is_sorted_flag()
             }
 
             fn rename(&mut self, name: &str) {
@@ -250,10 +244,6 @@ macro_rules! impl_dyn_series {
                     .map(|ca| ca.$into_logical().into_series())
             }
 
-            fn take_every(&self, n: usize) -> Series {
-                self.0.take_every(n).$into_logical().into_series()
-            }
-
             unsafe fn take_iter_unchecked(&self, iter: &mut dyn TakeIterator) -> Series {
                 ChunkTake::take_unchecked(self.0.deref(), iter.into())
                     .$into_logical()
@@ -266,7 +256,7 @@ macro_rules! impl_dyn_series {
                 if self.0.is_sorted_ascending_flag()
                     && (idx.is_sorted_ascending_flag() || idx.is_sorted_descending_flag())
                 {
-                    out.set_sorted_flag(idx.is_sorted_flag2())
+                    out.set_sorted_flag(idx.is_sorted_flag())
                 }
 
                 Ok(out.$into_logical().into_series())
@@ -307,7 +297,7 @@ macro_rules! impl_dyn_series {
                         .into_series()
                         .date()
                         .unwrap()
-                        .strftime("%Y-%m-%d")
+                        .to_string("%Y-%m-%d")
                         .into_series()),
                     (DataType::Time, DataType::Utf8) => Ok(self
                         .0
@@ -315,7 +305,7 @@ macro_rules! impl_dyn_series {
                         .into_series()
                         .time()
                         .unwrap()
-                        .strftime("%T")
+                        .to_string("%T")
                         .into_series()),
                     #[cfg(feature = "dtype-datetime")]
                     (DataType::Time, DataType::Datetime(_, _)) => {
@@ -323,6 +313,12 @@ macro_rules! impl_dyn_series {
                             ComputeError:
                             "cannot cast `Time` to `Datetime`; consider using 'dt.combine'"
                         );
+                    }
+                    #[cfg(feature = "dtype-datetime")]
+                    (DataType::Date, DataType::Datetime(_, _)) => {
+                        let mut out = self.0.cast(data_type)?;
+                        out.set_sorted_flag(self.0.is_sorted_flag());
+                        Ok(out)
                     }
                     _ => self.0.cast(data_type),
                 }

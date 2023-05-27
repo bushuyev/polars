@@ -3,7 +3,7 @@ use polars_lazy::dsl::Expr;
 use polars_plan::dsl::count;
 use sqlparser::ast::{
     Expr as SqlExpr, Function as SQLFunction, FunctionArg, FunctionArgExpr, Value as SqlValue,
-    WindowSpec,
+    WindowSpec, WindowType,
 };
 
 use crate::sql_expr::parse_sql_expr;
@@ -238,43 +238,45 @@ impl PolarsSqlFunctions {
         &[
             "abs",
             "acos",
-            "asin",
-            "atan",
-            "ceil",
-            "ceiling",
-            "exp",
-            "floor",
-            "ln",
-            "log2",
-            "log10",
-            "log",
-            "log1p",
-            "pow",
-            "lower",
-            "upper",
-            "ltrim",
-            "rtrim",
-            "starts_with",
-            "ends_with",
-            "count",
-            "sum",
-            "min",
-            "max",
-            "avg",
-            "stddev",
-            "variance",
-            "first",
-            "last",
+            "array_contains",
+            "array_get",
             "array_length",
             "array_lower",
-            "array_upper",
-            "array_sum",
             "array_mean",
             "array_reverse",
+            "array_sum",
             "array_unique",
+            "array_upper",
+            "asin",
+            "atan",
+            "avg",
+            "ceil",
+            "ceiling",
+            "count",
+            "ends_with",
+            "exp",
+            "first",
+            "floor",
+            "last",
+            "len",
+            "length",
+            "ln",
+            "log",
+            "log10",
+            "log1p",
+            "log2",
+            "lower",
+            "ltrim",
+            "max",
+            "min",
+            "pow",
+            "rtrim",
+            "starts_with",
+            "stddev",
+            "sum",
             "unnest",
-            "array_get",
-            "array_contains",
+            "upper",
+            "variance",
         ]
     }
 }
@@ -295,45 +297,45 @@ impl TryFrom<&'_ SQLFunction> for PolarsSqlFunctions {
             "exp" => Self::Exp,
             "floor" => Self::Floor,
             "ln" => Self::Ln,
-            "log2" => Self::Log2,
-            "log10" => Self::Log10,
             "log" => Self::Log,
+            "log10" => Self::Log10,
             "log1p" => Self::Log1p,
+            "log2" => Self::Log2,
             "pow" => Self::Pow,
             // ----
             // String functions
             // ----
+            "ends_with" => Self::EndsWith,
             "lower" => Self::Lower,
-            "upper" => Self::Upper,
             "ltrim" => Self::LTrim,
             "rtrim" => Self::RTrim,
             "starts_with" => Self::StartsWith,
-            "ends_with" => Self::EndsWith,
+            "upper" => Self::Upper,
             // ----
             // Aggregate functions
             // ----
-            "count" => Self::Count,
-            "sum" => Self::Sum,
-            "min" => Self::Min,
-            "max" => Self::Max,
             "avg" => Self::Avg,
-            "stddev" | "stddev_samp" => Self::StdDev,
-            "variance" | "var_samp" => Self::Variance,
+            "count" => Self::Count,
             "first" => Self::First,
             "last" => Self::Last,
+            "max" => Self::Max,
+            "min" => Self::Min,
+            "stddev" | "stddev_samp" => Self::StdDev,
+            "sum" => Self::Sum,
+            "variance" | "var_samp" => Self::Variance,
             // ----
             // Array functions
             // ----
+            "array_contains" => Self::ArrayContains,
+            "array_get" => Self::ArrayGet,
             "array_length" => Self::ArrayLength,
             "array_lower" => Self::ArrayMin,
-            "array_upper" => Self::ArrayMax,
-            "array_sum" => Self::ArraySum,
             "array_mean" => Self::ArrayMean,
             "array_reverse" => Self::ArrayReverse,
+            "array_sum" => Self::ArraySum,
             "array_unique" => Self::ArrayUnique,
+            "array_upper" => Self::ArrayMax,
             "unnest" => Self::Explode,
-            "array_get" => Self::ArrayGet,
-            "array_contains" => Self::ArrayContains,
             other => polars_bail!(InvalidOperation: "unsupported SQL function: {}", other),
         })
     }
@@ -345,6 +347,7 @@ impl SqlFunctionVisitor<'_> {
 
         let function_name: PolarsSqlFunctions = function.try_into()?;
         use PolarsSqlFunctions::*;
+
         match function_name {
             // ----
             // Math functions
@@ -357,16 +360,16 @@ impl SqlFunctionVisitor<'_> {
             Exp => self.visit_unary(Expr::exp),
             Floor => self.visit_unary(Expr::floor),
             Ln => self.visit_unary(|e| e.log(std::f64::consts::E)),
-            Log2 => self.visit_unary(|e| e.log(2.0)),
-            Log10 => self.visit_unary(|e| e.log(10.0)),
             Log => self.visit_binary(Expr::log),
+            Log10 => self.visit_unary(|e| e.log(10.0)),
             Log1p => self.visit_unary(Expr::log1p),
+            Log2 => self.visit_unary(|e| e.log(2.0)),
             Pow => self.visit_binary::<Expr>(Expr::pow),
             // ----
             // String functions
             // ----
+            EndsWith => self.visit_binary(|e, s| e.str().ends_with(s)),
             Lower => self.visit_unary(|e| e.str().to_lowercase()),
-            Upper => self.visit_unary(|e| e.str().to_uppercase()),
             LTrim => match function.args.len() {
                 1 => self.visit_unary(|e| e.str().lstrip(None)),
                 2 => self.visit_binary(|e, s| e.str().lstrip(Some(s))),
@@ -384,45 +387,100 @@ impl SqlFunctionVisitor<'_> {
                 ),
             },
             StartsWith => self.visit_binary(|e, s| e.str().starts_with(s)),
-            EndsWith => self.visit_binary(|e, s| e.str().ends_with(s)),
+            Upper => self.visit_unary(|e| e.str().to_uppercase()),
             // ----
             // Aggregate functions
             // ----
-            Count => self.visit_count(),
-            Sum => self.visit_unary(Expr::sum),
-            Min => self.visit_unary(Expr::min),
-            Max => self.visit_unary(Expr::max),
             Avg => self.visit_unary(Expr::mean),
-            StdDev => self.visit_unary(|e| e.std(1)),
-            Variance => self.visit_unary(|e| e.var(1)),
+            Count => self.visit_count(),
             First => self.visit_unary(Expr::first),
             Last => self.visit_unary(Expr::last),
+            Max => self.visit_unary_with_opt_cumulative(Expr::max, Expr::cummax),
+            Min => self.visit_unary_with_opt_cumulative(Expr::min, Expr::cummin),
+            StdDev => self.visit_unary(|e| e.std(1)),
+            Sum => self.visit_unary_with_opt_cumulative(Expr::sum, Expr::cumsum),
+            Variance => self.visit_unary(|e| e.var(1)),
             // ----
             // Array functions
             // ----
-            ArrayLength => self.visit_unary(|e| e.arr().lengths()),
-            ArrayMin => self.visit_unary(|e| e.arr().min()),
-            ArrayMax => self.visit_unary(|e| e.arr().max()),
-            ArraySum => self.visit_unary(|e| e.arr().sum()),
-            ArrayMean => self.visit_unary(|e| e.arr().mean()),
-            ArrayReverse => self.visit_unary(|e| e.arr().reverse()),
-            ArrayUnique => self.visit_unary(|e| e.arr().unique()),
+            ArrayContains => self.visit_binary::<Expr>(|e, s| e.list().contains(s)),
+            ArrayGet => self.visit_binary(|e, i| e.list().get(i)),
+            ArrayLength => self.visit_unary(|e| e.list().lengths()),
+            ArrayMax => self.visit_unary(|e| e.list().max()),
+            ArrayMean => self.visit_unary(|e| e.list().mean()),
+            ArrayMin => self.visit_unary(|e| e.list().min()),
+            ArrayReverse => self.visit_unary(|e| e.list().reverse()),
+            ArraySum => self.visit_unary(|e| e.list().sum()),
+            ArrayUnique => self.visit_unary(|e| e.list().unique()),
             Explode => self.visit_unary(|e| e.explode()),
-            ArrayContains => self.visit_binary::<Expr>(|e, s| e.arr().contains(s)),
-            ArrayGet => self.visit_binary(|e, i| e.arr().get(i)),
         }
     }
 
     fn visit_unary(&self, f: impl Fn(Expr) -> Expr) -> PolarsResult<Expr> {
+        self.visit_unary_no_window(f)
+            .and_then(|e| self.apply_window_spec(e, &self.func.over))
+    }
+
+    /// Some functions have cumulative equivalents that can be applied to window specs
+    /// e.g. SUM(a) OVER (ORDER BY b DESC) -> CUMSUM(a, false)
+    /// visit_unary_with_cumulative_window will take in a function & a cumulative function
+    /// if there is a cumulative window spec, it will apply the cumulative function,
+    /// otherwise it will apply the function
+    fn visit_unary_with_opt_cumulative(
+        &self,
+        f: impl Fn(Expr) -> Expr,
+        cumulative_f: impl Fn(Expr, bool) -> Expr,
+    ) -> PolarsResult<Expr> {
+        match self.func.over.as_ref() {
+            Some(WindowType::WindowSpec(spec)) => {
+                self.apply_cumulative_window(f, cumulative_f, spec)
+            }
+            Some(WindowType::NamedWindow(named_window)) => polars_bail!(
+                InvalidOperation: "Named windows are not supported yet. Got {:?}",
+                named_window
+            ),
+            _ => self.visit_unary(f),
+        }
+    }
+    /// Window specs without partition bys are essentially cumulative functions
+    /// e.g. SUM(a) OVER (ORDER BY b DESC) -> CUMSUM(a, false)
+    fn apply_cumulative_window(
+        &self,
+        f: impl Fn(Expr) -> Expr,
+        cumulative_f: impl Fn(Expr, bool) -> Expr,
+        WindowSpec {
+            partition_by,
+            order_by,
+            ..
+        }: &WindowSpec,
+    ) -> PolarsResult<Expr> {
+        if !order_by.is_empty() && partition_by.is_empty() {
+            let (order_by, desc): (Vec<Expr>, Vec<bool>) = order_by
+                .iter()
+                .map(|o| {
+                    let expr = parse_sql_expr(&o.expr, self.ctx)?;
+                    Ok(match o.asc {
+                        Some(b) => (expr, !b),
+                        None => (expr, false),
+                    })
+                })
+                .collect::<PolarsResult<Vec<_>>>()?
+                .into_iter()
+                .unzip();
+            self.visit_unary_no_window(|e| cumulative_f(e.sort_by(&order_by, &desc), false))
+        } else {
+            self.visit_unary(f)
+        }
+    }
+
+    fn visit_unary_no_window(&self, f: impl Fn(Expr) -> Expr) -> PolarsResult<Expr> {
         let function = self.func;
         let args = extract_args(function);
         if let FunctionArgExpr::Expr(sql_expr) = args[0] {
             // parse the inner sql expr -- e.g. SUM(a) -> a
             let expr = parse_sql_expr(sql_expr, self.ctx)?;
             // apply the function on the inner expr -- e.g. SUM(a) -> SUM
-            let expr = f(expr);
-            // apply the window spec if present
-            self.apply_window_spec(expr, &function.over)
+            Ok(f(expr))
         } else {
             not_supported_error(function.name.0[0].value.as_str(), &args)
         }
@@ -478,22 +536,41 @@ impl SqlFunctionVisitor<'_> {
             _ => return not_supported_error("count", &args),
         })
     }
+
     fn apply_window_spec(
         &self,
         expr: Expr,
-        window_spec: &Option<WindowSpec>,
+        window_type: &Option<WindowType>,
     ) -> PolarsResult<Expr> {
-        Ok(match &window_spec {
-            Some(window_spec) => {
-                // Process for simple window specification, partition by first
-                let partition_by = window_spec
-                    .partition_by
-                    .iter()
-                    .map(|p| parse_sql_expr(p, self.ctx))
-                    .collect::<PolarsResult<Vec<_>>>()?;
-                expr.over(partition_by)
-                // Order by and Row range may not be supported at the moment
+        Ok(match &window_type {
+            Some(WindowType::WindowSpec(window_spec)) => {
+                if window_spec.partition_by.is_empty() {
+                    let exprs = window_spec
+                        .order_by
+                        .iter()
+                        .map(|o| {
+                            let e = parse_sql_expr(&o.expr, self.ctx)?;
+                            match o.asc {
+                                Some(b) => Ok(e.sort(!b)),
+                                None => Ok(e),
+                            }
+                        })
+                        .collect::<PolarsResult<Vec<_>>>()?;
+                    expr.over(exprs)
+                } else {
+                    // Process for simple window specification, partition by first
+                    let partition_by = window_spec
+                        .partition_by
+                        .iter()
+                        .map(|p| parse_sql_expr(p, self.ctx))
+                        .collect::<PolarsResult<Vec<_>>>()?;
+                    expr.over(partition_by)
+                }
             }
+            Some(WindowType::NamedWindow(named_window)) => polars_bail!(
+                InvalidOperation: "Named windows are not supported yet. Got: {:?}",
+                named_window
+            ),
             None => expr,
         })
     }

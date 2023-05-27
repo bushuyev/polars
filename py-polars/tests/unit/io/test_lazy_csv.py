@@ -21,6 +21,11 @@ def test_scan_csv(io_files_path: Path) -> None:
     assert df.collect().shape == (4, 3)
 
 
+def test_scan_csv_no_cse_deadlock(io_files_path: Path) -> None:
+    dfs = [pl.scan_csv(io_files_path / "small.csv")] * (pl.threadpool_size() + 1)
+    pl.concat(dfs, parallel=True).collect(common_subplan_elimination=False)
+
+
 def test_scan_empty_csv(io_files_path: Path) -> None:
     with pytest.raises(Exception) as excinfo:
         pl.scan_csv(io_files_path / "empty.csv").collect()
@@ -216,3 +221,16 @@ def test_glob_n_rows(io_files_path: Path) -> None:
         "fats_g": [0.5, 6.0],
         "sugars_g": [2, 2],
     }
+
+
+def test_scan_csv_schema_overwrite_not_projected_8483(foods_file_path: str) -> None:
+    df = (
+        pl.scan_csv(
+            foods_file_path,
+            dtypes={"calories": pl.Utf8, "sugars_g": pl.Int8},
+        )
+        .select(pl.count())
+        .collect()
+    )
+    expected = pl.DataFrame({"count": 27}, schema={"count": pl.UInt32})
+    assert_frame_equal(df, expected)

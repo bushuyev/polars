@@ -77,7 +77,7 @@ impl<R: MmapBytesReader> ParquetReader<R> {
         )
         .map(|mut df| {
             if rechunk {
-                df.rechunk();
+                df.align_chunks();
             };
             df
         })
@@ -125,8 +125,7 @@ impl<R: MmapBytesReader> ParquetReader<R> {
     /// [`Schema`] of the file.
     pub fn schema(&mut self) -> PolarsResult<Schema> {
         let metadata = self.get_metadata()?;
-        let schema = read::infer_schema(metadata)?;
-        Ok(schema.fields.iter().into())
+        Ok(Schema::from_iter(&read::infer_schema(metadata)?.fields))
     }
 
     /// Use statistics in the parquet to determine if pages
@@ -210,7 +209,7 @@ impl<R: MmapBytesReader> SerReader<R> for ParquetReader<R> {
         )
         .map(|mut df| {
             if self.rechunk {
-                df.rechunk();
+                df.as_single_chunk_par();
             }
             df
         })

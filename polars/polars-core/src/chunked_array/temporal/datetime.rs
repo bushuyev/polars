@@ -1,13 +1,9 @@
 use std::fmt::Write;
 
-#[cfg(feature = "timezones")]
-use arrow::temporal_conversions::parse_offset;
 use arrow::temporal_conversions::{
     timestamp_ms_to_datetime, timestamp_ns_to_datetime, timestamp_us_to_datetime,
 };
 use chrono::format::{DelayedFormat, StrftimeItems};
-#[cfg(feature = "timezones")]
-use chrono::FixedOffset;
 #[cfg(feature = "timezones")]
 use chrono::TimeZone as TimeZoneTrait;
 #[cfg(feature = "timezones")]
@@ -22,12 +18,9 @@ use crate::prelude::*;
 
 #[cfg(feature = "timezones")]
 fn validate_time_zone(tz: TimeZone) -> PolarsResult<()> {
-    match parse_offset(&tz) {
+    match tz.parse::<Tz>() {
         Ok(_) => Ok(()),
-        Err(_) => match tz.parse::<Tz>() {
-            Ok(_) => Ok(()),
-            Err(_) => polars_bail!(ComputeError: "unable to parse time zone: '{}'", tz),
-        },
+        Err(_) => polars_bail!(ComputeError: "unable to parse time zone: '{}'", tz),
     }
 }
 
@@ -55,17 +48,6 @@ fn apply_datefmt_f<'a>(
     Box::new(arr)
 }
 
-#[cfg(feature = "timezones")]
-fn format_fixed_offset(
-    tz: FixedOffset,
-    arr: &PrimitiveArray<i64>,
-    fmt: &str,
-    fmted: &str,
-    conversion_f: fn(i64) -> NaiveDateTime,
-) -> ArrayRef {
-    let datefmt_f = |ndt| tz.from_utc_datetime(&ndt).format(fmt);
-    apply_datefmt_f(arr, fmted, conversion_f, datefmt_f)
-}
 #[cfg(feature = "timezones")]
 fn format_tz(
     tz: Tz,
@@ -124,49 +106,26 @@ impl DatetimeChunked {
         time_zone: Option<&str>,
         use_earliest: Option<bool>,
     ) -> PolarsResult<DatetimeChunked> {
-        match (self.time_zone(), time_zone) {
-            (Some(from), Some(to)) => {
-                let chunks = self
-                    .downcast_iter()
-                    .map(|arr| {
-                        replace_timezone(arr, self.time_unit().to_arrow(), to, from, use_earliest)
-                    })
-                    .collect::<PolarsResult<_>>()?;
-                let out = unsafe { ChunkedArray::from_chunks(self.name(), chunks) };
-                Ok(out.into_datetime(self.time_unit(), Some(to.to_string())))
-            }
-            (Some(from), None) => {
-                let chunks = self
-                    .downcast_iter()
-                    .map(|arr| {
-                        replace_timezone(
-                            arr,
-                            self.time_unit().to_arrow(),
-                            "UTC",
-                            from,
-                            use_earliest,
-                        )
-                    })
-                    .collect::<PolarsResult<_>>()?;
-                let out = unsafe { ChunkedArray::from_chunks(self.name(), chunks) };
-                Ok(out.into_datetime(self.time_unit(), None))
-            }
-            (None, Some(to)) => {
-                let chunks = self
-                    .downcast_iter()
-                    .map(|arr| {
-                        replace_timezone(arr, self.time_unit().to_arrow(), to, "UTC", use_earliest)
-                    })
-                    .collect::<PolarsResult<_>>()?;
-                let out = unsafe { ChunkedArray::from_chunks(self.name(), chunks) };
-                Ok(out.into_datetime(self.time_unit(), Some(to.to_string())))
-            }
-            (None, None) => Ok(self.clone()),
-        }
+        let out: PolarsResult<_> = {
+            let from = self.time_zone().as_deref().unwrap_or("UTC");
+            let to = time_zone.unwrap_or("UTC");
+            let chunks = self
+                .downcast_iter()
+                .map(|arr| {
+                    replace_timezone(arr, self.time_unit().to_arrow(), to, from, use_earliest)
+                })
+                .collect::<PolarsResult<_>>()?;
+            let out = unsafe { ChunkedArray::from_chunks(self.name(), chunks) };
+            Ok(out.into_datetime(self.time_unit(), time_zone.map(|x| x.to_string())))
+        };
+        let mut out = out?;
+        out.set_sorted_flag(self.is_sorted_flag());
+        Ok(out)
     }
 
-    /// Format Datetime with a `format` rule. See [chrono strftime/strptime](https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html).
-    pub fn strftime(&self, format: &str) -> PolarsResult<Utf8Chunked> {
+    /// Convert from Datetime into Utf8 with the given format.
+    /// See [chrono strftime/strptime](https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html).
+    pub fn to_string(&self, format: &str) -> PolarsResult<Utf8Chunked> {
         #[cfg(feature = "timezones")]
         use chrono::Utc;
         let conversion_f = match self.time_unit() {
@@ -198,21 +157,27 @@ impl DatetimeChunked {
 
         let mut ca: Utf8Chunked = match self.time_zone() {
             #[cfg(feature = "timezones")]
-            Some(time_zone) => match parse_offset(time_zone) {
-                Ok(time_zone) => self.apply_kernel_cast(&|arr| {
-                    format_fixed_offset(time_zone, arr, format, &fmted, conversion_f)
-                }),
-                Err(_) => match time_zone.parse::<Tz>() {
-                    Ok(time_zone) => self.apply_kernel_cast(&|arr| {
-                        format_tz(time_zone, arr, format, &fmted, conversion_f)
-                    }),
-                    Err(_) => unreachable!(),
-                },
-            },
+            Some(time_zone) => self.apply_kernel_cast(&|arr| {
+                format_tz(
+                    time_zone.parse::<Tz>().unwrap(),
+                    arr,
+                    format,
+                    &fmted,
+                    conversion_f,
+                )
+            }),
             _ => self.apply_kernel_cast(&|arr| format_naive(arr, format, &fmted, conversion_f)),
         };
         ca.rename(self.name());
         Ok(ca)
+    }
+
+    /// Convert from Datetime into Utf8 with the given format.
+    /// See [chrono strftime/strptime](https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html).
+    ///
+    /// Alias for `to_string`.
+    pub fn strftime(&self, format: &str) -> PolarsResult<Utf8Chunked> {
+        self.to_string(format)
     }
 
     /// Construct a new [`DatetimeChunked`] from an iterator over [`NaiveDateTime`].

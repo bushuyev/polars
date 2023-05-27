@@ -21,8 +21,8 @@ from typing import (
     cast,
 )
 
+import polars._reexport as pl
 from polars import functions as F
-from polars import internals as pli
 from polars.datatypes import (
     FLOAT_DTYPES,
     INTEGER_DTYPES,
@@ -35,6 +35,7 @@ from polars.datatypes import (
 )
 from polars.dependencies import _check_for_numpy
 from polars.dependencies import numpy as np
+from polars.expr.array import ExprArrayNameSpace
 from polars.expr.binary import ExprBinaryNameSpace
 from polars.expr.categorical import ExprCatNameSpace
 from polars.expr.datetime import ExprDateTimeNameSpace
@@ -44,20 +45,19 @@ from polars.expr.string import ExprStringNameSpace
 from polars.expr.struct import ExprStructNameSpace
 from polars.utils._parse_expr_input import expr_to_lit_or_expr, selection_to_pyexpr_list
 from polars.utils.convert import _timedelta_to_pl_duration
-from polars.utils.decorators import deprecated_alias, redirect
+from polars.utils.decorators import deprecated_alias
 from polars.utils.meta import threadpool_size
 from polars.utils.various import sphinx_accessor
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import arg_where as py_arg_where
     from polars.polars import reduce as pyreduce
+
 if TYPE_CHECKING:
     import sys
 
-    from polars.dataframe import DataFrame
-    from polars.lazyframe import LazyFrame
+    from polars import DataFrame, LazyFrame, Series
     from polars.polars import PyExpr
-    from polars.series import Series
     from polars.type_aliases import (
         ApplyStrategy,
         ClosedInterval,
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         RankMethod,
         RollingInterpolationMethod,
         SearchSortedSide,
+        WindowMappingStrategy,
     )
 
     if sys.version_info >= (3, 11):
@@ -84,12 +85,11 @@ elif os.getenv("BUILDING_SPHINX_DOCS"):
     property = sphinx_accessor
 
 
-@redirect({"list": "implode"})
 class Expr:
     """Expressions that can be used in various contexts."""
 
     _pyexpr: PyExpr = None
-    _accessors: set[str] = {"arr", "cat", "dt", "meta", "str", "bin", "struct"}
+    _accessors: set[str] = {"arr", "cat", "dt", "list", "meta", "str", "bin", "struct"}
 
     @classmethod
     def _from_pyexpr(cls, pyexpr: PyExpr) -> Self:
@@ -128,7 +128,7 @@ class Expr:
     def __radd__(self, other: Any) -> Self:
         return self._from_pyexpr(self._to_pyexpr(other) + self._pyexpr)
 
-    def __and__(self, other: Expr) -> Self:
+    def __and__(self, other: Expr | int) -> Self:
         return self._from_pyexpr(self._pyexpr._and(self._to_pyexpr(other)))
 
     def __rand__(self, other: Any) -> Self:
@@ -176,7 +176,7 @@ class Expr:
     def __neg__(self) -> Expr:
         return F.lit(0) - self
 
-    def __or__(self, other: Expr) -> Self:
+    def __or__(self, other: Expr | int) -> Self:
         return self._from_pyexpr(self._pyexpr._or(self._to_pyexpr(other)))
 
     def __ror__(self, other: Any) -> Self:
@@ -247,6 +247,7 @@ class Expr:
         - :func:`polars.datatypes.Time` -> :func:`polars.datatypes.Int64`
         - :func:`polars.datatypes.Duration` -> :func:`polars.datatypes.Int64`
         - :func:`polars.datatypes.Categorical` -> :func:`polars.datatypes.UInt32`
+        - ``List(inner)`` -> ``List(physical of inner)``
 
         Other data types will be left unchanged.
 
@@ -440,6 +441,12 @@ class Expr:
         name
             New name.
 
+        See Also
+        --------
+        map_alias
+        prefix
+        suffix
+
         Examples
         --------
         >>> df = pl.DataFrame(
@@ -460,10 +467,8 @@ class Expr:
         │ 3   ┆ null │
         └─────┴──────┘
         >>> df.select(
-        ...     [
-        ...         pl.col("a").alias("bar"),
-        ...         pl.col("b").alias("foo"),
-        ...     ]
+        ...     pl.col("a").alias("bar"),
+        ...     pl.col("b").alias("foo"),
         ... )
         shape: (3, 2)
         ┌─────┬──────┐
@@ -630,7 +635,7 @@ class Expr:
         "DuplicateError: Column with name: 'literal' has more than one occurrences"
         errors.
 
-        >>> df.select([(pl.lit(10) / pl.all()).keep_name()])
+        >>> df.select((pl.lit(10) / pl.all()).keep_name())
         shape: (2, 2)
         ┌──────┬──────────┐
         │ a    ┆ b        │
@@ -650,7 +655,7 @@ class Expr:
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> T:
-        r"""
+        r'''
         Offers a structured way to apply a sequence of user-defined functions (UDFs).
 
         Parameters
@@ -665,28 +670,50 @@ class Expr:
 
         Examples
         --------
-        >>> def extract_number(expr):
+        >>> def extract_number(expr: pl.Expr) -> pl.Expr:
+        ...     """Extract the digits from a string."""
         ...     return expr.str.extract(r"\d+", 0).cast(pl.Int64)
-        ...
-        >>> df = pl.DataFrame({"a": ["a: 1", "b: 2", "c: 3"]})
-        >>> df.with_columns(pl.col("a").pipe(extract_number))
-        shape: (3, 1)
-        ┌─────┐
-        │ a   │
-        │ --- │
-        │ i64 │
-        ╞═════╡
-        │ 1   │
-        │ 2   │
-        │ 3   │
-        └─────┘
+        >>>
+        >>> def scale_negative_even(expr: pl.Expr, *, n: int = 1) -> pl.Expr:
+        ...     """Set even numbers negative, and scale by a user-supplied value."""
+        ...     expr = pl.when(expr % 2 == 0).then(-expr).otherwise(expr)
+        ...     return expr * n
+        >>>
+        >>> df = pl.DataFrame({"val": ["a: 1", "b: 2", "c: 3", "d: 4"]})
+        >>> df.with_columns(
+        ...     udfs=(
+        ...         pl.col("val").pipe(extract_number).pipe(scale_negative_even, n=5)
+        ...     ),
+        ... )
+        shape: (4, 2)
+        ┌──────┬──────┐
+        │ val  ┆ udfs │
+        │ ---  ┆ ---  │
+        │ str  ┆ i64  │
+        ╞══════╪══════╡
+        │ a: 1 ┆ 5    │
+        │ b: 2 ┆ -10  │
+        │ c: 3 ┆ 15   │
+        │ d: 4 ┆ -20  │
+        └──────┴──────┘
 
-        """
+        '''
         return function(self, *args, **kwargs)
 
     def prefix(self, prefix: str) -> Self:
         """
         Add a prefix to the root column name of the expression.
+
+        Parameters
+        ----------
+        prefix
+            Prefix to add to root column name.
+
+        See Also
+        --------
+        alias
+        map_alias
+        suffix
 
         Examples
         --------
@@ -712,10 +739,8 @@ class Expr:
         │ 5   ┆ banana ┆ 1   ┆ beetle │
         └─────┴────────┴─────┴────────┘
         >>> df.select(
-        ...     [
-        ...         pl.all(),
-        ...         pl.all().reverse().prefix("reverse_"),
-        ...     ]
+        ...     pl.all(),
+        ...     pl.all().reverse().prefix("reverse_"),
         ... )
         shape: (5, 8)
         ┌─────┬────────┬─────┬────────┬───────────┬────────────────┬───────────┬──────────────┐
@@ -737,6 +762,17 @@ class Expr:
         """
         Add a suffix to the root column name of the expression.
 
+        Parameters
+        ----------
+        suffix
+            Suffix to add to root column name.
+
+        See Also
+        --------
+        alias
+        map_alias
+        prefix
+
         Examples
         --------
         >>> df = pl.DataFrame(
@@ -761,10 +797,8 @@ class Expr:
         │ 5   ┆ banana ┆ 1   ┆ beetle │
         └─────┴────────┴─────┴────────┘
         >>> df.select(
-        ...     [
-        ...         pl.all(),
-        ...         pl.all().reverse().suffix("_reverse"),
-        ...     ]
+        ...     pl.all(),
+        ...     pl.all().reverse().suffix("_reverse"),
         ... )
         shape: (5, 8)
         ┌─────┬────────┬─────┬────────┬───────────┬────────────────┬───────────┬──────────────┐
@@ -791,6 +825,12 @@ class Expr:
         function
             Function that maps root name to new name.
 
+        See Also
+        --------
+        alias
+        prefix
+        suffix
+
         Examples
         --------
         >>> df = pl.DataFrame(
@@ -799,18 +839,23 @@ class Expr:
         ...         "B": [3, 4],
         ...     }
         ... )
-        >>> df.select(
-        ...     pl.all().reverse().map_alias(lambda colName: colName + "_reverse")
+
+        >>> df.select(pl.all().reverse().suffix("_reverse")).with_columns(
+        ...     pl.all().map_alias(
+        ...         # Remove "_reverse" suffix and convert to lower case.
+        ...         lambda col_name: col_name.rsplit("_reverse", 1)[0].lower()
+        ...     )
         ... )
-        shape: (2, 2)
-        ┌───────────┬───────────┐
-        │ A_reverse ┆ B_reverse │
-        │ ---       ┆ ---       │
-        │ i64       ┆ i64       │
-        ╞═══════════╪═══════════╡
-        │ 2         ┆ 4         │
-        │ 1         ┆ 3         │
-        └───────────┴───────────┘
+        shape: (2, 4)
+        ┌───────────┬───────────┬─────┬─────┐
+        │ A_reverse ┆ B_reverse ┆ a   ┆ b   │
+        │ ---       ┆ ---       ┆ --- ┆ --- │
+        │ i64       ┆ i64       ┆ i64 ┆ i64 │
+        ╞═══════════╪═══════════╪═════╪═════╡
+        │ 2         ┆ 4         ┆ 2   ┆ 4   │
+        │ 1         ┆ 3         ┆ 1   ┆ 3   │
+        └───────────┴───────────┴─────┴─────┘
+
 
         """
         return self._from_pyexpr(self._pyexpr.map_alias(function))
@@ -1080,6 +1125,9 @@ class Expr:
         """
         Count the number of values in this expression.
 
+        .. warning::
+            `null` is deemed a value in this context.
+
         Examples
         --------
         >>> df = pl.DataFrame({"a": [8, 9, 10], "b": [None, 4, 4]})
@@ -1209,18 +1257,18 @@ class Expr:
 
         >>> df.select(pl.repeat(None, 3).append(pl.col("a")).rechunk())
         shape: (6, 1)
-        ┌─────────┐
-        │ literal │
-        │ ---     │
-        │ i64     │
-        ╞═════════╡
-        │ null    │
-        │ null    │
-        │ null    │
-        │ 1       │
-        │ 1       │
-        │ 2       │
-        └─────────┘
+        ┌────────┐
+        │ repeat │
+        │ ---    │
+        │ i64    │
+        ╞════════╡
+        │ null   │
+        │ null   │
+        │ null   │
+        │ 1      │
+        │ 1      │
+        │ 2      │
+        └────────┘
 
         """
         return self._from_pyexpr(self._pyexpr.rechunk())
@@ -1572,7 +1620,7 @@ class Expr:
         """
         return self._from_pyexpr(self._pyexpr.ceil())
 
-    def round(self, decimals: int) -> Self:
+    def round(self, decimals: int = 0) -> Self:
         """
         Round underlying floating point data by `decimals` digits.
 
@@ -2183,7 +2231,7 @@ class Expr:
             _check_for_numpy(indices) and isinstance(indices, np.ndarray)
         ):
             indices = cast("np.ndarray[Any, Any]", indices)
-            indices_lit = F.lit(pli.Series("", indices, dtype=UInt32))
+            indices_lit = F.lit(pl.Series("", indices, dtype=UInt32))
         else:
             indices_lit = expr_to_lit_or_expr(indices, str_to_lit=False)
         return self._from_pyexpr(self._pyexpr.take(indices_lit._pyexpr))
@@ -2871,7 +2919,12 @@ class Expr:
         """
         return self._from_pyexpr(self._pyexpr.last())
 
-    def over(self, expr: IntoExpr | Iterable[IntoExpr], *more_exprs: IntoExpr) -> Self:
+    def over(
+        self,
+        expr: IntoExpr | Iterable[IntoExpr],
+        *more_exprs: IntoExpr,
+        mapping_strategy: WindowMappingStrategy = "group_to_rows",
+    ) -> Self:
         """
         Compute expressions over the given groups.
 
@@ -2889,6 +2942,17 @@ class Expr:
             column names.
         *more_exprs
             Additional columns to group by, specified as positional arguments.
+        mapping_strategy: {'group_to_rows', 'join', 'explode'}
+            - group_to_rows
+                If the aggregation results in multiple values, assign them back to there
+                position in the DataFrame. This can only be done if the group yields
+                the same elements before aggregation as after
+            - join
+                Join the groups as 'List<group_dtype>' to the row positions.
+                warning: this can be memory intensive
+            - explode
+                Don't do any mapping, but simply flatten the group.
+                This only makes sense if the input data is sorted.
 
         Examples
         --------
@@ -2967,7 +3031,7 @@ class Expr:
         exprs = selection_to_pyexpr_list(expr)
         if more_exprs:
             exprs.extend(selection_to_pyexpr_list(more_exprs))
-        return self._from_pyexpr(self._pyexpr.over(exprs))
+        return self._from_pyexpr(self._pyexpr.over(exprs, mapping_strategy))
 
     def is_unique(self) -> Self:
         """
@@ -3217,6 +3281,10 @@ class Expr:
         agg_list
             Aggregate list
 
+        See Also
+        --------
+        map_dict
+
         Examples
         --------
         >>> df = pl.DataFrame(
@@ -3356,8 +3424,7 @@ class Expr:
 
             def wrap_f(x: Series) -> Series:  # pragma: no cover
                 def inner(s: Series) -> Series:  # pragma: no cover
-                    s.rename(x.name, in_place=True)
-                    return function(s)
+                    return function(s.alias(x.name))
 
                 return x.apply(inner, return_dtype=return_dtype, skip_nulls=skip_nulls)
 
@@ -4222,7 +4289,7 @@ class Expr:
         if isinstance(other, Collection) and not isinstance(other, str):
             if isinstance(other, (Set, FrozenSet)):
                 other = sorted(other)
-            other = F.lit(None) if len(other) == 0 else F.lit(pli.Series(other))
+            other = F.lit(None) if len(other) == 0 else F.lit(pl.Series(other))
         else:
             other = expr_to_lit_or_expr(other, str_to_lit=False)
         return self._from_pyexpr(self._pyexpr.is_in(other._pyexpr))
@@ -4584,6 +4651,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -4595,7 +4666,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -4679,6 +4750,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -4690,7 +4765,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal, for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal, for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -4774,6 +4849,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -4785,7 +4864,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -4869,6 +4948,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -4880,7 +4963,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -4964,6 +5047,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -4975,7 +5062,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -5059,6 +5146,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -5070,7 +5161,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -5150,6 +5241,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -5161,7 +5256,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -5247,6 +5342,10 @@ class Expr:
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
+            Suffix with `"_saturating"` to indicate that dates too large for
+            their month should saturate at the largest date
+            (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
+
             If a timedelta or the dynamic string language is used, the `by`
             and `closed` arguments must also be set.
         weights
@@ -5258,7 +5357,7 @@ class Expr:
         center
             Set the labels at the center of the window
         by
-            If the `window_size` is temporal for instance `"5h"` or `"3s`, you must
+            If the `window_size` is temporal for instance `"5h"` or `"3s"`, you must
             set the column that will be used to determine the windows. This column must
             be of dtype `{Date, Datetime}`
         closed : {'left', 'right', 'both', 'none'}
@@ -5497,6 +5596,23 @@ class Expr:
         │ 2   │
         │ 5   │
         └─────┘
+
+        Use 'rank' with 'over' to rank within groups:
+
+        >>> df = pl.DataFrame({"a": [1, 1, 2, 2, 2], "b": [6, 7, 5, 14, 11]})
+        >>> df.with_columns(pl.col("b").rank().over("a").alias("rank"))
+        shape: (5, 3)
+        ┌─────┬─────┬──────┐
+        │ a   ┆ b   ┆ rank │
+        │ --- ┆ --- ┆ ---  │
+        │ i64 ┆ i64 ┆ f32  │
+        ╞═════╪═════╪══════╡
+        │ 1   ┆ 6   ┆ 1.0  │
+        │ 1   ┆ 7   ┆ 2.0  │
+        │ 2   ┆ 5   ┆ 1.0  │
+        │ 2   ┆ 14  ┆ 3.0  │
+        │ 2   ┆ 11  ┆ 2.0  │
+        └─────┴─────┴──────┘
 
         """
         return self._from_pyexpr(self._pyexpr.rank(method, descending, seed))
@@ -6875,6 +6991,16 @@ class Expr:
         """
         return self._from_pyexpr(self._pyexpr.shrink_dtype())
 
+    def cache(self) -> Self:
+        """
+        Cache this expression so that it only is executed once per context.
+
+        This can actually hurt performance and can have a lot of contention.
+        It is advised not to use it until actually benchmarked on your problem.
+
+        """
+        return self._from_pyexpr(self._pyexpr.cache())
+
     def map_dict(
         self,
         remapping: dict[Any, Any],
@@ -6897,6 +7023,10 @@ class Expr:
             Use ``pl.first()``, to keep the original value.
         return_dtype
             Set return dtype to override automatic return dtype determination.
+
+        See Also
+        --------
+        map
 
         Examples
         --------
@@ -7078,7 +7208,7 @@ class Expr:
                     # If no dtype was set, which should only happen when:
                     #     values = remapping.values()
                     # create a Series from those values and infer the dtype.
-                    s = pli.Series(
+                    s = pl.Series(
                         name,
                         values,
                         dtype=None,
@@ -7099,7 +7229,7 @@ class Expr:
                             # that we can assume that the user wants the values Series
                             # of the same dtype as the key Series.
                             dtype = dtype_keys
-                            s = pli.Series(
+                            s = pl.Series(
                                 name,
                                 values,
                                 dtype=dtype_keys,
@@ -7115,7 +7245,7 @@ class Expr:
                     #     values = remapping.keys()
                     # and in cases where the user set the output dtype when:
                     #     values = remapping.values()
-                    s = pli.Series(
+                    s = pl.Series(
                         name,
                         values,
                         dtype=dtype,
@@ -7196,7 +7326,7 @@ class Expr:
 
             if return_dtype_:
                 # Create remap value Series with specified output dtype.
-                remap_value_s = pli.Series(
+                remap_value_s = pl.Series(
                     remap_value_column,
                     remapping.values(),
                     dtype=return_dtype_,
@@ -7219,7 +7349,7 @@ class Expr:
                 (
                     df.lazy()
                     .join(
-                        pli.DataFrame(
+                        pl.DataFrame(
                             [
                                 remap_key_s,
                                 remap_value_s,
@@ -7260,7 +7390,7 @@ class Expr:
 
             if return_dtype:
                 # Create remap value Series with specified output dtype.
-                remap_value_s = pli.Series(
+                remap_value_s = pl.Series(
                     remap_value_column,
                     remapping.values(),
                     dtype=return_dtype,
@@ -7284,7 +7414,7 @@ class Expr:
                     s.to_frame()
                     .lazy()
                     .join(
-                        pli.DataFrame(
+                        pl.DataFrame(
                             [
                                 remap_key_s,
                                 remap_value_s,
@@ -7303,16 +7433,6 @@ class Expr:
 
         func = inner_with_default if default is not None else inner
         return self.map(func)
-
-    @property
-    def arr(self) -> ExprListNameSpace:
-        """
-        Create an object namespace of all list related methods.
-
-        See the individual method pages for full details
-
-        """
-        return ExprListNameSpace(self)
 
     @property
     def bin(self) -> ExprBinaryNameSpace:
@@ -7354,6 +7474,29 @@ class Expr:
         """Create an object namespace of all datetime related methods."""
         return ExprDateTimeNameSpace(self)
 
+    # Keep the `list` and `str` properties below at the end of the definition of Expr,
+    # as to not confuse mypy with the type annotation `str` and `list`
+
+    @property
+    def list(self) -> ExprListNameSpace:
+        """
+        Create an object namespace of all list related methods.
+
+        See the individual method pages for full details
+
+        """
+        return ExprListNameSpace(self)
+
+    @property
+    def arr(self) -> ExprArrayNameSpace:
+        """
+        Create an object namespace of all array related methods.
+
+        See the individual method pages for full details
+
+        """
+        return ExprArrayNameSpace(self)
+
     @property
     def meta(self) -> ExprMetaNameSpace:
         """
@@ -7363,9 +7506,6 @@ class Expr:
 
         """
         return ExprMetaNameSpace(self)
-
-    # Keep the `str` property below at the end of the definition of Expr,
-    # as to not confuse mypy with the type annotation `str`
 
     @property
     def str(self) -> ExprStringNameSpace:
