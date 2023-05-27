@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use home::home_dir;
+// use home::home_dir;
 use polars_core::frame::DataFrame;
 use polars_core::prelude::*;
 
@@ -16,9 +16,9 @@ use crate::ArrowSchema;
 pub fn resolve_homedir(path: &Path) -> PathBuf {
     // replace "~" with home directory
     if path.starts_with("~") {
-        if let Some(homedir) = home_dir() {
-            return homedir.join(path.strip_prefix("~").unwrap());
-        }
+        // if let Some(homedir) = home_dir() {
+        //     return homedir.join(path.strip_prefix("~").unwrap());
+        // }
     }
 
     path.into()
