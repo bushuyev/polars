@@ -44,6 +44,15 @@ pub static PROCESS_ID: Lazy<u128> = Lazy::new(|| {
         .as_nanos()
 });
 
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    pub fn log(s: &str);
+}
+
+
 
 // this is re-exported in utils for polars child crates
 #[cfg(not(target_family = "wasm"))] // only use this on non wasm targets

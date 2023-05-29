@@ -42,6 +42,7 @@ use polars_plan::logical_plan::collect_fingerprints;
 use polars_plan::logical_plan::optimize;
 use polars_plan::utils::expr_to_leaf_column_names;
 use smartstring::alias::String as SmartString;
+use polars_core::log;
 
 use crate::physical_plan::executors::Executor;
 use crate::physical_plan::planner::create_physical_plan;
@@ -545,7 +546,11 @@ impl LazyFrame {
     /// }
     /// ```
     pub fn collect(self) -> PolarsResult<DataFrame> {
+        
         let (mut state, mut physical_plan, _) = self.prepare_collect(false)?;
+
+        log(format!("polars: collect").as_str());
+        
         let out = physical_plan.execute(&mut state);
         #[cfg(debug_assertions)]
         {
