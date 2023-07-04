@@ -13,6 +13,8 @@ use polars_time::{DynamicGroupOptions, RollingGroupOptions};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "python")]
+use crate::prelude::python_udf::PythonFunction;
 use crate::prelude::Expr;
 
 pub type FileCount = u32;
@@ -127,6 +129,7 @@ pub struct UnionOptions {
     pub rows: (Option<usize>, usize),
     pub from_partitioned_ds: bool,
     pub flattened_by_opt: bool,
+    pub rechunk: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -156,7 +159,7 @@ pub struct DistinctOptions {
     pub slice: Option<(i64, usize)>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ApplyOptions {
     /// Collect groups to a list and apply the function over the groups.
@@ -171,7 +174,17 @@ pub enum ApplyOptions {
     ApplyFlat,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// a boolean that can only be set to `false` safely
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct UnsafeBool(bool);
+impl Default for UnsafeBool {
+    fn default() -> Self {
+        UnsafeBool(true)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct FunctionOptions {
     /// Collect groups to a list and apply the function over the groups.
@@ -217,6 +230,9 @@ pub struct FunctionOptions {
     pub pass_name_to_apply: bool,
     // For example a `unique` or a `slice`
     pub changes_length: bool,
+    // Validate the output of a `map`.
+    // this should always be true or we could OOB
+    pub check_lengths: UnsafeBool,
 }
 
 impl FunctionOptions {
@@ -226,6 +242,14 @@ impl FunctionOptions {
     /// - Counts
     pub fn is_groups_sensitive(&self) -> bool {
         matches!(self.collect_groups, ApplyOptions::ApplyGroups)
+    }
+
+    #[cfg(feature = "fused")]
+    pub(crate) unsafe fn no_check_lengths(&mut self) {
+        self.check_lengths = UnsafeBool(false);
+    }
+    pub fn check_lengths(&self) -> bool {
+        self.check_lengths.0
     }
 }
 
@@ -240,6 +264,7 @@ impl Default for FunctionOptions {
             allow_rename: false,
             pass_name_to_apply: false,
             changes_length: false,
+            check_lengths: UnsafeBool(true),
         }
     }
 }
@@ -266,8 +291,7 @@ pub struct SortArguments {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg(feature = "python")]
 pub struct PythonOptions {
-    // Serialized Fn() -> PolarsResult<DataFrame>
-    pub scan_fn: Vec<u8>,
+    pub scan_fn: Option<PythonFunction>,
     pub schema: SchemaRef,
     pub output_schema: Option<SchemaRef>,
     pub with_columns: Option<Arc<Vec<String>>>,

@@ -33,10 +33,8 @@ def test_when_then_implicit_none() -> None:
     )
 
     assert df.select(
-        [
-            pl.when(pl.col("points") > 7).then("Foo"),
-            pl.when(pl.col("points") > 7).then("Foo").alias("bar"),
-        ]
+        pl.when(pl.col("points") > 7).then("Foo"),
+        pl.when(pl.col("points") > 7).then("Foo").alias("bar"),
     ).to_dict(False) == {
         "literal": ["Foo", "Foo", "Foo", None, None, None],
         "bar": ["Foo", "Foo", "Foo", None, None, None],
@@ -159,3 +157,11 @@ def test_predicate_pushdown_block_8661() -> None:
     assert df.lazy().sort(["g", "t"]).filter(
         (pl.col("x").shift() > 20).over("g")
     ).collect().to_dict(False) == {"g": [1, 2, 2], "t": [4, 2, 3], "x": [40, 30, 20]}
+
+
+def test_predicate_pushdown_cumsum_9566() -> None:
+    df = pl.DataFrame({"A": range(10), "B": ["b"] * 5 + ["a"] * 5})
+
+    q = df.lazy().sort(["B", "A"]).filter(pl.col("A").is_in([8, 2]).cumsum() == 1)
+
+    assert q.collect()["A"].to_list() == [8, 9, 0, 1]

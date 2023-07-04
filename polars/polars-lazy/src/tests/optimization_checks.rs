@@ -148,7 +148,12 @@ fn test_no_left_join_pass() -> PolarsResult<()> {
 
     let out = df1
         .lazy()
-        .join(df2.lazy(), [col("idx1")], [col("idx2")], JoinType::Left)
+        .join(
+            df2.lazy(),
+            [col("idx1")],
+            [col("idx2")],
+            JoinType::Left.into(),
+        )
         .filter(col("bar").eq(lit(5i32)))
         .collect()?;
 
@@ -189,7 +194,12 @@ pub fn test_slice_pushdown_join() -> PolarsResult<()> {
     let q2 = scan_foods_parquet(false);
 
     let q = q1
-        .join(q2, [col("category")], [col("category")], JoinType::Left)
+        .join(
+            q2,
+            [col("category")],
+            [col("category")],
+            JoinType::Left.into(),
+        )
         .slice(1, 3)
         // this inserts a cache and blocks slice pushdown
         .with_common_subplan_elimination(false);
@@ -201,7 +211,7 @@ pub fn test_slice_pushdown_join() -> PolarsResult<()> {
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
         use ALogicalPlan::*;
         match lp {
-            Join { options, .. } => options.slice == Some((1, 3)),
+            Join { options, .. } => options.args.slice == Some((1, 3)),
             Slice { .. } => false,
             _ => true,
         }
@@ -563,9 +573,14 @@ fn test_flatten_unions() -> PolarsResult<()> {
     .unwrap()
     .lazy();
 
-    let lf2 = concat(&[lf.clone(), lf.clone()], false, true).unwrap();
-    let lf3 = concat(&[lf.clone(), lf.clone(), lf.clone()], false, true).unwrap();
-    let lf4 = concat(&[lf2.clone(), lf3], false, true).unwrap();
+    let args = UnionArgs {
+        rechunk: false,
+        parallel: true,
+        ..Default::default()
+    };
+    let lf2 = concat(&[lf.clone(), lf.clone()], args).unwrap();
+    let lf3 = concat(&[lf.clone(), lf.clone(), lf.clone()], args).unwrap();
+    let lf4 = concat(&[lf2.clone(), lf3], args).unwrap();
     let root = lf4.optimize(&mut lp_arena, &mut expr_arena).unwrap();
     let lp = lp_arena.get(root);
     match lp {

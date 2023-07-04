@@ -30,6 +30,9 @@ pub(crate) mod projection;
 #[cfg(feature = "python")]
 mod pyarrow;
 mod schema;
+#[cfg(feature = "meta")]
+pub(crate) mod tree_format;
+pub mod visitor;
 
 pub use aexpr::*;
 pub use alp::*;
@@ -49,7 +52,6 @@ use serde::{Deserialize, Serialize};
 pub use crate::logical_plan::optimizer::file_caching::{
     collect_fingerprints, find_column_union_and_fingerprints, FileCacher, FileFingerPrint,
 };
-use crate::logical_plan::schema::FileInfo;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Context {

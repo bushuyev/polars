@@ -217,7 +217,6 @@ impl SeriesTrait for SeriesWrap<BinaryChunked> {
     }
 
     #[inline]
-    #[cfg(feature = "private")]
     unsafe fn get_unchecked(&self, index: usize) -> AnyValue {
         self.0.get_any_value_unchecked(index)
     }
@@ -288,7 +287,7 @@ impl SeriesTrait for SeriesWrap<BinaryChunked> {
         IsIn::is_in(&self.0, other)
     }
     #[cfg(feature = "repeat_by")]
-    fn repeat_by(&self, by: &IdxCa) -> ListChunked {
+    fn repeat_by(&self, by: &IdxCa) -> PolarsResult<ListChunked> {
         RepeatBy::repeat_by(&self.0, by)
     }
 

@@ -27,6 +27,8 @@ pub mod lazyframe;
 pub mod lazygroupby;
 #[cfg(feature = "object")]
 mod object;
+#[cfg(feature = "object")]
+mod on_startup;
 pub mod prelude;
 pub(crate) mod py_modules;
 pub mod series;
@@ -39,7 +41,7 @@ use jemallocator::Jemalloc;
 #[cfg(any(not(target_os = "linux"), use_mimalloc))]
 use mimalloc::MiMalloc;
 #[cfg(feature = "object")]
-pub use object::register_object_builder;
+pub use on_startup::__register_startup_deps;
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
@@ -81,8 +83,6 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::eager::concat_series))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::eager::date_range_eager))
-        .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::eager::diag_concat_df))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::eager::hor_concat_df))
@@ -90,9 +90,15 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(functions::eager::time_range_eager))
         .unwrap();
 
-    // Functions - lazy
-    m.add_wrapped(wrap_pyfunction!(functions::lazy::arange))
+    // Functions - range
+    m.add_wrapped(wrap_pyfunction!(functions::range::arange))
         .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::range::int_range))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::range::int_ranges))
+        .unwrap();
+
+    // Functions - lazy
     m.add_wrapped(wrap_pyfunction!(functions::lazy::arg_sort_by))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::arg_where))
@@ -126,6 +132,8 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(functions::lazy::datetime))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::diag_concat_lf))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::lazy::concat_expr))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::dtype_cols))
         .unwrap();
@@ -164,6 +172,10 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(functions::whenthen::when))
         .unwrap();
 
+    #[cfg(feature = "sql")]
+    m.add_wrapped(wrap_pyfunction!(functions::lazy::sql_expr))
+        .unwrap();
+
     // Functions - I/O
     #[cfg(feature = "ipc")]
     m.add_wrapped(wrap_pyfunction!(functions::io::read_ipc_schema))
@@ -192,7 +204,7 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(functions::misc::dtype_str_repr))
         .unwrap();
     #[cfg(feature = "object")]
-    m.add_wrapped(wrap_pyfunction!(register_object_builder))
+    m.add_wrapped(wrap_pyfunction!(__register_startup_deps))
         .unwrap();
 
     // Exceptions

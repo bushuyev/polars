@@ -43,8 +43,8 @@ def test_comparison_nulls_single() -> None:
             "c": pl.Series([None], dtype=pl.Boolean),
         }
     )
-    assert (df1 == df2).row(0) == (True, True, True)
-    assert (df1 != df2).row(0) == (False, False, False)
+    assert (df1 == df2).row(0) == (None, None, None)
+    assert (df1 != df2).row(0) == (None, None, None)
 
 
 def test_comparison_series_expr() -> None:
@@ -132,3 +132,18 @@ def test_offset_handling_arg_where_7863() -> None:
         .item()
         == 2
     )
+
+
+def test_missing_equality_on_bools() -> None:
+    df = pl.DataFrame(
+        {
+            "a": [True, None, False],
+        }
+    )
+
+    assert df.select(pl.col("a").ne_missing(True))["a"].to_list() == [False, True, True]
+    assert df.select(pl.col("a").ne_missing(False))["a"].to_list() == [
+        True,
+        True,
+        False,
+    ]

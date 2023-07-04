@@ -11,8 +11,9 @@ use polars::io::avro::AvroCompression;
 use polars::io::ipc::IpcCompression;
 use polars::prelude::AnyValue;
 use polars::series::ops::NullBehavior;
+use polars_core::frame::hash_join::JoinValidation;
 use polars_core::frame::row::any_values_to_dtype;
-use polars_core::prelude::QuantileInterpolOptions;
+use polars_core::prelude::{IndexOrder, QuantileInterpolOptions};
 use polars_core::utils::arrow::types::NativeType;
 use polars_lazy::prelude::*;
 use pyo3::basic::CompareOp;
@@ -297,7 +298,7 @@ impl ToPyObject for Wrap<DataType> {
             DataType::Decimal(precision, scale) => pl
                 .getattr("Decimal")
                 .unwrap()
-                .call1((*precision, *scale))
+                .call1((*scale, *precision))
                 .unwrap()
                 .into(),
             DataType::Boolean => pl.getattr("Boolean").unwrap().into(),
@@ -384,12 +385,14 @@ impl FromPyObject<'_> for Wrap<DataType> {
                     "Float64" => DataType::Float64,
                     #[cfg(feature = "object")]
                     "Object" => DataType::Object(OBJECT_NAME),
+                    "Array" => DataType::Array(Box::new(DataType::Null), 0),
                     "List" => DataType::List(Box::new(DataType::Null)),
+                    "Struct" => DataType::Struct(vec![]),
                     "Null" => DataType::Null,
                     "Unknown" => DataType::Unknown,
                     dt => {
                         return Err(PyValueError::new_err(format!(
-                            "{dt} is not a correct polars DataType.",
+                            "{dt} is not a recognised polars DataType.",
                         )))
                     }
                 }
@@ -434,7 +437,7 @@ impl FromPyObject<'_> for Wrap<DataType> {
             }
             dt => {
                 return Err(PyTypeError::new_err(format!(
-                    "A {dt} object is not a correct polars DataType. \
+                    "A {dt} object is not a recognised polars DataType. \
                     Hint: use the class without instantiating it.",
                 )))
             }
@@ -638,7 +641,7 @@ fn convert_datetime(ob: &PyAny) -> PyResult<Wrap<AnyValue>> {
         let (seconds, microseconds) = {
             let convert = UTILS.getattr(py, "_datetime_for_anyvalue_windows").unwrap();
             let out = convert.call1(py, (ob,)).unwrap();
-            let out: (f64, i64) = out.extract(py).unwrap();
+            let out: (i64, i64) = out.extract(py).unwrap();
             out
         };
         // unix
@@ -646,12 +649,12 @@ fn convert_datetime(ob: &PyAny) -> PyResult<Wrap<AnyValue>> {
         let (seconds, microseconds) = {
             let convert = UTILS.getattr(py, "_datetime_for_anyvalue").unwrap();
             let out = convert.call1(py, (ob,)).unwrap();
-            let out: (f64, i64) = out.extract(py).unwrap();
+            let out: (i64, i64) = out.extract(py).unwrap();
             out
         };
 
         // s to us
-        let mut v = (seconds as i64) * 1_000_000;
+        let mut v = seconds * 1_000_000;
         v += microseconds;
 
         // choose "us" as that is python's default unit
@@ -661,19 +664,19 @@ fn convert_datetime(ob: &PyAny) -> PyResult<Wrap<AnyValue>> {
 
 impl<'s> FromPyObject<'s> for Wrap<AnyValue<'s>> {
     fn extract(ob: &'s PyAny) -> PyResult<Self> {
-        if ob.is_instance_of::<PyBool>()? {
+        if ob.is_instance_of::<PyBool>() {
             Ok(AnyValue::Boolean(ob.extract::<bool>().unwrap()).into())
         } else if let Ok(value) = ob.extract::<i64>() {
             Ok(AnyValue::Int64(value).into())
-        } else if ob.is_instance_of::<PyFloat>()? {
+        } else if ob.is_instance_of::<PyFloat>() {
             let value = ob.extract::<f64>().unwrap();
             Ok(AnyValue::Float64(value).into())
-        } else if ob.is_instance_of::<PyString>()? {
+        } else if ob.is_instance_of::<PyString>() {
             let value = ob.extract::<&'s str>().unwrap();
             Ok(AnyValue::Utf8(value).into())
         } else if ob.is_none() {
             Ok(AnyValue::Null.into())
-        } else if ob.is_instance_of::<PyDict>()? {
+        } else if ob.is_instance_of::<PyDict>() {
             let dict = ob.downcast::<PyDict>().unwrap();
             let len = dict.len();
             let mut keys = Vec::with_capacity(len);
@@ -686,7 +689,7 @@ impl<'s> FromPyObject<'s> for Wrap<AnyValue<'s>> {
                 vals.push(val)
             }
             Ok(Wrap(AnyValue::StructOwned(Box::new((vals, keys)))))
-        } else if ob.is_instance_of::<PyList>()? || ob.is_instance_of::<PyTuple>()? {
+        } else if ob.is_instance_of::<PyList>() || ob.is_instance_of::<PyTuple>() {
             materialize_list(ob)
         } else if let Ok(value) = ob.extract::<u64>() {
             Ok(AnyValue::UInt64(value).into())
@@ -1148,6 +1151,21 @@ impl FromPyObject<'_> for Wrap<ParallelStrategy> {
     }
 }
 
+impl FromPyObject<'_> for Wrap<IndexOrder> {
+    fn extract(ob: &PyAny) -> PyResult<Self> {
+        let parsed = match ob.extract::<&str>()? {
+            "fortran" => IndexOrder::Fortran,
+            "c" => IndexOrder::C,
+            v => {
+                return Err(PyValueError::new_err(format!(
+                    "order must be one of {{'fortran', 'c'}}, got {v}",
+                )))
+            }
+        };
+        Ok(Wrap(parsed))
+    }
+}
+
 impl FromPyObject<'_> for Wrap<QuantileInterpolOptions> {
     fn extract(ob: &PyAny) -> PyResult<Self> {
         let parsed = match ob.extract::<&str>()? {
@@ -1258,6 +1276,41 @@ impl FromPyObject<'_> for Wrap<WindowMapping> {
             v => {
                 return Err(PyValueError::new_err(format!(
                     "side must be one of {{'group_to_rows', 'join', 'explode'}}, got {v}",
+                )))
+            }
+        };
+        Ok(Wrap(parsed))
+    }
+}
+
+impl FromPyObject<'_> for Wrap<JoinValidation> {
+    fn extract(ob: &PyAny) -> PyResult<Self> {
+        let parsed = match ob.extract::<&str>()? {
+            "1:1" => JoinValidation::OneToOne,
+            "1:m" => JoinValidation::OneToMany,
+            "m:m" => JoinValidation::ManyToMany,
+            "m:1" => JoinValidation::ManyToOne,
+            v => {
+                return Err(PyValueError::new_err(format!(
+                    "validate must be one of {{'m:m', 'm:1', '1:m', '1:1'}}, got {v}",
+                )))
+            }
+        };
+        Ok(Wrap(parsed))
+    }
+}
+
+#[cfg(feature = "list_sets")]
+impl FromPyObject<'_> for Wrap<SetOperation> {
+    fn extract(ob: &PyAny) -> PyResult<Self> {
+        let parsed = match ob.extract::<&str>()? {
+            "union" => SetOperation::Union,
+            "difference" => SetOperation::Difference,
+            "intersection" => SetOperation::Intersection,
+            "symmetric_difference" => SetOperation::Difference,
+            v => {
+                return Err(PyValueError::new_err(format!(
+                    "validate must be one of {{'union', 'difference', 'intersection', 'symmetric_difference'}}, got {v}",
                 )))
             }
         };

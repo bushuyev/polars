@@ -442,3 +442,59 @@ def test_list_arr_get_8810() -> None:
     assert pl.DataFrame(pl.Series("a", [None], pl.List(pl.Int64))).select(
         pl.col("a").list.get(0)
     ).to_dict(False) == {"a": [None]}
+
+
+def test_list_tail_underflow_9087() -> None:
+    assert pl.Series([["a", "b", "c"]]).list.tail(pl.lit(1, pl.UInt32)).to_list() == [
+        ["c"]
+    ]
+
+
+def test_list_count_match_boolean_nulls_9141() -> None:
+    a = pl.DataFrame({"a": [[True, None, False]]})
+
+    assert a.select(pl.col("a").list.count_match(True))["a"].to_list() == [1]
+
+
+def test_list_set_operations() -> None:
+    df = pl.DataFrame(
+        {"a": [[1, 2, 3], [1, 1, 1], [4]], "b": [[4, 2, 1], [2, 1, 12], [4]]}
+    )
+
+    assert df.select(pl.col("a").list.union("b"))["a"].to_list() == [
+        [1, 2, 3, 4],
+        [1, 2, 12],
+        [4],
+    ]
+    assert df.select(pl.col("a").list.intersection("b"))["a"].to_list() == [
+        [2, 1],
+        [1],
+        [4],
+    ]
+    assert df.select(pl.col("a").list.difference("b"))["a"].to_list() == [[3], [], []]
+    assert df.select(pl.col("b").list.difference("a"))["b"].to_list() == [
+        [4],
+        [2, 12],
+        [],
+    ]
+
+    # check logical types
+    dtype = pl.List(pl.Date)
+    assert (
+        df.select(pl.col("b").cast(dtype).list.difference(pl.col("a").cast(dtype)))[
+            "b"
+        ].dtype
+        == dtype
+    )
+
+    df = pl.DataFrame(
+        {
+            "a": [["a", "b", "c"], ["b", "e", "z"]],
+            "b": [["b", "s", "a"], ["a", "e", "f"]],
+        }
+    )
+
+    assert df.select(pl.col("a").list.union("b"))["a"].to_list() == [
+        ["a", "b", "c", "s"],
+        ["b", "e", "z", "a", "f"],
+    ]

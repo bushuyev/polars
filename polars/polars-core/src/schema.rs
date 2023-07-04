@@ -1,11 +1,13 @@
 use std::fmt::{Debug, Formatter};
 
+use indexmap::map::MutableKeys;
 use indexmap::IndexMap;
 #[cfg(feature = "serde-lazy")]
 use serde::{Deserialize, Serialize};
 use smartstring::alias::String as SmartString;
 
 use crate::prelude::*;
+use crate::utils::try_get_supertype;
 
 /// A map from field/column name (`String`) to the type of that field/column (`DataType`)
 #[derive(Eq, Clone, Default)]
@@ -251,7 +253,7 @@ impl Schema {
     /// If `index` is inbounds, returns `Some((&mut name, &mut dtype))`, else `None`. See
     /// [`get_at_index`][Self::get_at_index] for an immutable version.
     pub fn get_at_index_mut(&mut self, index: usize) -> Option<(&mut SmartString, &mut DataType)> {
-        self.inner.get_index_mut(index)
+        self.inner.get_index_mut2(index)
     }
 
     /// Swap-remove a field by name and, if the field existed, return its dtype
@@ -273,6 +275,16 @@ impl Schema {
     /// faster, but not order-preserving, method, use [`remove`][Self::remove].
     pub fn shift_remove(&mut self, name: &str) -> Option<DataType> {
         self.inner.shift_remove(name)
+    }
+
+    /// Remove a field by name, preserving order, and, if the field existed, return its dtype
+    ///
+    /// If the field does not exist, the schema is not modified and `None` is returned.
+    ///
+    /// This method does a `shift_remove`, which preserves the order of the fields in the schema but **is O(n)**. For a
+    /// faster, but not order-preserving, method, use [`remove`][Self::remove].
+    pub fn shift_remove_index(&mut self, index: usize) -> Option<(SmartString, DataType)> {
+        self.inner.shift_remove_index(index)
     }
 
     /// Whether the schema contains a field named `name`
@@ -298,7 +310,7 @@ impl Schema {
     /// `Some(old_dtype)`.
     ///
     /// This method only ever modifies an existing index and never adds a new field to the schema. To add a new field,
-    /// use [`with_column`] or [`insert_at_index`][Self::insert_at_index].
+    /// use [`with_column`][Self::with_column] or [`insert_at_index`][Self::insert_at_index].
     pub fn set_dtype_at_index(&mut self, index: usize, dtype: DataType) -> Option<DataType> {
         let (_, old_dtype) = self.inner.get_index_mut(index)?;
         Some(std::mem::replace(old_dtype, dtype))
@@ -367,6 +379,21 @@ impl Schema {
     pub fn iter(&self) -> impl Iterator<Item = (&SmartString, &DataType)> + '_ {
         self.inner.iter()
     }
+
+    /// Take another [`Schema`] and try to find the supertypes between them.
+    pub fn to_supertype(&mut self, other: &Schema) -> PolarsResult<bool> {
+        polars_ensure!(self.len() == other.len(), ComputeError: "schema lengths differ");
+
+        let mut changed = false;
+        for ((k, dt), (other_k, other_dt)) in self.inner.iter_mut().zip(other.iter()) {
+            polars_ensure!(k == other_k, ComputeError: "schema names differ: got {}, expected {}", k, other_k);
+
+            let st = try_get_supertype(dt, other_dt)?;
+            changed |= &st != dt;
+            *dt = st
+        }
+        Ok(changed)
+    }
 }
 
 pub type SchemaRef = Arc<Schema>;
@@ -381,7 +408,6 @@ impl IntoIterator for Schema {
 }
 
 /// This trait exists to be unify the API of polars Schema and arrows Schema
-#[cfg(feature = "private")]
 pub trait IndexOfSchema: Debug {
     /// Get the index of a column by name.
     fn index_of(&self, name: &str) -> Option<usize>;

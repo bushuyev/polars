@@ -12,6 +12,7 @@ import pytest
 from numpy.testing import assert_array_equal
 
 import polars as pl
+from polars.exceptions import ComputeError
 from polars.testing import assert_frame_equal, assert_series_equal
 
 
@@ -218,6 +219,23 @@ def test_arrow_null_roundtrip() -> None:
     assert arw.schema.names == tbl.schema.names
     for c1, c2 in zip(arw.columns, tbl.columns):
         assert c1.to_pylist() == c2.to_pylist()
+
+
+def test_arrow_empty_dataframe() -> None:
+    # 0x0 dataframe
+    df = pl.DataFrame({})
+    tbl = pa.table({})
+    assert df.to_arrow() == tbl
+    df2 = cast(pl.DataFrame, pl.from_arrow(df.to_arrow()))
+    assert_frame_equal(df2, df)
+
+    # 0 row dataframe
+    df = pl.DataFrame({}, schema={"a": pl.Int32})
+    tbl = pa.Table.from_batches([], pa.schema([pa.field("a", pa.int32())]))
+    assert df.to_arrow() == tbl
+    df2 = cast(pl.DataFrame, pl.from_arrow(df.to_arrow()))
+    assert df2.schema == {"a": pl.Int32}
+    assert df2.shape == (0, 1)
 
 
 def test_arrow_dict_to_polars() -> None:
@@ -522,17 +540,14 @@ def test_no_rechunk() -> None:
 def test_cat_to_pandas() -> None:
     df = pl.DataFrame({"a": ["best", "test"]})
     df = df.with_columns(pl.all().cast(pl.Categorical))
+
     pd_out = df.to_pandas()
-    assert "category" in str(pd_out["a"].dtype)
-    try:
-        pd_pa_out = df.to_pandas(use_pyarrow_extension_array=True)
-        assert pd_pa_out["a"].dtype.type in (
-            pd.core.dtypes.dtypes.CategoricalDtypeType,
-            pa.DictionaryType,
-        )
-    except ModuleNotFoundError:
-        # Skip test if suitable pandas version not installed.
-        pass
+    assert isinstance(pd_out["a"].dtype, pd.CategoricalDtype)
+
+    pd_pa_out = df.to_pandas(use_pyarrow_extension_array=True)
+    assert pd_pa_out["a"].dtype == pd.ArrowDtype(
+        pa.dictionary(pa.int64(), pa.large_string())
+    )
 
 
 def test_to_pandas() -> None:
@@ -1093,3 +1108,11 @@ def test_sliced_struct_from_arrow() -> None:
     assert pl.from_arrow(tbl.slice(1, 1)).to_dict(False) == {
         "struct_col": [{"a": 2, "b": "bar"}]
     }
+
+
+def test_from_arrow_invalid_time_zone() -> None:
+    arr = pa.array(
+        [datetime(2021, 1, 1, 0, 0, 0, 0)], type=pa.timestamp("ns", tz="+01:00")
+    )
+    with pytest.raises(ComputeError, match=r"unable to parse time zone: '\+01:00'"):
+        pl.from_arrow(arr)

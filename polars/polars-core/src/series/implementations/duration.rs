@@ -347,7 +347,6 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
     }
 
     #[inline]
-    #[cfg(feature = "private")]
     unsafe fn get_unchecked(&self, index: usize) -> AnyValue {
         self.0.get_any_value_unchecked(index)
     }
@@ -457,16 +456,17 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
         self.0.is_in(other)
     }
     #[cfg(feature = "repeat_by")]
-    fn repeat_by(&self, by: &IdxCa) -> ListChunked {
-        self.0
-            .repeat_by(by)
+    fn repeat_by(&self, by: &IdxCa) -> PolarsResult<ListChunked> {
+        Ok(self
+            .0
+            .repeat_by(by)?
             .cast(&DataType::List(Box::new(DataType::Duration(
                 self.0.time_unit(),
             ))))
             .unwrap()
             .list()
             .unwrap()
-            .clone()
+            .clone())
     }
     #[cfg(feature = "mode")]
     fn mode(&self) -> PolarsResult<Series> {

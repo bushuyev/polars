@@ -105,7 +105,7 @@ where
                 path,
                 options,
                 cloud_options,
-                &file_info.schema,
+                file_info.schema,
                 verbose,
             )?;
             Ok(Box::new(src) as Box<dyn Source>)
@@ -138,7 +138,7 @@ where
                 FileType::Ipc(options) => {
                     Box::new(IpcSink::new(path, *options, input_schema.as_ref())?) as Box<dyn Sink>
                 }
-                FileType::Memory => Box::new(OrderedSink::new()),
+                FileType::Memory => Box::new(OrderedSink::new()) as Box<dyn Sink>,
             }
         }
         Join {
@@ -150,12 +150,12 @@ where
             ..
         } => {
             // slice pushdown optimization should not set this one in a streaming query.
-            assert!(options.slice.is_none());
+            assert!(options.args.slice.is_none());
 
-            match &options.how {
+            match &options.args.how {
                 #[cfg(feature = "cross_join")]
                 JoinType::Cross => {
-                    Box::new(CrossJoin::new(options.suffix.clone())) as Box<dyn Sink>
+                    Box::new(CrossJoin::new(options.args.suffix().into())) as Box<dyn Sink>
                 }
                 join_type @ JoinType::Inner | join_type @ JoinType::Left => {
                     let input_schema_left = lp_arena.get(*input_left).schema(lp_arena);
@@ -182,12 +182,12 @@ where
                     };
 
                     Box::new(GenericBuild::new(
-                        Arc::from(options.suffix.as_ref()),
+                        Arc::from(options.args.suffix()),
                         join_type.clone(),
                         swapped,
                         join_columns_left,
                         join_columns_right,
-                    ))
+                    )) as Box<dyn Sink>
                 }
                 _ => unimplemented!(),
             }
@@ -220,7 +220,7 @@ where
                     })
                     .collect::<PolarsResult<Vec<_>>>()?;
 
-                let sort_sink = SortSinkMultiple::new(args.clone(), &input_schema, sort_idx);
+                let sort_sink = SortSinkMultiple::new(args.clone(), input_schema, sort_idx);
                 Box::new(sort_sink) as Box<dyn Sink>
             }
         }
@@ -427,13 +427,11 @@ where
         }
         MapFunction {
             function: FunctionNode::FastProjection { columns },
-            ..
+            input,
         } => {
-            // TODO! pass schema to FastProjection so that
-            // projection can be based on already known schema.
-            let op = operators::FastProjectionOperator {
-                columns: columns.clone(),
-            };
+            let input_schema = lp_arena.get(*input).schema(lp_arena);
+            let op =
+                operators::FastProjectionOperator::new(columns.clone(), input_schema.into_owned());
             Box::new(op) as Box<dyn Operator>
         }
         MapFunction { function, .. } => {
@@ -563,7 +561,7 @@ where
 }
 
 pub fn swap_join_order(options: &JoinOptions) -> bool {
-    matches!(options.how, JoinType::Left)
+    matches!(options.args.how, JoinType::Left)
         || match (options.rows_left, options.rows_right) {
             ((Some(left), _), (Some(right), _)) => left > right,
             ((_, left), (_, right)) => left > right,

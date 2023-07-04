@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any, cast, no_type_check
@@ -11,7 +12,7 @@ import pytest
 
 import polars as pl
 from polars.datatypes import DATETIME_DTYPES, DTYPE_TEMPORAL_UNITS, TEMPORAL_DTYPES
-from polars.exceptions import ArrowError, ComputeError
+from polars.exceptions import ArrowError, ComputeError, TimeZoneAwareConstructorWarning
 from polars.testing import (
     assert_frame_equal,
     assert_series_equal,
@@ -177,7 +178,7 @@ def test_diff_datetime() -> None:
             pl.col("timestamp").str.strptime(pl.Date, format="%Y-%m-%d"),
         ).with_columns(pl.col("timestamp").diff().over("char", mapping_strategy="join"))
     )["timestamp"]
-    assert (out[0] == out[1]).all()
+    assert_series_equal(out[0], out[1])
 
 
 def test_from_pydatetime() -> None:
@@ -341,9 +342,12 @@ def test_datetime_consistency() -> None:
         datetime(3099, 12, 31, 23, 59, 59, 123456, tzinfo=ZoneInfo("Asia/Kathmandu")),
         datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=ZoneInfo("Asia/Kathmandu")),
     ]
-    ddf = pl.DataFrame({"dtm": test_data}).with_columns(
-        pl.col("dtm").dt.nanosecond().alias("ns")
-    )
+    with pytest.warns(
+        TimeZoneAwareConstructorWarning, match="Series with UTC time zone"
+    ):
+        ddf = pl.DataFrame({"dtm": test_data}).with_columns(
+            pl.col("dtm").dt.nanosecond().alias("ns")
+        )
     assert ddf.rows() == [
         (test_data[0], 555555000),
         (test_data[1], 986754000),
@@ -357,9 +361,12 @@ def test_datetime_consistency() -> None:
         datetime(2021, 11, 7, 1, 0, fold=1, tzinfo=ZoneInfo("US/Central")),
         datetime(2021, 11, 7, 2, 0, tzinfo=ZoneInfo("US/Central")),
     ]
-    ddf = pl.DataFrame({"dtm": test_data}).select(
-        pl.col("dtm").dt.convert_time_zone("US/Central")
-    )
+    with pytest.warns(
+        TimeZoneAwareConstructorWarning, match="Series with UTC time zone"
+    ):
+        ddf = pl.DataFrame({"dtm": test_data}).select(
+            pl.col("dtm").dt.convert_time_zone("US/Central")
+        )
     assert ddf.rows() == [
         (test_data[0],),
         (test_data[1],),
@@ -894,7 +901,9 @@ def test_groupby_dynamic_crossing_dst(rule: str, offset: timedelta) -> None:
         start_dt, end_dt, rule, time_zone="US/Central", eager=True
     )
     df = pl.DataFrame({"time": date_range, "value": range(len(date_range))})
-    result = df.groupby_dynamic("time", every=rule).agg(pl.col("value").mean())
+    result = df.groupby_dynamic("time", every=rule, start_by="datapoint").agg(
+        pl.col("value").mean()
+    )
     expected = pl.DataFrame(
         {"time": date_range, "value": range(len(date_range))},
         schema_overrides={"value": pl.Float64},
@@ -1016,6 +1025,14 @@ def test_groupby_dynamic_monthly_crossing_dst() -> None:
         {"time": date_range, "value": range(len(date_range))},
         schema_overrides={"value": pl.Float64},
     )
+    assert_frame_equal(result, expected)
+
+
+def test_groupby_dynamic_2d_9333() -> None:
+    df = pl.DataFrame({"ts": [datetime(2000, 1, 1, 3)], "values": [10.0]})
+    df = df.with_columns(pl.col("ts").set_sorted())
+    result = df.groupby_dynamic("ts", every="2d").agg(pl.col("values"))
+    expected = pl.DataFrame({"ts": [datetime(1999, 12, 31, 0)], "values": [[10.0]]})
     assert_frame_equal(result, expected)
 
 
@@ -1903,16 +1920,11 @@ def test_strptime_empty(time_unit: TimeUnit, time_zone: str | None) -> None:
 
 
 def test_strptime_with_invalid_tz() -> None:
-    with pytest.raises(
-        ComputeError, match="unable to parse time zone: 'foo'"
-    ), pytest.warns(
-        FutureWarning,
-        match="time zones other than those in `zoneinfo.available_timezones",
-    ):
+    with pytest.raises(ComputeError, match="unable to parse time zone: 'foo'"):
         pl.Series(["2020-01-01 03:00:00"]).str.strptime(pl.Datetime("us", "foo"))
     with pytest.raises(
         ComputeError,
-        match="cannot use strptime with both a tz-aware format and a tz-aware dtype",
+        match="Please either drop the time zone from the function call, or set it to UTC",
     ):
         pl.Series(["2020-01-01 03:00:00+01:00"]).str.strptime(
             pl.Datetime("us", "foo"), "%Y-%m-%d %H:%M:%S%z"
@@ -1946,12 +1958,7 @@ def test_strptime_unguessable_format() -> None:
 
 def test_convert_time_zone_invalid() -> None:
     ts = pl.Series(["2020-01-01"]).str.strptime(pl.Datetime)
-    with pytest.raises(
-        ComputeError, match="unable to parse time zone: 'foo'"
-    ), pytest.warns(
-        FutureWarning,
-        match="time zones other than those in `zoneinfo.available_timezones",
-    ):
+    with pytest.raises(ComputeError, match="unable to parse time zone: 'foo'"):
         ts.dt.replace_time_zone("UTC").dt.convert_time_zone("foo")
 
 
@@ -2008,7 +2015,10 @@ def test_tz_datetime_duration_arithm_5221() -> None:
 
 def test_auto_infer_time_zone() -> None:
     dt = datetime(2022, 10, 17, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
-    s = pl.Series([dt])
+    with pytest.warns(
+        TimeZoneAwareConstructorWarning, match="Series with UTC time zone"
+    ):
+        s = pl.Series([dt])
     assert s.dtype == pl.Datetime("us", "UTC")
     assert s[0] == dt
 
@@ -2649,18 +2659,28 @@ def test_series_is_temporal() -> None:
     ],
 )
 def test_misc_precision_any_value_conversion(time_zone: Any, warn: bool) -> None:
+    context_manager: contextlib.AbstractContextManager[pytest.WarningsRecorder | None]
+    msg = r"UTC time zone"
+    if warn:
+        context_manager = pytest.warns(TimeZoneAwareConstructorWarning, match=msg)
+    else:
+        context_manager = contextlib.nullcontext()
+
     tz = ZoneInfo(time_zone) if isinstance(time_zone, str) else time_zone
     # default precision (μs)
     dt = datetime(2514, 5, 30, 1, 53, 4, 986754, tzinfo=tz)
-    assert pl.Series([dt]).to_list() == [dt]
+    with context_manager:
+        assert pl.Series([dt]).to_list() == [dt]
 
     # ms precision
     dt = datetime(2243, 1, 1, 0, 0, 0, 1000, tzinfo=tz)
-    assert pl.Series([dt]).cast(pl.Datetime("ms", time_zone)).to_list() == [dt]
+    with context_manager:
+        assert pl.Series([dt]).cast(pl.Datetime("ms", time_zone)).to_list() == [dt]
 
     # ns precision
     dt = datetime(2256, 1, 1, 0, 0, 0, 1, tzinfo=tz)
-    assert pl.Series([dt]).cast(pl.Datetime("ns", time_zone)).to_list() == [dt]
+    with context_manager:
+        assert pl.Series([dt]).cast(pl.Datetime("ns", time_zone)).to_list() == [dt]
 
 
 @pytest.mark.parametrize(
@@ -2675,3 +2695,45 @@ def test_misc_precision_any_value_conversion(time_zone: Any, warn: bool) -> None
 def test_pytime_conversion(tm: time) -> None:
     s = pl.Series("tm", [tm])
     assert s.to_list() == [tm]
+
+
+@pytest.mark.parametrize(
+    ("input_df", "expected_grouped_df"),
+    [
+        (
+            (
+                pl.DataFrame(
+                    {
+                        "dt": [
+                            datetime(2021, 12, 31, 0, 0, 0),
+                            datetime(2022, 1, 1, 0, 0, 1),
+                            datetime(2022, 3, 31, 0, 0, 1),
+                            datetime(2022, 4, 1, 0, 0, 1),
+                        ]
+                    }
+                )
+            ),
+            pl.DataFrame(
+                {
+                    "dt": [
+                        datetime(2021, 10, 1),
+                        datetime(2022, 1, 1),
+                        datetime(2022, 4, 1),
+                    ],
+                    "num_points": [1, 2, 1],
+                },
+                schema={"dt": pl.Datetime, "num_points": pl.UInt32},
+            ).sort("dt"),
+        )
+    ],
+)
+def test_groupby_dynamic(
+    input_df: pl.DataFrame, expected_grouped_df: pl.DataFrame
+) -> None:
+    result = (
+        input_df.sort("dt")
+        .groupby_dynamic("dt", every="1q")
+        .agg(pl.col("dt").count().alias("num_points"))
+        .sort("dt")
+    )
+    assert_frame_equal(result, expected_grouped_df)

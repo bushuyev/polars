@@ -34,12 +34,6 @@ def test_empty_string_replace() -> None:
     assert s.str.replace("ab", "b").series_equal(s)
 
 
-def test_empty_duration() -> None:
-    s = pl.DataFrame([], {"days": pl.Int32}).select(pl.duration(days="days"))
-    assert s.dtypes == [pl.Duration("ns")]
-    assert s.shape == (0, 1)
-
-
 def test_empty_window_function() -> None:
     expr = (pl.col("VAL") / pl.col("VAL").sum()).over("KEY")
 
@@ -66,3 +60,30 @@ def test_empty_sort_by_args() -> None:
     df = pl.DataFrame([1, 2, 3])
     with pytest.raises(pl.InvalidOperationError):
         df.select(pl.all().sort_by([]))
+
+
+def test_empty_9137() -> None:
+    out = (
+        pl.DataFrame({"id": [], "value": []})
+        .groupby("id")
+        .agg(pl.col("value").pow(2).mean())
+    )
+    assert out.shape == (0, 2)
+    assert out.dtypes == [pl.Float32, pl.Float32]
+
+
+def test_empty_groupby_apply_err() -> None:
+    df = pl.DataFrame(schema={"x": pl.Int64})
+    with pytest.raises(
+        pl.ComputeError, match=r"cannot groupby \+ apply on empty 'DataFrame'"
+    ):
+        df.groupby("x").apply(lambda x: x)
+
+
+def test_empty_list_namespace_output_9585() -> None:
+    dtype = pl.List(pl.Utf8)
+    names = ["sort", "unique", "head", "tail", "shift", "reverse"]
+    df = pl.DataFrame([[None]], schema={"A": dtype})
+    assert df.select(
+        [eval(f"pl.col('A').list.{name}().suffix(f'_{name}')") for name in names]
+    ).dtypes == [dtype] * len(names)

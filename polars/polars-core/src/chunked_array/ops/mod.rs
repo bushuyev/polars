@@ -20,8 +20,11 @@ pub(crate) mod compare_inner;
 mod concat_str;
 #[cfg(feature = "cum_agg")]
 mod cum_agg;
+#[cfg(feature = "dtype-decimal")]
+mod decimal;
 pub(crate) mod downcast;
 pub(crate) mod explode;
+mod explode_and_offsets;
 mod extend;
 mod fill_null;
 mod filter;
@@ -71,7 +74,7 @@ pub trait Reinterpret {
     }
 }
 
-/// Transmute ChunkedArray to bit representation.
+/// Transmute [`ChunkedArray`] to bit representation.
 /// This is useful in hashing context and reduces no.
 /// of compiled code paths.
 pub(crate) trait ToBitRepr {
@@ -282,10 +285,10 @@ pub trait ChunkCast {
     unsafe fn cast_unchecked(&self, data_type: &DataType) -> PolarsResult<Series>;
 }
 
-/// Fastest way to do elementwise operations on a ChunkedArray<T> when the operation is cheaper than
+/// Fastest way to do elementwise operations on a [`ChunkedArray<T>`] when the operation is cheaper than
 /// branching due to null checking
 pub trait ChunkApply<'a, A, B> {
-    /// Apply a closure elementwise and cast to a Numeric ChunkedArray. This is fastest when the null check branching is more expensive
+    /// Apply a closure elementwise and cast to a Numeric [`ChunkedArray`]. This is fastest when the null check branching is more expensive
     /// than the closure application.
     ///
     /// Null values remain null.
@@ -351,7 +354,8 @@ pub trait ChunkApply<'a, A, B> {
 /// Aggregation operations
 pub trait ChunkAgg<T> {
     /// Aggregate the sum of the ChunkedArray.
-    /// Returns `None` if the array is empty or only contains null values.
+    /// Returns `None` if not implemented for `T`.
+    /// If the array is empty, `0` is returned
     fn sum(&self) -> Option<T> {
         None
     }
@@ -425,8 +429,14 @@ pub trait ChunkCompare<Rhs> {
     /// Check for equality.
     fn equal(&self, rhs: Rhs) -> Self::Item;
 
+    /// Check for equality where `None == None`.
+    fn equal_missing(&self, rhs: Rhs) -> Self::Item;
+
     /// Check for inequality.
     fn not_equal(&self, rhs: Rhs) -> Self::Item;
+
+    /// Check for inequality where `None == None`.
+    fn not_equal_missing(&self, rhs: Rhs) -> Self::Item;
 
     /// Greater than comparison.
     fn gt(&self, rhs: Rhs) -> Self::Item;
@@ -463,7 +473,7 @@ pub trait ChunkUnique<T: PolarsDataType> {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 #[cfg_attr(feature = "serde-lazy", derive(Serialize, Deserialize))]
 pub struct SortOptions {
     pub descending: bool,
@@ -551,7 +561,7 @@ pub trait ChunkFullNull {
         Self: Sized;
 }
 
-/// Reverse a ChunkedArray<T>
+/// Reverse a [`ChunkedArray<T>`]
 pub trait ChunkReverse {
     /// Return a reversed version of this array.
     fn reverse(&self) -> Self;
@@ -669,7 +679,7 @@ impl<T: PolarsObject> ChunkExpandAtIndex<ObjectType<T>> for ObjectChunked<T> {
     }
 }
 
-/// Shift the values of a ChunkedArray by a number of periods.
+/// Shift the values of a [`ChunkedArray`] by a number of periods.
 pub trait ChunkShiftFill<T: PolarsDataType, V> {
     /// Shift the values by a given period and fill the parts that will be empty due to this operation
     /// with `fill_value`.
@@ -680,7 +690,7 @@ pub trait ChunkShift<T: PolarsDataType> {
     fn shift(&self, periods: i64) -> ChunkedArray<T>;
 }
 
-/// Combine 2 ChunkedArrays based on some predicate.
+/// Combine two [`ChunkedArray`] based on some predicate.
 pub trait ChunkZip<T: PolarsDataType> {
     /// Create a new ChunkedArray with values from self where the mask evaluates `true` and values
     /// from `other` where the mask evaluates `false`
@@ -729,7 +739,7 @@ pub trait IsIn {
 #[cfg(feature = "repeat_by")]
 pub trait RepeatBy {
     /// Repeat the values `n` times, where `n` is determined by the values in `by`.
-    fn repeat_by(&self, _by: &IdxCa) -> ListChunked {
+    fn repeat_by(&self, _by: &IdxCa) -> PolarsResult<ListChunked> {
         unimplemented!()
     }
 }

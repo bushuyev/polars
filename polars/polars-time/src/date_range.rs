@@ -12,7 +12,6 @@ pub fn in_nanoseconds_window(ndt: &NaiveDateTime) -> bool {
     !(ndt.year() > 2554 || ndt.year() < 1386)
 }
 
-#[cfg(feature = "private")]
 #[doc(hidden)]
 pub fn date_range_impl(
     name: &str,
@@ -45,7 +44,7 @@ pub fn date_range_impl(
         },
         _ => Int64Chunked::new_vec(
             name,
-            temporal_range_vec(start, stop, every, closed, tu, NO_TIMEZONE)?,
+            temporal_range_vec(start, stop, every, closed, tu, None)?,
         )
         .into_datetime(tu, None),
     };
@@ -66,16 +65,12 @@ pub fn date_range(
 ) -> PolarsResult<DatetimeChunked> {
     let (start, stop) = match tu {
         TimeUnit::Nanoseconds => (start.timestamp_nanos(), stop.timestamp_nanos()),
-        TimeUnit::Microseconds => (
-            start.timestamp() + start.timestamp_subsec_micros() as i64,
-            stop.timestamp() + stop.timestamp_subsec_millis() as i64,
-        ),
+        TimeUnit::Microseconds => (start.timestamp_micros(), stop.timestamp_micros()),
         TimeUnit::Milliseconds => (start.timestamp_millis(), stop.timestamp_millis()),
     };
     date_range_impl(name, start, stop, every, closed, tu, tz.as_ref())
 }
 
-#[cfg(feature = "private")]
 #[doc(hidden)]
 pub fn time_range_impl(
     name: &str,
@@ -92,14 +87,7 @@ pub fn time_range_impl(
     }
     let mut out = Int64Chunked::new_vec(
         name,
-        temporal_range_vec(
-            start,
-            stop,
-            every,
-            closed,
-            TimeUnit::Nanoseconds,
-            NO_TIMEZONE,
-        )?,
+        temporal_range_vec(start, stop, every, closed, TimeUnit::Nanoseconds, None)?,
     )
     .into_time();
 

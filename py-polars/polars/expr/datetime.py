@@ -1,28 +1,21 @@
 from __future__ import annotations
 
 import datetime as dt
-import warnings
 from typing import TYPE_CHECKING
 
 import polars._reexport as pl
 from polars import functions as F
 from polars.datatypes import DTYPE_TEMPORAL_UNITS, Date, Int32
-from polars.utils._parse_expr_input import expr_to_lit_or_expr
+from polars.utils._parse_expr_input import parse_as_expression
 from polars.utils._wrap import wrap_expr
 from polars.utils.convert import _timedelta_to_pl_duration
 from polars.utils.decorators import deprecated_alias
-from polars.utils.various import find_stacklevel
 
 if TYPE_CHECKING:
     from datetime import timedelta
 
     from polars import Expr
     from polars.type_aliases import EpochTimeUnit, TimeUnit
-
-TIME_ZONE_DEPRECATION_MESSAGE = (
-    "In a future version of polars, time zones other than those in `zoneinfo.available_timezones()` "
-    "will no longer be supported. Please use one of them instead."
-)
 
 
 class ExprDateTimeNameSpace:
@@ -41,7 +34,8 @@ class ExprDateTimeNameSpace:
         """
         Divide the date/datetime range into buckets.
 
-        Each date/datetime is mapped to the start of its bucket.
+        Each date/datetime is mapped to the start of its bucket. Note that weekly
+        buckets start on Monday.
 
         Parameters
         ----------
@@ -61,11 +55,10 @@ class ExprDateTimeNameSpace:
         - 1s  # 1 second
         - 1m  # 1 minute
         - 1h  # 1 hour
-        - 1d  # 1 day
+        - 1d  # 1 calendar day
         - 1w  # 1 calendar week
         - 1mo # 1 calendar month
-        - 1mo_saturating # same as above, but saturates to the last day of the month
-          if the target date does not exist
+        - 1q  # 1 calendar quarter
         - 1y  # 1 calendar year
 
         These strings can be combined:
@@ -75,6 +68,10 @@ class ExprDateTimeNameSpace:
         Suffix with `"_saturating"` to indicate that dates too large for
         their month should saturate at the largest date (e.g. 2022-02-29 -> 2022-02-28)
         instead of erroring.
+
+        By "calendar day", we mean the corresponding time on the next day (which may
+        not be 24 hours, due to daylight savings). Similarly for "calendar week",
+        "calendar month", "calendar quarter", and "calendar year".
 
         Returns
         -------
@@ -184,9 +181,10 @@ class ExprDateTimeNameSpace:
         1s   # 1 second
         1m   # 1 minute
         1h   # 1 hour
-        1d   # 1 day
+        1d   # 1 calendar day
         1w   # 1 calendar week
         1mo  # 1 calendar month
+        1q   # 1 calendar quarter
         1y   # 1 calendar year
 
         eg: 3d12h4m25s  # 3 days, 12 hours, 4 minutes, and 25 seconds
@@ -194,6 +192,10 @@ class ExprDateTimeNameSpace:
         Suffix with `"_saturating"` to indicate that dates too large for
         their month should saturate at the largest date (e.g. 2022-02-29 -> 2022-02-28)
         instead of erroring.
+
+        By "calendar day", we mean the corresponding time on the next day (which may
+        not be 24 hours, due to daylight savings). Similarly for "calendar week",
+        "calendar month", "calendar quarter", and "calendar year".
 
         Returns
         -------
@@ -335,8 +337,8 @@ class ExprDateTimeNameSpace:
             raise TypeError(
                 f"expected 'time' to be a python time or polars expression, found {time!r}"
             )
-        time = expr_to_lit_or_expr(time)
-        return wrap_expr(self._pyexpr.dt_combine(time._pyexpr, time_unit))
+        time = parse_as_expression(time)
+        return wrap_expr(self._pyexpr.dt_combine(time, time_unit))
 
     def to_string(self, format: str) -> Expr:
         """
@@ -1365,14 +1367,6 @@ class ExprDateTimeNameSpace:
         │ 2020-05-01 00:00:00 UTC ┆ 2020-05-01 01:00:00 BST     │
         └─────────────────────────┴─────────────────────────────┘
         """
-        from polars.dependencies import zoneinfo
-
-        if time_zone not in zoneinfo.available_timezones():
-            warnings.warn(
-                TIME_ZONE_DEPRECATION_MESSAGE,
-                DeprecationWarning,
-                stacklevel=find_stacklevel(),
-            )
         return wrap_expr(self._pyexpr.dt_convert_time_zone(time_zone))
 
     def replace_time_zone(
@@ -1470,14 +1464,6 @@ class ExprDateTimeNameSpace:
         └─────────────────────┴───────┴───────────────────────────────┘
 
         """
-        from polars.dependencies import zoneinfo
-
-        if time_zone is not None and time_zone not in zoneinfo.available_timezones():
-            warnings.warn(
-                TIME_ZONE_DEPRECATION_MESSAGE,
-                DeprecationWarning,
-                stacklevel=find_stacklevel(),
-            )
         return wrap_expr(self._pyexpr.dt_replace_time_zone(time_zone, use_earliest))
 
     def days(self) -> Expr:
@@ -1799,15 +1785,20 @@ class ExprDateTimeNameSpace:
             - 1s    (1 second)
             - 1m    (1 minute)
             - 1h    (1 hour)
-            - 1d    (1 day)
-            - 1w    (1 week)
+            - 1d    (1 calendar day)
+            - 1w    (1 calendar week)
             - 1mo   (1 calendar month)
+            - 1q    (1 calendar quarter)
             - 1y    (1 calendar year)
             - 1i    (1 index count)
 
         Suffix with `"_saturating"` to indicate that dates too large for
         their month should saturate at the largest date (e.g. 2022-02-29 -> 2022-02-28)
         instead of erroring.
+
+        By "calendar day", we mean the corresponding time on the next day (which may
+        not be 24 hours, due to daylight savings). Similarly for "calendar week",
+        "calendar month", "calendar quarter", and "calendar year".
 
         Returns
         -------
@@ -1958,3 +1949,75 @@ class ExprDateTimeNameSpace:
         └─────────────────────┘
         """
         return wrap_expr(self._pyexpr.dt_month_end())
+
+    def base_utc_offset(self) -> Expr:
+        """
+        Base offset from UTC.
+
+        This is usually constant for all datetimes in a given time zone, but
+        may vary in the rare case that a country switches time zone, like
+        Samoa (Apia) did at the end of 2011.
+
+        Returns
+        -------
+        Duration expression
+
+        See Also
+        --------
+        Expr.dt.dst_offset : Daylight savings offset from UTC.
+
+        Examples
+        --------
+        >>> from datetime import datetime
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "ts": [datetime(2011, 12, 29), datetime(2012, 1, 1)],
+        ...     }
+        ... )
+        >>> df = df.with_columns(pl.col("ts").dt.replace_time_zone("Pacific/Apia"))
+        >>> df.with_columns(pl.col("ts").dt.base_utc_offset().alias("base_utc_offset"))
+        shape: (2, 2)
+        ┌────────────────────────────┬─────────────────┐
+        │ ts                         ┆ base_utc_offset │
+        │ ---                        ┆ ---             │
+        │ datetime[μs, Pacific/Apia] ┆ duration[ms]    │
+        ╞════════════════════════════╪═════════════════╡
+        │ 2011-12-29 00:00:00 -10    ┆ -11h            │
+        │ 2012-01-01 00:00:00 +14    ┆ 13h             │
+        └────────────────────────────┴─────────────────┘
+        """
+        return wrap_expr(self._pyexpr.dt_base_utc_offset())
+
+    def dst_offset(self) -> Expr:
+        """
+        Additional offset currently in effect (typically due to daylight saving time).
+
+        Returns
+        -------
+        Duration expression
+
+        See Also
+        --------
+        Expr.dt.base_utc_offset : Base offset from UTC.
+
+        Examples
+        --------
+        >>> from datetime import datetime
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "ts": [datetime(2020, 10, 25), datetime(2020, 10, 26)],
+        ...     }
+        ... )
+        >>> df = df.with_columns(pl.col("ts").dt.replace_time_zone("Europe/London"))
+        >>> df.with_columns(pl.col("ts").dt.dst_offset().alias("dst_offset"))
+        shape: (2, 2)
+        ┌─────────────────────────────┬──────────────┐
+        │ ts                          ┆ dst_offset   │
+        │ ---                         ┆ ---          │
+        │ datetime[μs, Europe/London] ┆ duration[ms] │
+        ╞═════════════════════════════╪══════════════╡
+        │ 2020-10-25 00:00:00 BST     ┆ 1h           │
+        │ 2020-10-26 00:00:00 GMT     ┆ 0ms          │
+        └─────────────────────────────┴──────────────┘
+        """
+        return wrap_expr(self._pyexpr.dt_dst_offset())

@@ -378,19 +378,13 @@ pub(crate) fn _deserialize<'a, A: Borrow<BorrowedValue<'a>>>(
     }
 }
 
-/// Deserializes a `json` [`Value`] into an [`Array`] of [`DataType`]
-/// This is CPU-bounded.
-/// # Error
-/// This function errors iff either:
-/// * `json` is not a [`Value::Array`]
-/// * `data_type` is neither [`DataType::List`] nor [`DataType::LargeList`]
 pub fn deserialize(json: &BorrowedValue, data_type: DataType) -> Result<Box<dyn Array>, Error> {
     match json {
         BorrowedValue::Array(rows) => match data_type {
             DataType::LargeList(inner) => Ok(_deserialize(rows, inner.data_type)),
             _ => todo!("read an Array from a non-Array data type"),
         },
-        _ => todo!("read an Array from a non-Array JSON"),
+        _ => Ok(_deserialize(&[json], data_type)),
     }
 }
 
@@ -419,7 +413,7 @@ fn allocate_array(f: &Field) -> Box<dyn MutableArray> {
     }
 }
 
-/// Deserializes a `json` [`Value`] serialized in Pandas record format into
+/// Deserializes a `json` [`simd_json::value::Value`] serialized in Pandas record format into
 /// a [`Chunk`].
 ///
 /// Uses the `Schema` provided, which can be inferred from arbitrary JSON with
@@ -431,7 +425,7 @@ fn allocate_array(f: &Field) -> Box<dyn MutableArray> {
 ///
 /// This function errors iff either:
 ///
-/// * `json` is not a [`Value::Array`]
+/// * `json` is not an [`Array`]
 /// * `data_type` contains any incompatible types:
 ///   * [`DataType::Struct`]
 ///   * [`DataType::Dictionary`]

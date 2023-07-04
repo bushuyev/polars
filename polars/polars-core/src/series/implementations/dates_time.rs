@@ -329,7 +329,6 @@ macro_rules! impl_dyn_series {
             }
 
             #[inline]
-            #[cfg(feature = "private")]
             unsafe fn get_unchecked(&self, index: usize) -> AnyValue {
                 self.0.get_any_value_unchecked(index)
             }
@@ -439,24 +438,24 @@ macro_rules! impl_dyn_series {
                 self.0.is_in(other)
             }
             #[cfg(feature = "repeat_by")]
-            fn repeat_by(&self, by: &IdxCa) -> ListChunked {
+            fn repeat_by(&self, by: &IdxCa) -> PolarsResult<ListChunked> {
                 match self.0.dtype() {
-                    DataType::Date => self
+                    DataType::Date => Ok(self
                         .0
-                        .repeat_by(by)
+                        .repeat_by(by)?
                         .cast(&DataType::List(Box::new(DataType::Date)))
                         .unwrap()
                         .list()
                         .unwrap()
-                        .clone(),
-                    DataType::Time => self
+                        .clone()),
+                    DataType::Time => Ok(self
                         .0
-                        .repeat_by(by)
+                        .repeat_by(by)?
                         .cast(&DataType::List(Box::new(DataType::Time)))
                         .unwrap()
                         .list()
                         .unwrap()
-                        .clone(),
+                        .clone()),
                     _ => unreachable!(),
                 }
             }

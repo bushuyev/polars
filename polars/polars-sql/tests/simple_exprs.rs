@@ -524,3 +524,29 @@ fn test_case_expr() {
     let df_pl = df.lazy().select(&[case_expr]).collect().unwrap();
     assert!(df_sql.frame_equal(&df_pl));
 }
+
+#[test]
+fn test_sql_expr() {
+    let df = create_sample_df().unwrap();
+    let expr = sql_expr("MIN(a)").unwrap();
+    let actual = df.clone().lazy().select(&[expr]).collect().unwrap();
+    let expected = df.lazy().select(&[col("a").min()]).collect().unwrap();
+    assert!(actual.frame_equal(&expected));
+}
+
+#[test]
+fn test_iss_9471() {
+    let sql = r#"
+    SELECT 
+        ABS(a,a,a,a,1,2,3,XYZRandomLetters,"XYZRandomLetters") as "abs",
+    FROM df"#;
+    let df = df! {
+        "a" => [-4, -3, -2, -1, 0, 1, 2, 3, 4],
+    }
+    .unwrap()
+    .lazy();
+    let mut context = SQLContext::new();
+    context.register("df", df.clone());
+    let res = context.execute(sql);
+    assert!(res.is_err())
+}

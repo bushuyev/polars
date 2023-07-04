@@ -5,6 +5,8 @@ use arrow::compute::cast::CastOptions;
 
 #[cfg(feature = "dtype-categorical")]
 use crate::chunked_array::categorical::CategoricalChunkedBuilder;
+#[cfg(feature = "timezones")]
+use crate::chunked_array::temporal::validate_time_zone;
 use crate::prelude::*;
 
 pub(crate) fn cast_chunks(
@@ -40,7 +42,14 @@ fn cast_impl_inner(
     use DataType::*;
     let out = match dtype {
         Date => out.into_date(),
-        Datetime(tu, tz) => out.into_datetime(*tu, tz.clone()),
+        Datetime(tu, tz) => match tz {
+            #[cfg(feature = "timezones")]
+            Some(tz) => {
+                validate_time_zone(tz)?;
+                out.into_datetime(*tu, Some(tz.clone()))
+            }
+            _ => out.into_datetime(*tu, None),
+        },
         Duration(tu) => out.into_duration(*tu),
         #[cfg(feature = "dtype-time")]
         Time => out.into_time(),
@@ -82,13 +91,11 @@ where
     fn cast_impl(&self, data_type: &DataType, checked: bool) -> PolarsResult<Series> {
         if self.dtype() == data_type {
             // safety: chunks are correct dtype
-            return unsafe {
-                Ok(Series::from_chunks_and_dtype_unchecked(
-                    self.name(),
-                    self.chunks.clone(),
-                    data_type,
-                ))
+            let mut out = unsafe {
+                Series::from_chunks_and_dtype_unchecked(self.name(), self.chunks.clone(), data_type)
             };
+            out.set_sorted_flag(self.is_sorted_flag());
+            return Ok(out);
         }
         match data_type {
             #[cfg(feature = "dtype-categorical")]
@@ -105,10 +112,17 @@ where
             #[cfg(feature = "dtype-struct")]
             DataType::Struct(fields) => cast_single_to_struct(self.name(), &self.chunks, fields),
             _ => cast_impl_inner(self.name(), &self.chunks, data_type, checked).map(|mut s| {
-                // maintain sorted if data types remain signed
+                // maintain sorted if data types
+                // - remain signed
+                // - unsigned -> signed
                 // this may still fail with overflow?
-                if ((self.dtype().is_signed() && data_type.is_signed())
-                    || (self.dtype().is_unsigned() && data_type.is_unsigned()))
+                let dtype = self.dtype();
+
+                let to_signed = data_type.is_signed();
+                let unsigned2unsigned = dtype.is_unsigned() && data_type.is_unsigned();
+                let allowed = to_signed || unsigned2unsigned;
+
+                if (allowed)
                     && (s.null_count() == self.null_count())
                     // physical to logicals
                     || (self.dtype().to_physical() == data_type.to_physical())
@@ -167,6 +181,28 @@ impl ChunkCast for Utf8Chunked {
             }
             #[cfg(feature = "dtype-struct")]
             DataType::Struct(fields) => cast_single_to_struct(self.name(), &self.chunks, fields),
+            #[cfg(feature = "dtype-decimal")]
+            DataType::Decimal(precision, scale) => match (precision, scale) {
+                (precision, Some(scale)) => {
+                    let chunks = self
+                        .downcast_iter()
+                        .map(|arr| {
+                            polars_arrow::compute::cast::cast_utf8_to_decimal(
+                                arr, *precision, *scale,
+                            )
+                        })
+                        .collect();
+                    unsafe {
+                        Ok(Int128Chunked::from_chunks(self.name(), chunks)
+                            .into_decimal_unchecked(*precision, *scale)
+                            .into_series())
+                    }
+                }
+                (None, None) => self.to_decimal(100),
+                _ => {
+                    polars_bail!(ComputeError: "expected 'precision' or 'scale' when casting to Decimal")
+                }
+            },
             _ => cast_impl(self.name(), &self.chunks, data_type),
         }
     }
@@ -196,7 +232,8 @@ impl BinaryChunked {
             .downcast_iter()
             .map(|arr| Box::new(binary_to_utf8_unchecked(arr)) as ArrayRef)
             .collect();
-        Utf8Chunked::from_chunks(self.name(), chunks)
+        let field = Arc::new(Field::new(self.name(), DataType::Utf8));
+        Utf8Chunked::from_chunks_and_metadata(chunks, field, self.bit_settings, true, true)
     }
 }
 
@@ -211,7 +248,10 @@ impl Utf8Chunked {
                 )) as ArrayRef
             })
             .collect();
-        unsafe { BinaryChunked::from_chunks(self.name(), chunks) }
+        let field = Arc::new(Field::new(self.name(), DataType::Binary));
+        unsafe {
+            BinaryChunked::from_chunks_and_metadata(chunks, field, self.bit_settings, true, true)
+        }
     }
 }
 

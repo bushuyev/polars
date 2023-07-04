@@ -6,7 +6,7 @@ use bitflags::bitflags;
 use once_cell::sync::OnceCell;
 use polars_core::config::verbose;
 use polars_core::frame::groupby::GroupsProxy;
-use polars_core::frame::hash_join::JoinOptIds;
+use polars_core::frame::hash_join::ChunkJoinOptIds;
 use polars_core::prelude::*;
 #[cfg(any(feature = "parquet", feature = "csv", feature = "ipc"))]
 use polars_plan::logical_plan::FileFingerPrint;
@@ -15,7 +15,7 @@ use polars_plan::logical_plan::FileFingerPrint;
 use super::file_cache::FileCache;
 use crate::physical_plan::node_timer::NodeTimer;
 
-pub type JoinTuplesCache = Arc<Mutex<PlHashMap<String, JoinOptIds>>>;
+pub type JoinTuplesCache = Arc<Mutex<PlHashMap<String, ChunkJoinOptIds>>>;
 pub type GroupsProxyCache = Arc<Mutex<PlHashMap<String, GroupsProxy>>>;
 
 bitflags! {
@@ -27,6 +27,9 @@ bitflags! {
         const CACHE_WINDOW_EXPR = 0x02;
         /// Indicates the expression has a window function
         const HAS_WINDOW = 0x04;
+        /// If set, the expression is evaluated in the
+        /// streaming engine.
+        const IN_STREAMING = 0x08;
     }
 }
 
@@ -266,6 +269,20 @@ impl ExecutionState {
             flags.insert(StateFlags::HAS_WINDOW);
             flags
         });
+    }
+
+    #[cfg(feature = "streaming")]
+    pub(super) fn set_in_streaming_engine(&mut self) {
+        self.set_flags(&|mut flags| {
+            flags.insert(StateFlags::IN_STREAMING);
+            flags
+        });
+    }
+
+    #[cfg(feature = "streaming")]
+    pub(super) fn in_streaming_engine(&self) -> bool {
+        let flags: StateFlags = self.flags.load(Ordering::Relaxed).into();
+        flags.contains(StateFlags::IN_STREAMING)
     }
 }
 
