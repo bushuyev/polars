@@ -27,7 +27,7 @@ version = "0.29.0"
 
 [workspace.dependencies]
 #rayon = "1.6"
-rayon = {path= "/enc/my-dev/rayon"}
+rayon = {path= "../rayon"}
 thiserror = "^1"
 num-traits = "0.2"
 ahash = "0.8"

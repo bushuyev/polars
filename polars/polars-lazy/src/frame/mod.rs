@@ -549,7 +549,7 @@ impl LazyFrame {
         
         let (mut state, mut physical_plan, _) = self.prepare_collect(false)?;
 
-        log(format!("polars: collect").as_str());
+        //log(format!("polars: collect").as_str());
         
         let out = physical_plan.execute(&mut state);
         #[cfg(debug_assertions)]
