@@ -48,7 +48,7 @@ pub static PROCESS_ID: Lazy<u128> = Lazy::new(|| {
         .as_nanos()
 });
 
-use wasm_bindgen::prelude::*;
+// use wasm_bindgen::prelude::*;
 
 //#[wasm_bindgen]
 extern "C" {
