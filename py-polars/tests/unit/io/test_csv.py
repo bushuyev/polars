@@ -13,11 +13,7 @@ import pytest
 
 import polars as pl
 from polars.exceptions import ComputeError, NoDataError
-from polars.testing import (
-    assert_frame_equal,
-    assert_frame_equal_local_categoricals,
-    assert_series_equal,
-)
+from polars.testing import assert_frame_equal, assert_series_equal
 from polars.utils.various import normalise_filepath
 
 if TYPE_CHECKING:
@@ -54,9 +50,9 @@ def test_to_from_buffer(df_no_lists: pl.DataFrame) -> None:
     read_df = read_df.with_columns(
         [pl.col("cat").cast(pl.Categorical), pl.col("time").cast(pl.Time)]
     )
-    assert_frame_equal_local_categoricals(df, read_df)
+    assert_frame_equal(df, read_df, categorical_as_str=True)
     with pytest.raises(AssertionError):
-        assert_frame_equal_local_categoricals(df.select(["time", "cat"]), read_df)
+        assert_frame_equal(df.select("time", "cat"), read_df, categorical_as_str=True)
 
 
 @pytest.mark.write_disk()
@@ -72,7 +68,7 @@ def test_to_from_file(df_no_lists: pl.DataFrame, tmp_path: Path) -> None:
     read_df = read_df.with_columns(
         [pl.col("cat").cast(pl.Categorical), pl.col("time").cast(pl.Time)]
     )
-    assert_frame_equal_local_categoricals(df, read_df)
+    assert_frame_equal(df, read_df, categorical_as_str=True)
 
 
 def test_normalise_filepath(io_files_path: Path) -> None:
@@ -379,8 +375,7 @@ def test_read_csv_encoding(tmp_path: Path) -> None:
     )
 
     file_path = tmp_path / "encoding.csv"
-    with open(file_path, "wb") as f:
-        f.write(bts)
+    file_path.write_bytes(bts)
 
     file_str = str(file_path)
     bytesio = io.BytesIO(bts)
@@ -487,9 +482,8 @@ def test_compressed_csv(io_files_path: Path) -> None:
 
 def test_partial_decompression(foods_file_path: Path) -> None:
     f_out = io.BytesIO()
-    with open(foods_file_path, "rb") as f_read:  # noqa: SIM117
-        with gzip.GzipFile(fileobj=f_out, mode="w") as f:
-            f.write(f_read.read())
+    with gzip.GzipFile(fileobj=f_out, mode="w") as f:
+        f.write(foods_file_path.read_bytes())
 
     csv_bytes = f_out.getvalue()
     for n_rows in [1, 5, 26]:
@@ -699,6 +693,14 @@ def test_write_csv_delimiter() -> None:
     df.write_csv(f, separator="\t")
     f.seek(0)
     assert f.read() == b"a\tb\n1\t1\n2\t2\n3\t3\n"
+
+
+def test_write_csv_line_terminator() -> None:
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [1, 2, 3]})
+    f = io.BytesIO()
+    df.write_csv(f, line_terminator="\r\n")
+    f.seek(0)
+    assert f.read() == b"a,b\r\n1,1\r\n2,2\r\n3,3\r\n"
 
 
 def test_escaped_null_values() -> None:
@@ -1370,3 +1372,12 @@ def test_write_csv_stdout_stderr(capsys: pytest.CaptureFixture[str]) -> None:
         "2,csv,2023-01-02\n"
         "3,stdout,2023-01-03\n"
     )
+
+
+def test_csv_9929() -> None:
+    df = pl.DataFrame({"nrs": [1, 2, 3]})
+    f = io.BytesIO()
+    df.write_csv(f)
+    f.seek(0)
+    with pytest.raises(pl.NoDataError):
+        pl.read_csv(f, skip_rows=10**6)

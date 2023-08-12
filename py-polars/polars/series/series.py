@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import math
 import os
-import warnings
 from datetime import date, datetime, time, timedelta
 from typing import (
     TYPE_CHECKING,
@@ -60,6 +59,7 @@ from polars.dependencies import (
     _check_for_numpy,
     _check_for_pandas,
     _check_for_pyarrow,
+    dataframe_api_compat,
 )
 from polars.dependencies import numpy as np
 from polars.dependencies import pandas as pd
@@ -89,11 +89,14 @@ from polars.utils.convert import (
     _datetime_to_pl_timestamp,
     _time_to_pl_time,
 )
-from polars.utils.decorators import deprecated_alias
+from polars.utils.deprecation import (
+    deprecate_renamed_parameter,
+    issue_deprecation_warning,
+)
 from polars.utils.meta import get_index_type
 from polars.utils.various import (
     _is_generator,
-    find_stacklevel,
+    parse_percentiles,
     parse_version,
     range_to_series,
     range_to_slice,
@@ -270,7 +273,7 @@ class Series:
             self._s = series_to_pyseries(name, values)
 
         elif isinstance(values, range):
-            self._s = range_to_series(name, values, dtype=dtype)._s
+            self._s = range_to_series(name, values, dtype=dtype)._s  # type: ignore[arg-type]
 
         elif isinstance(values, Sequence):
             self._s = sequence_to_pyseries(
@@ -344,12 +347,14 @@ class Series:
             pandas_to_pyseries(name, values, nan_to_null=nan_to_null)
         )
 
-    def _get_ptr(self) -> int:
+    def _get_ptr(self) -> tuple[int, int, int]:
         """
         Get a pointer to the start of the values buffer of a numeric Series.
 
         This will raise an error if the
         ``Series`` contains multiple chunks
+
+        This will return the offset, length and the pointer itself.
 
         """
         return self._s.get_ptr()
@@ -375,7 +380,8 @@ class Series:
 
         Returns
         -------
-        Dictionary containing the flag name and the value
+        dict
+            Dictionary containing the flag name and the value
 
         """
         out = {
@@ -411,11 +417,10 @@ class Series:
     @property
     def time_unit(self) -> TimeUnit | None:
         """Get the time unit of underlying Datetime Series as {"ns", "us", "ms"}."""
-        warnings.warn(
+        issue_deprecation_warning(
             "`Series.time_unit` is deprecated and will be removed in a future version,"
             " please use `Series.dtype.time_unit` instead",
-            category=DeprecationWarning,
-            stacklevel=find_stacklevel(),
+            version="0.17.5",
         )
         return self._s.time_unit()
 
@@ -828,7 +833,7 @@ class Series:
             raise ValueError("first cast to integer before multiplying datelike dtypes")
         return self._arithmetic(other, "mul", "mul_<>")
 
-    def __pow__(self, exponent: int | float | Series) -> Series:
+    def __pow__(self, exponent: int | float | None | Series) -> Series:
         return self.pow(exponent)
 
     def __rpow__(self, other: Any) -> Series:
@@ -868,6 +873,13 @@ class Series:
 
     def __deepcopy__(self, memo: None = None) -> Self:
         return self.clone()
+
+    def __contains__(self, item: Any) -> bool:
+        # TODO! optimize via `is_in` and `SORTED` flags
+        try:
+            return (self == item).any()
+        except ValueError:
+            return False
 
     def __iter__(self) -> Generator[Any, None, None]:
         if self.dtype == List:
@@ -1111,6 +1123,19 @@ class Series:
                 f" `{method}`."
             )
 
+    def __column_consortium_standard__(self, *, api_version: str | None = None) -> Any:
+        """
+        Provide entry point to the Consortium DataFrame Standard API.
+
+        This is developed and maintained outside of polars.
+        Please report any issues to https://github.com/data-apis/dataframe-api-compat.
+        """
+        return (
+            dataframe_api_compat.polars_standard.convert_to_standard_compliant_column(
+                self, api_version=api_version
+            )
+        )
+
     def _repr_html_(self) -> str:
         """Format output data in HTML for display in Jupyter Notebooks."""
         return self.to_frame()._repr_html_(from_series=True)
@@ -1189,27 +1214,45 @@ class Series:
 
         """
 
-    def any(self) -> bool:
+    def cbrt(self) -> Series:
+        """
+        Compute the cube root of the elements.
+
+        Optimization for
+
+        >>> pl.Series([1, 2]) ** (1.0 / 3)
+        shape: (2,)
+        Series: '' [f64]
+        [
+            1.0
+            1.259921
+        ]
+
+        """
+
+    def any(self, drop_nulls: bool = True) -> bool | None:
         """
         Check if any boolean value in the column is `True`.
 
         Returns
         -------
-        Boolean literal
+        Series
+            Series of data type :class:`Boolean`.
 
         """
-        return self.to_frame().select(F.col(self.name).any()).to_series()[0]
+        return self.to_frame().select(F.col(self.name).any(drop_nulls)).to_series()[0]
 
-    def all(self) -> bool:
+    def all(self, drop_nulls: bool = True) -> bool | None:
         """
         Check if all boolean values in the column are `True`.
 
         Returns
         -------
-        Boolean literal
+        Series
+            Series of data type :class:`Boolean`.
 
         """
-        return self.to_frame().select(F.col(self.name).all()).to_series()[0]
+        return self.to_frame().select(F.col(self.name).all(drop_nulls)).to_series()[0]
 
     def log(self, base: float = math.e) -> Series:
         """Compute the logarithm to a given base."""
@@ -1291,7 +1334,8 @@ class Series:
 
         Returns
         -------
-        Dictionary with summary statistics of a Series.
+        DataFrame
+            Mapping with summary statistics of a Series.
 
         Examples
         --------
@@ -1308,10 +1352,10 @@ class Series:
         │ mean       ┆ 3.0      │
         │ std        ┆ 1.581139 │
         │ min        ┆ 1.0      │
-        │ max        ┆ 5.0      │
-        │ median     ┆ 3.0      │
         │ 25%        ┆ 2.0      │
+        │ 50%        ┆ 3.0      │
         │ 75%        ┆ 4.0      │
+        │ max        ┆ 5.0      │
         └────────────┴──────────┘
 
         >>> series_str = pl.Series(["a", "a", None, "b", "c"])
@@ -1328,11 +1372,6 @@ class Series:
         └────────────┴───────┘
 
         """
-        if isinstance(percentiles, float):
-            percentiles = [percentiles]
-        if percentiles and not all((0 <= p <= 1) for p in percentiles):
-            raise ValueError("Percentiles must all be in the range [0, 1].")
-
         stats: dict[str, PythonLiteral | None]
 
         if self.len() == 0:
@@ -1346,11 +1385,10 @@ class Series:
                 "mean": s.mean(),
                 "std": s.std(),
                 "min": s.min(),
-                "max": s.max(),
-                "median": s.median(),
             }
-            if percentiles:
-                stats.update({f"{p:.0%}": s.quantile(p) for p in percentiles})
+            for p in parse_percentiles(percentiles):
+                stats[f"{p:.0%}"] = s.quantile(p)
+            stats["max"] = s.max()
 
         elif self.is_boolean():
             stats = {
@@ -1371,8 +1409,8 @@ class Series:
                 "count": str(self.len()),
                 "null_count": str(self.null_count()),
                 "min": str(self.dt.min()),
+                "50%": str(self.dt.median()),
                 "max": str(self.dt.max()),
-                "median": str(self.dt.median()),
             }
         else:
             raise TypeError("This type is not supported")
@@ -1414,7 +1452,7 @@ class Series:
         """Reduce this Series to the product value."""
         return self.to_frame().select(F.col(self.name).product()).to_series().item()
 
-    def pow(self, exponent: int | float | Series) -> Series:
+    def pow(self, exponent: int | float | None | Series) -> Series:
         """
         Raise to the power of the given exponent.
 
@@ -1597,98 +1635,167 @@ class Series:
         """
         return wrap_df(self._s.to_dummies(separator))
 
+    @deprecate_renamed_parameter("bins", "breaks", version="0.18.8")
     def cut(
         self,
-        bins: list[float],
+        breaks: list[float],
         labels: list[str] | None = None,
         break_point_label: str = "break_point",
         category_label: str = "category",
         *,
-        maintain_order: bool = False,
-    ) -> DataFrame:
+        series: bool = True,
+        left_closed: bool = False,
+        include_breaks: bool = False,
+    ) -> DataFrame | Series:
         """
-        Bin values into discrete values.
+        Bin continuous values into discrete categories.
 
         Parameters
         ----------
-        bins
-            Bins to create.
+        breaks
+            A list of unique cut points.
         labels
             Labels to assign to the bins. If given the length of labels must be
-            len(bins) + 1.
+            len(breaks) + 1.
         break_point_label
-            Name given to the breakpoint column.
+            Name given to the breakpoint column/field. Only used if series == False or
+            include_breaks == True
         category_label
-            Name given to the category column.
-        maintain_order
-            Keep the order of the original `Series`.
+            Name given to the category column. Only used if series == False
+        series
+            If True, return a categorical Series in the data's original order.
+        left_closed
+            Whether intervals should be [) instead of (]
+        include_breaks
+            Include the the right endpoint of the bin each observation falls in.
+            If returning a DataFrame, it will be a column, and if returning a Series
+            it will be a field in a Struct
 
         Returns
         -------
-        DataFrame
+        DataFrame or Series
 
         Examples
         --------
         >>> a = pl.Series("a", [v / 10 for v in range(-30, 30, 5)])
-        >>> a.cut([-1, 1])
+        >>> a.cut([-1, 1], series=False)
         shape: (12, 3)
-        ┌──────┬─────────────┬──────────────┐
-        │ a    ┆ break_point ┆ category     │
-        │ ---  ┆ ---         ┆ ---          │
-        │ f64  ┆ f64         ┆ cat          │
-        ╞══════╪═════════════╪══════════════╡
-        │ -3.0 ┆ -1.0        ┆ (-inf, -1.0] │
-        │ -2.5 ┆ -1.0        ┆ (-inf, -1.0] │
-        │ -2.0 ┆ -1.0        ┆ (-inf, -1.0] │
-        │ -1.5 ┆ -1.0        ┆ (-inf, -1.0] │
-        │ …    ┆ …           ┆ …            │
-        │ 1.0  ┆ 1.0         ┆ (-1.0, 1.0]  │
-        │ 1.5  ┆ inf         ┆ (1.0, inf]   │
-        │ 2.0  ┆ inf         ┆ (1.0, inf]   │
-        │ 2.5  ┆ inf         ┆ (1.0, inf]   │
-        └──────┴─────────────┴──────────────┘
-
+        ┌──────┬─────────────┬────────────┐
+        │ a    ┆ break_point ┆ category   │
+        │ ---  ┆ ---         ┆ ---        │
+        │ f64  ┆ f64         ┆ cat        │
+        ╞══════╪═════════════╪════════════╡
+        │ -3.0 ┆ -1.0        ┆ (-inf, -1] │
+        │ -2.5 ┆ -1.0        ┆ (-inf, -1] │
+        │ -2.0 ┆ -1.0        ┆ (-inf, -1] │
+        │ -1.5 ┆ -1.0        ┆ (-inf, -1] │
+        │ …    ┆ …           ┆ …          │
+        │ 1.0  ┆ 1.0         ┆ (-1, 1]    │
+        │ 1.5  ┆ inf         ┆ (1, inf]   │
+        │ 2.0  ┆ inf         ┆ (1, inf]   │
+        │ 2.5  ┆ inf         ┆ (1, inf]   │
+        └──────┴─────────────┴────────────┘
+        >>> a.cut([-1, 1], series=True)
+        shape: (12,)
+        Series: 'a' [cat]
+        [
+            "(-inf, -1]"
+            "(-inf, -1]"
+            "(-inf, -1]"
+            "(-inf, -1]"
+            "(-inf, -1]"
+            "(-1, 1]"
+            "(-1, 1]"
+            "(-1, 1]"
+            "(-1, 1]"
+            "(1, inf]"
+            "(1, inf]"
+            "(1, inf]"
+        ]
+        >>> a.cut([-1, 1], series=True, left_closed=True)
+        shape: (12,)
+        Series: 'a' [cat]
+        [
+            "[-inf, -1)"
+            "[-inf, -1)"
+            "[-inf, -1)"
+            "[-inf, -1)"
+            "[-1, 1)"
+            "[-1, 1)"
+            "[-1, 1)"
+            "[-1, 1)"
+            "[1, inf)"
+            "[1, inf)"
+            "[1, inf)"
+            "[1, inf)"
+        ]
         """
-        return wrap_df(
-            self._s.cut(
-                Series(break_point_label, bins, dtype=Float64)._s,
-                labels,
-                break_point_label,
-                category_label,
-                maintain_order,
-            )
-        )
+        n = self._s.name()
 
+        if not series:
+            # "Old style" always includes breaks
+            return (
+                self.to_frame()
+                .with_columns(
+                    F.col(n).cut(breaks, labels, left_closed, True).alias(n + "_bin")
+                )
+                .unnest(n + "_bin")
+                .rename({"brk": break_point_label, n + "_bin": category_label})
+            )
+        res = (
+            self.to_frame()
+            .select(F.col(n).cut(breaks, labels, left_closed, include_breaks))
+            .to_series()
+        )
+        if include_breaks:
+            return res.struct.rename_fields([break_point_label, category_label])
+        return res
+
+    @deprecate_renamed_parameter("q", "quantiles", version="0.18.12")
     def qcut(
         self,
-        quantiles: list[float],
+        quantiles: list[float] | int,
         *,
         labels: list[str] | None = None,
         break_point_label: str = "break_point",
         category_label: str = "category",
-        maintain_order: bool = False,
-    ) -> DataFrame:
+        series: bool = True,
+        left_closed: bool = False,
+        allow_duplicates: bool = False,
+        include_breaks: bool = False,
+    ) -> DataFrame | Series:
         """
-        Bin values into discrete values based on their quantiles.
+        Discretize continuous values into discrete categories based on their quantiles.
 
         Parameters
         ----------
         quantiles
-            List of quantiles to create.
-            We expect quantiles ``0.0 <= quantile <= 1``
+            Either a list of quantile probabilities between 0 and 1 or a positive
+            integer determining the number of evenly spaced probabilities to use.
         labels
             Labels to assign to the quantiles. If given the length of labels must be
-            len(bins) + 1.
+            len(breaks) + 1.
         break_point_label
-            Name given to the breakpoint column.
+            Name given to the breakpoint column/field. Only used if series == False or
+            include_breaks == True
         category_label
-            Name given to the category column.
-        maintain_order
-            Keep the order of the original `Series`.
+            Name given to the category column. Only used if series == False.
+        series
+            If True, return a categorical Series in the data's original order
+        left_closed
+            Whether intervals should be [) instead of (]
+        allow_duplicates
+            If True, the resulting quantile breaks don't have to be unique. This can
+            happen even with unique probs depending on the data. Duplicates will be
+            dropped, resulting in fewer bins.
+        include_breaks
+            Include the the right endpoint of the bin each observation falls in.
+            If returning a DataFrame, it will be a column, and if returning a Series
+            it will be a field in a Struct
 
         Returns
         -------
-        DataFrame
+        DataFrame or Series
 
         Warnings
         --------
@@ -1698,33 +1805,151 @@ class Series:
         Examples
         --------
         >>> a = pl.Series("a", range(-5, 3))
-        >>> a.qcut([0.0, 0.25, 0.75])
+        >>> a.qcut(2, series=True)
+        shape: (8,)
+        Series: 'a' [cat]
+        [
+                "(-inf, -1.5]"
+                "(-inf, -1.5]"
+                "(-inf, -1.5]"
+                "(-inf, -1.5]"
+                "(-1.5, inf]"
+                "(-1.5, inf]"
+                "(-1.5, inf]"
+                "(-1.5, inf]"
+        ]
+        >>> a.qcut([0.0, 0.25, 0.75], series=False)
         shape: (8, 3)
-        ┌──────┬─────────────┬───────────────┐
-        │ a    ┆ break_point ┆ category      │
-        │ ---  ┆ ---         ┆ ---           │
-        │ f64  ┆ f64         ┆ cat           │
-        ╞══════╪═════════════╪═══════════════╡
-        │ -5.0 ┆ -5.0        ┆ (-inf, -5.0]  │
-        │ -4.0 ┆ -3.25       ┆ (-5.0, -3.25] │
-        │ -3.0 ┆ 0.25        ┆ (-3.25, 0.25] │
-        │ -2.0 ┆ 0.25        ┆ (-3.25, 0.25] │
-        │ -1.0 ┆ 0.25        ┆ (-3.25, 0.25] │
-        │ 0.0  ┆ 0.25        ┆ (-3.25, 0.25] │
-        │ 1.0  ┆ inf         ┆ (0.25, inf]   │
-        │ 2.0  ┆ inf         ┆ (0.25, inf]   │
-        └──────┴─────────────┴───────────────┘
-
+        ┌─────┬─────────────┬───────────────┐
+        │ a   ┆ break_point ┆ category      │
+        │ --- ┆ ---         ┆ ---           │
+        │ i64 ┆ f64         ┆ cat           │
+        ╞═════╪═════════════╪═══════════════╡
+        │ -5  ┆ -5.0        ┆ (-inf, -5]    │
+        │ -4  ┆ -3.25       ┆ (-5, -3.25]   │
+        │ -3  ┆ 0.25        ┆ (-3.25, 0.25] │
+        │ -2  ┆ 0.25        ┆ (-3.25, 0.25] │
+        │ -1  ┆ 0.25        ┆ (-3.25, 0.25] │
+        │ 0   ┆ 0.25        ┆ (-3.25, 0.25] │
+        │ 1   ┆ inf         ┆ (0.25, inf]   │
+        │ 2   ┆ inf         ┆ (0.25, inf]   │
+        └─────┴─────────────┴───────────────┘
+        >>> a.qcut([0.0, 0.25, 0.75], series=True)
+        shape: (8,)
+        Series: 'a' [cat]
+        [
+            "(-inf, -5]"
+            "(-5, -3.25]"
+            "(-3.25, 0.25]"
+            "(-3.25, 0.25]"
+            "(-3.25, 0.25]"
+            "(-3.25, 0.25]"
+            "(0.25, inf]"
+            "(0.25, inf]"
+        ]
+        >>> a.qcut([0.0, 0.25, 0.75], series=True, left_closed=True)
+        shape: (8,)
+        Series: 'a' [cat]
+        [
+            "[-5, -3.25)"
+            "[-5, -3.25)"
+            "[-3.25, 0.25)"
+            "[-3.25, 0.25)"
+            "[-3.25, 0.25)"
+            "[-3.25, 0.25)"
+            "[0.25, inf)"
+            "[0.25, inf)"
+        ]
         """
-        return wrap_df(
-            self._s.qcut(
-                Series(quantiles, dtype=Float64)._s,
-                labels,
-                break_point_label,
-                category_label,
-                maintain_order,
+        n = self._s.name()
+        if not series:
+            # "Old style" always includes breaks
+            return (
+                self.to_frame()
+                .with_columns(
+                    F.col(n)
+                    .qcut(quantiles, labels, left_closed, allow_duplicates, True)
+                    .alias(n + "_bin")
+                )
+                .unnest(n + "_bin")
+                .rename({"brk": break_point_label, n + "_bin": category_label})
             )
+        res = (
+            self.to_frame()
+            .select(
+                F.col(n).qcut(
+                    quantiles, labels, left_closed, allow_duplicates, include_breaks
+                )
+            )
+            .to_series()
         )
+        if include_breaks:
+            return res.struct.rename_fields([break_point_label, category_label])
+        return res
+
+    def rle(self) -> Series:
+        """
+        Get the lengths of runs of identical values.
+
+        Returns
+        -------
+        Series
+            Series of data type :class:`Struct` with Fields "lengths" and "values".
+
+        Examples
+        --------
+        >>> s = pl.Series("s", [1, 1, 2, 1, None, 1, 3, 3])
+        >>> s.rle().struct.unnest()
+        shape: (6, 2)
+        ┌─────────┬────────┐
+        │ lengths ┆ values │
+        │ ---     ┆ ---    │
+        │ i32     ┆ i64    │
+        ╞═════════╪════════╡
+        │ 2       ┆ 1      │
+        │ 1       ┆ 2      │
+        │ 1       ┆ 1      │
+        │ 1       ┆ null   │
+        │ 1       ┆ 1      │
+        │ 2       ┆ 3      │
+        └─────────┴────────┘
+        """
+        return self.to_frame().select(F.col(self.name).rle()).to_series()
+
+    def rle_id(self) -> Series:
+        """
+        Map values to run IDs.
+
+        Similar to RLE, but it maps each value to an ID corresponding to the run into
+        which it falls. This is especially useful when you want to define groups by
+        runs of identical values rather than the values themselves.
+
+        Returns
+        -------
+        Series
+
+        See Also
+        --------
+        rle
+
+        Examples
+        --------
+        >>> s = pl.Series("s", [1, 1, 2, 1, None, 1, 3, 3])
+        >>> s.rle_id()
+        shape: (8,)
+        Series: 's' [u32]
+        [
+            0
+            0
+            1
+            2
+            3
+            4
+            5
+            5
+        ]
+        """
+        return self.to_frame().select(F.col(self.name).rle_id()).to_series()
 
     def hist(
         self,
@@ -1892,17 +2117,24 @@ class Series:
 
     def alias(self, name: str) -> Series:
         """
-        Return a copy of the Series with a new alias/name.
+        Rename the series.
 
         Parameters
         ----------
         name
-            New name.
+            The new name.
 
         Examples
         --------
-        >>> srs = pl.Series("x", [1, 2, 3])
-        >>> new_aliased_srs = srs.alias("y")
+        >>> s = pl.Series("a", [1, 2, 3])
+        >>> s.alias("b")
+        shape: (3,)
+        Series: 'b' [i64]
+        [
+                1
+                2
+                3
+        ]
 
         """
         s = self.clone()
@@ -1937,12 +2169,11 @@ class Series:
             # if 'in_place' is not None, this indicates that the parameter was
             # explicitly set by the caller, and we should warn against it (use
             # of NoDefault only applies when one of the valid values is None).
-            warnings.warn(
+            issue_deprecation_warning(
                 "the `in_place` parameter is deprecated and will be removed in a future"
                 " version; note that renaming is a shallow-copy operation with"
                 " essentially zero cost.",
-                category=DeprecationWarning,
-                stacklevel=find_stacklevel(),
+                version="0.17.15",
             )
         if in_place:
             self._s.rename(name)
@@ -2123,7 +2354,7 @@ class Series:
 
         """
 
-    def append(self, other: Series, *, append_chunks: bool = True) -> Series:
+    def append(self, other: Series, *, append_chunks: bool | None = None) -> Self:
         """
         Append a Series to this one.
 
@@ -2132,6 +2363,11 @@ class Series:
         other
             Series to append.
         append_chunks
+            .. deprecated:: 0.18.8
+                This argument will be removed and ``append`` will change to always
+                behave like ``append_chunks=True`` (the previous default). For the
+                behavior of ``append_chunks=False``, use ``Series.extend``.
+
             If set to `True` the append operation will add the chunks from `other` to
             self. This is super cheap.
 
@@ -2155,13 +2391,21 @@ class Series:
             to store them in a single `Series`. In the latter case, finish the sequence
             of `append_chunks` operations with a `rechunk`.
 
+        Warnings
+        --------
+        This method modifies the series in-place. The series is returned for
+        convenience only.
+
+        See Also
+        --------
+        extend
 
         Examples
         --------
-        >>> s = pl.Series("a", [1, 2, 3])
-        >>> s2 = pl.Series("b", [4, 5, 6])
-        >>> s.append(s2)
-        shape: (6,)
+        >>> a = pl.Series("a", [1, 2, 3])
+        >>> b = pl.Series("b", [4, 5])
+        >>> a.append(b)
+        shape: (5,)
         Series: 'a' [i64]
         [
             1
@@ -2169,18 +2413,96 @@ class Series:
             3
             4
             5
-            6
         ]
+
+        The resulting series will consist of multiple chunks.
+
+        >>> a.n_chunks()
+        2
+
+        """
+        if append_chunks is not None:
+            issue_deprecation_warning(
+                "the `append_chunks` argument will be removed and `append` will change"
+                " to always behave like `append_chunks=True` (the previous default)."
+                " For the behavior of `append_chunks=False`, use `Series.extend`.",
+                version="0.18.8",
+            )
+        else:
+            append_chunks = True
+
+        if not append_chunks:
+            return self.extend(other)
+
+        try:
+            self._s.append(other._s)
+        except RuntimeError as exc:
+            if str(exc) == "Already mutably borrowed":
+                self._s.append(other._s.clone())
+            else:
+                raise exc
+        return self
+
+    def extend(self, other: Series) -> Self:
+        """
+        Extend the memory backed by this Series with the values from another.
+
+        Different from ``append``, which adds the chunks from ``other`` to the chunks of
+        this series, ``extend`` appends the data from ``other`` to the underlying memory
+        locations and thus may cause a reallocation (which is expensive).
+
+        If this does `not` cause a reallocation, the resulting data structure will not
+        have any extra chunks and thus will yield faster queries.
+
+        Prefer ``extend`` over ``append`` when you want to do a query after a single
+        append. For instance, during online operations where you add `n` rows
+        and rerun a query.
+
+        Prefer ``append`` over ``extend`` when you want to append many times
+        before doing a query. For instance, when you read in multiple files and want
+        to store them in a single ``Series``. In the latter case, finish the sequence
+        of ``append`` operations with a `rechunk`.
+
+        Parameters
+        ----------
+        other
+            Series to extend the series with.
+
+        Warnings
+        --------
+        This method modifies the series in-place. The series is returned for
+        convenience only.
+
+        See Also
+        --------
+        append
+
+        Examples
+        --------
+        >>> a = pl.Series("a", [1, 2, 3])
+        >>> b = pl.Series("b", [4, 5])
+        >>> a.extend(b)
+        shape: (5,)
+        Series: 'a' [i64]
+        [
+            1
+            2
+            3
+            4
+            5
+        ]
+
+        The resulting series will consist of a single chunk.
+
+        >>> a.n_chunks()
+        1
 
         """
         try:
-            if append_chunks:
-                self._s.append(other._s)
-            else:
-                self._s.extend(other._s)
+            self._s.extend(other._s)
         except RuntimeError as exc:
             if str(exc) == "Already mutably borrowed":
-                self.append(other.clone(), append_chunks=append_chunks)
+                self._s.extend(other._s.clone())
             else:
                 raise exc
         return self
@@ -2486,7 +2808,7 @@ class Series:
 
         Returns
         -------
-        Integer
+        int
 
         Examples
         --------
@@ -2503,7 +2825,7 @@ class Series:
 
         Returns
         -------
-        Integer
+        int
 
         Examples
         --------
@@ -2644,7 +2966,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2667,7 +2990,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2690,7 +3014,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2713,7 +3038,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2736,7 +3062,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2760,7 +3087,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2784,7 +3112,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2834,7 +3163,8 @@ class Series:
 
         Returns
         -------
-        UInt32 Series
+        Series
+            Series of data type :class:`UInt32`.
 
         Examples
         --------
@@ -2855,7 +3185,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2878,7 +3209,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         """
 
@@ -2888,7 +3220,8 @@ class Series:
 
         Returns
         -------
-        Boolean Series
+        Series
+            Series of data type :class:`Boolean`.
 
         Examples
         --------
@@ -2913,7 +3246,8 @@ class Series:
 
         Returns
         -------
-        Exploded Series of same dtype
+        Series
+            Series with the data type of the list elements.
 
         See Also
         --------
@@ -3312,9 +3646,18 @@ class Series:
         use_pyarrow: bool = True,
     ) -> np.ndarray[Any, Any]:
         """
-        Convert this Series to numpy. This operation clones data but is completely safe.
+        Convert this Series to numpy.
 
-        If you want a zero-copy view and know what you are doing, use `.view()`.
+        This operation may clone data but is completely safe. Note that:
+
+        - data which is purely numeric AND without null values is not cloned;
+        - floating point ``nan`` values can be zero-copied;
+        - booleans can't be zero-copied.
+
+        To ensure that no data is cloned, set ``zero_copy_only=True``.
+
+        Alternatively, if you want a zero-copy view and know what you are doing,
+        use `.view()`.
 
         Parameters
         ----------
@@ -3621,7 +3964,8 @@ class Series:
 
         Returns
         -------
-        the series mutated
+        Series
+            The mutated series.
 
         Notes
         -----
@@ -4184,6 +4528,10 @@ class Series:
         """
         Apply a custom/user-defined function (UDF) over elements in this Series.
 
+        .. warning::
+            This method is much slower than the native expressions API.
+            Only use it if you cannot implement your logic otherwise.
+
         If the function returns a different datatype, the return_dtype arg should
         be set, otherwise the method will fail.
 
@@ -4225,7 +4573,7 @@ class Series:
         Examples
         --------
         >>> s = pl.Series("a", [1, 2, 3])
-        >>> s.apply(lambda x: x + 10)
+        >>> s.apply(lambda x: x + 10)  # doctest: +SKIP
         shape: (3,)
         Series: 'a' [i64]
         [
@@ -4239,10 +4587,14 @@ class Series:
         Series
 
         """
+        from polars.utils.udfs import warn_on_inefficient_apply
+
         if return_dtype is None:
             pl_return_dtype = None
         else:
             pl_return_dtype = py_type_to_dtype(return_dtype)
+
+        warn_on_inefficient_apply(function, columns=[self.name], apply_target="series")
         return self._from_pyseries(
             self._s.apply_lambda(function, pl_return_dtype, skip_nulls)
         )
@@ -4312,7 +4664,7 @@ class Series:
 
         Returns
         -------
-        New Series
+        Series
 
         Examples
         --------
@@ -4908,7 +5260,7 @@ class Series:
 
         """
 
-    @deprecated_alias(frac="fraction")
+    @deprecate_renamed_parameter("frac", "fraction", version="0.17.0")
     def sample(
         self,
         n: int | None = None,
@@ -5086,12 +5438,12 @@ class Series:
 
     def interpolate(self, method: InterpolationMethod = "linear") -> Series:
         """
-        Interpolate intermediate values. The interpolation method is linear.
+        Fill null values using interpolation.
 
         Parameters
         ----------
         method : {'linear', 'nearest'}
-            Interpolation method
+            Interpolation method.
 
         Examples
         --------
@@ -5564,9 +5916,10 @@ class Series:
         Returns
         -------
         Series
-            If a single dimension is given, results in a flat Series of shape (len,).
-            If a multiple dimensions are given, results in a Series of Lists with shape
-            (rows, cols).
+            If a single dimension is given, results in a Series of the original
+            data type.
+            If a multiple dimensions are given, results in a Series of data type
+            :class:`List` with shape (rows, cols).
 
         See Also
         --------
@@ -5983,4 +6336,6 @@ def _resolve_datetime_dtype(
             dtype = Datetime("us")
         elif time_unit == "ms":
             dtype = Datetime("ms")
+        elif time_unit == "D":
+            dtype = Date
     return dtype

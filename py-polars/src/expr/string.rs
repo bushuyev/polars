@@ -2,6 +2,7 @@ use polars::prelude::*;
 use pyo3::prelude::*;
 
 use crate::conversion::Wrap;
+use crate::error::PyPolarsErr;
 use crate::PyExpr;
 
 #[pymethods]
@@ -84,32 +85,17 @@ impl PyExpr {
         self.inner.clone().str().to_lowercase().into()
     }
 
+    #[cfg(feature = "nightly")]
     fn str_to_titlecase(&self) -> Self {
         self.inner.clone().str().to_titlecase().into()
     }
 
     fn str_lengths(&self) -> Self {
-        let function = |s: Series| {
-            let ca = s.utf8()?;
-            Ok(Some(ca.str_lengths().into_series()))
-        };
-        self.clone()
-            .inner
-            .map(function, GetOutput::from_type(DataType::UInt32))
-            .with_fmt("str.lengths")
-            .into()
+        self.inner.clone().str().lengths().into()
     }
 
     fn str_n_chars(&self) -> Self {
-        let function = |s: Series| {
-            let ca = s.utf8()?;
-            Ok(Some(ca.str_n_chars().into_series()))
-        };
-        self.clone()
-            .inner
-            .map(function, GetOutput::from_type(DataType::UInt32))
-            .with_fmt("str.n_chars")
-            .into()
+        self.inner.clone().str().n_chars().into()
     }
 
     #[cfg(feature = "lazy_regex")]
@@ -254,6 +240,17 @@ impl PyExpr {
 
     fn str_extract_all(&self, pat: Self) -> Self {
         self.inner.clone().str().extract_all(pat.inner).into()
+    }
+
+    #[cfg(feature = "extract_groups")]
+    fn str_extract_groups(&self, pat: &str) -> PyResult<Self> {
+        Ok(self
+            .inner
+            .clone()
+            .str()
+            .extract_groups(pat)
+            .map_err(PyPolarsErr::from)?
+            .into())
     }
 
     fn str_count_match(&self, pat: &str) -> Self {

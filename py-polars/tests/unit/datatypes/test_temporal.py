@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 from datetime import date, datetime, time, timedelta, timezone
-from typing import TYPE_CHECKING, Any, cast, no_type_check
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -273,11 +273,35 @@ def test_int_to_python_timedelta() -> None:
 
 def test_from_numpy() -> None:
     # note: numpy timeunit support is limited to those supported by polars.
-    # as a result, datetime64[s] will be stored as object.
+    # as a result, datetime64[s] raises
     x = np.asarray(range(100_000, 200_000, 10_000), dtype="datetime64[s]")
-    s = pl.Series(x)
-    assert s[0] == x[0]
-    assert len(s) == 10
+    with pytest.raises(ValueError, match="Please cast to the closest supported unit"):
+        pl.Series(x)
+
+
+@pytest.mark.parametrize(
+    ("numpy_time_unit", "expected_values", "expected_dtype"),
+    [
+        ("ns", ["1970-01-02T01:12:34.123456789"], pl.Datetime("ns")),
+        ("us", ["1970-01-02T01:12:34.123456"], pl.Datetime("us")),
+        ("ms", ["1970-01-02T01:12:34.123"], pl.Datetime("ms")),
+        ("D", ["1970-01-02"], pl.Date),
+    ],
+)
+def test_from_numpy_supported_units(
+    numpy_time_unit: str,
+    expected_values: list[str],
+    expected_dtype: PolarsTemporalType,
+) -> None:
+    values = np.array(
+        ["1970-01-02T01:12:34.123456789123456789"],
+        dtype=f"datetime64[{numpy_time_unit}]",
+    )
+    result = pl.from_numpy(values)
+    expected = (
+        pl.Series("column_0", expected_values).str.strptime(expected_dtype).to_frame()
+    )
+    assert_frame_equal(result, expected)
 
 
 def test_datetime_consistency() -> None:
@@ -1461,16 +1485,17 @@ def test_agg_logical() -> None:
     assert s.min() == dates[0]
 
 
-@no_type_check
 def test_from_time_arrow() -> None:
     pa_times = pa.table([pa.array([10, 20, 30], type=pa.time32("s"))], names=["times"])
 
-    assert pl.from_arrow(pa_times).to_series().to_list() == [
+    result: pl.DataFrame = pl.from_arrow(pa_times)  # type: ignore[assignment]
+
+    assert result.to_series().to_list() == [
         time(0, 0, 10),
         time(0, 0, 20),
         time(0, 0, 30),
     ]
-    assert pl.from_arrow(pa_times).rows() == [
+    assert result.rows() == [
         (time(0, 0, 10),),
         (time(0, 0, 20),),
         (time(0, 0, 30),),
@@ -1866,7 +1891,7 @@ def test_iso_year() -> None:
     assert pl.Series([date(2022, 1, 1)]).dt.iso_year()[0] == 2021
 
 
-def test_replace_timezone() -> None:
+def test_replace_time_zone() -> None:
     ny = ZoneInfo("America/New_York")
     assert pl.DataFrame({"a": [datetime(2022, 9, 25, 14)]}).with_columns(
         pl.col("a").dt.replace_time_zone("America/New_York").alias("b")
@@ -1885,7 +1910,7 @@ def test_replace_timezone() -> None:
 )
 @pytest.mark.parametrize("from_tz", ["Asia/Seoul", None])
 @pytest.mark.parametrize("time_unit", ["ms", "us", "ns"])
-def test_replace_timezone_from_to(
+def test_replace_time_zone_from_to(
     from_tz: str,
     to_tz: str,
     tzinfo: timezone | ZoneInfo,
@@ -1932,16 +1957,14 @@ def test_strptime_with_invalid_tz() -> None:
 
 
 def test_utc_deprecation() -> None:
-    with pytest.warns(
-        DeprecationWarning,
-        match="The `utc` argument is now a no-op and has no effect. You can safely remove it",
+    with pytest.deprecated_call(
+        match="The `utc` argument is now a no-op and has no effect. You can safely remove it"
     ):
         pl.Series(["2020-01-01 03:00:00"]).str.strptime(
             pl.Datetime("us"), "%Y-%m-%d %H:%M:%S", utc=True
         )
-    with pytest.warns(
-        DeprecationWarning,
-        match="The `utc` argument is now a no-op and has no effect. You can safely remove it",
+    with pytest.deprecated_call(
+        match="The `utc` argument is now a no-op and has no effect. You can safely remove it"
     ):
         pl.Series(["2020-01-01 03:00:00"]).str.to_datetime(
             "%Y-%m-%d %H:%M:%S", utc=True
@@ -1951,7 +1974,7 @@ def test_utc_deprecation() -> None:
 def test_strptime_unguessable_format() -> None:
     with pytest.raises(
         ComputeError,
-        match="could not find an appropriate format to parse dates, please define a fmt",
+        match="could not find an appropriate format to parse dates, please define a format",
     ):
         pl.Series(["foobar"]).str.strptime(pl.Datetime)
 
@@ -2387,6 +2410,48 @@ def test_truncate_by_multiple_weeks() -> None:
         "5w": [date(2022, 3, 21), date(2022, 10, 31)],
         "17w": [date(2021, 12, 27), date(2022, 8, 8)],
     }
+
+
+def test_truncate_use_earliest() -> None:
+    ser = pl.date_range(
+        date(2020, 10, 25),
+        datetime(2020, 10, 25, 2),
+        "30m",
+        eager=True,
+        time_zone="Europe/London",
+    ).dt.offset_by("15m")
+    df = ser.to_frame()
+    df = df.with_columns(
+        use_earliest=pl.col("date").dt.dst_offset() == pl.duration(hours=1)
+    )
+    result = df.select(
+        pl.when(pl.col("use_earliest"))
+        .then(pl.col("date").dt.truncate("30m", use_earliest=True))
+        .otherwise(pl.col("date").dt.truncate("30m", use_earliest=False))
+    )
+    expected = pl.date_range(
+        date(2020, 10, 25),
+        datetime(2020, 10, 25, 2),
+        "30m",
+        eager=True,
+        time_zone="Europe/London",
+    ).to_frame()
+    assert_frame_equal(result, expected)
+
+
+def test_truncate_ambiguous() -> None:
+    ser = pl.date_range(
+        date(2020, 10, 25),
+        datetime(2020, 10, 25, 2),
+        "30m",
+        eager=True,
+        time_zone="Europe/London",
+    ).dt.offset_by("15m")
+    with pytest.raises(
+        ComputeError,
+        match="datetime '2020-10-25 01:00:00' is ambiguous in time zone 'Europe/London'",
+    ):
+        ser.dt.truncate("30m")
 
 
 def test_round_by_week() -> None:

@@ -7,6 +7,7 @@ import pytest
 
 import polars as pl
 from polars import StringCache
+from polars.exceptions import StringCacheMismatchError
 from polars.testing import assert_frame_equal
 
 
@@ -74,20 +75,6 @@ def test_cat_to_dummies() -> None:
         "bar_b": [0, 1, 0, 0],
         "bar_c": [0, 0, 0, 1],
     }
-
-
-def test_comp_categorical_lit_dtype() -> None:
-    df = pl.DataFrame(
-        data={"column": ["a", "b", "e"], "values": [1, 5, 9]},
-        schema=[("column", pl.Categorical), ("more", pl.Int32)],
-    )
-
-    assert df.with_columns(
-        pl.when(pl.col("column") == "e")
-        .then("d")
-        .otherwise(pl.col("column"))
-        .alias("column")
-    ).dtypes == [pl.Categorical, pl.Int32]
 
 
 def test_categorical_describe_3487() -> None:
@@ -239,7 +226,7 @@ def test_cast_inner_categorical() -> None:
     assert out.to_list() == [["a"], ["a", "b"]]
 
     with pytest.raises(
-        pl.ComputeError, match=r"casting to categorical not allowed in `arr.eval`"
+        pl.ComputeError, match=r"casting to categorical not allowed in `list.eval`"
     ):
         pl.Series("foo", [["a", "b"], ["a", "b"]]).list.eval(
             pl.element().cast(pl.Categorical)
@@ -301,8 +288,8 @@ def test_err_on_categorical_asof_join_by_arg() -> None:
         ]
     )
     with pytest.raises(
-        pl.ComputeError,
-        match=r"joins/or comparisons on categoricals can only happen if they were created under the same global string cache",
+        StringCacheMismatchError,
+        match="cannot compare categoricals coming from different sources",
     ):
         df1.join_asof(df2, on=pl.col("time").set_sorted(), by="cat")
 
@@ -400,3 +387,24 @@ def test_construct_with_null() -> None:
 
     s = pl.Series([{"struct_A": None}], dtype=pl.Struct({"struct_A": pl.Categorical}))
     assert s.to_list() == [{"struct_A": None}]
+
+
+def test_categorical_concat_string_cached() -> None:
+    with pl.StringCache():
+        df1 = pl.DataFrame({"x": ["A"]}).with_columns(pl.col("x").cast(pl.Categorical))
+        df2 = pl.DataFrame({"x": ["B"]}).with_columns(pl.col("x").cast(pl.Categorical))
+
+    out = pl.concat([df1, df2])
+    assert out.dtypes == [pl.Categorical]
+    assert out["x"].to_list() == ["A", "B"]
+
+
+def test_list_builder_different_categorical_rev_maps() -> None:
+    with pl.StringCache():
+        # built with different values, so different rev-map
+        s1 = pl.Series(["a", "b"], dtype=pl.Categorical)
+        s2 = pl.Series(["c", "d"], dtype=pl.Categorical)
+
+    assert pl.DataFrame({"c": [s1, s2]}).to_dict(False) == {
+        "c": [["a", "b"], ["c", "d"]]
+    }

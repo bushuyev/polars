@@ -78,13 +78,13 @@ impl PyLazyFrame {
                     .map_err(|e| PyPolarsErr::Other(format!("{}", e)))?;
                 self.ldf = LazyFrame::from(lp);
                 Ok(())
-            }
+            },
             Err(e) => Err(e),
         }
     }
 
     #[cfg(all(feature = "json", feature = "serde_json"))]
-    fn write_json(&self, py_f: PyObject) -> PyResult<()> {
+    fn serialize(&self, py_f: PyObject) -> PyResult<()> {
         let file = BufWriter::new(get_file_like(py_f, true)?);
         serde_json::to_writer(file, &self.ldf.logical_plan)
             .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
@@ -93,7 +93,7 @@ impl PyLazyFrame {
 
     #[staticmethod]
     #[cfg(feature = "json")]
-    fn read_json(py_f: PyObject) -> PyResult<Self> {
+    fn deserialize(py_f: PyObject) -> PyResult<Self> {
         // it is faster to first read to memory and then parse: https://github.com/serde-rs/json/issues/160
         // so don't bother with files.
         let mut json = String::new();
@@ -105,7 +105,7 @@ impl PyLazyFrame {
         // we skipped the serializing/deserializing of the static in lifetime in `DataType`
         // so we actually don't have a lifetime at all when serializing.
 
-        // &str still has a lifetime. Bit its ok, because we drop it immediately
+        // &str still has a lifetime. But it's ok, because we drop it immediately
         // in this scope
         let json = unsafe { std::mem::transmute::<&'_ str, &'static str>(json.as_str()) };
 
@@ -334,7 +334,8 @@ impl PyLazyFrame {
         projection_pushdown: bool,
         simplify_expr: bool,
         slice_pushdown: bool,
-        cse: bool,
+        comm_subplan_elim: bool,
+        comm_subexpr_elim: bool,
         streaming: bool,
     ) -> Self {
         let ldf = self.ldf.clone();
@@ -348,13 +349,20 @@ impl PyLazyFrame {
 
         #[cfg(feature = "cse")]
         {
-            ldf = ldf.with_common_subplan_elimination(cse);
+            ldf = ldf.with_comm_subplan_elim(comm_subplan_elim);
+            ldf = ldf.with_comm_subexpr_elim(comm_subexpr_elim);
         }
 
         ldf.into()
     }
 
-    fn sort(&self, by_column: &str, descending: bool, nulls_last: bool) -> Self {
+    fn sort(
+        &self,
+        by_column: &str,
+        descending: bool,
+        nulls_last: bool,
+        maintain_order: bool,
+    ) -> Self {
         let ldf = self.ldf.clone();
         ldf.sort(
             by_column,
@@ -362,21 +370,37 @@ impl PyLazyFrame {
                 descending,
                 nulls_last,
                 multithreaded: true,
+                maintain_order,
             },
         )
         .into()
     }
 
-    fn sort_by_exprs(&self, by: Vec<PyExpr>, descending: Vec<bool>, nulls_last: bool) -> Self {
+    fn sort_by_exprs(
+        &self,
+        by: Vec<PyExpr>,
+        descending: Vec<bool>,
+        nulls_last: bool,
+        maintain_order: bool,
+    ) -> Self {
         let ldf = self.ldf.clone();
         let exprs = by.to_exprs();
-        ldf.sort_by_exprs(exprs, descending, nulls_last).into()
+        ldf.sort_by_exprs(exprs, descending, nulls_last, maintain_order)
+            .into()
     }
 
-    fn top_k(&self, k: IdxSize, by: Vec<PyExpr>, descending: Vec<bool>, nulls_last: bool) -> Self {
+    fn top_k(
+        &self,
+        k: IdxSize,
+        by: Vec<PyExpr>,
+        descending: Vec<bool>,
+        nulls_last: bool,
+        maintain_order: bool,
+    ) -> Self {
         let ldf = self.ldf.clone();
         let exprs = by.to_exprs();
-        ldf.top_k(k, exprs, descending, nulls_last).into()
+        ldf.top_k(k, exprs, descending, nulls_last, maintain_order)
+            .into()
     }
 
     fn bottom_k(
@@ -385,10 +409,12 @@ impl PyLazyFrame {
         by: Vec<PyExpr>,
         descending: Vec<bool>,
         nulls_last: bool,
+        maintain_order: bool,
     ) -> Self {
         let ldf = self.ldf.clone();
         let exprs = by.to_exprs();
-        ldf.bottom_k(k, exprs, descending, nulls_last).into()
+        ldf.bottom_k(k, exprs, descending, nulls_last, maintain_order)
+            .into()
     }
 
     fn cache(&self) -> Self {
@@ -488,6 +514,12 @@ impl PyLazyFrame {
         let ldf = self.ldf.clone();
         let exprs = exprs.to_exprs();
         ldf.select(exprs).into()
+    }
+
+    fn select_seq(&mut self, exprs: Vec<PyExpr>) -> Self {
+        let ldf = self.ldf.clone();
+        let exprs = exprs.to_exprs();
+        ldf.select_seq(exprs).into()
     }
 
     fn groupby(&mut self, by: Vec<PyExpr>, maintain_order: bool) -> PyLazyGroupBy {
@@ -661,6 +693,11 @@ impl PyLazyFrame {
     fn with_columns(&mut self, exprs: Vec<PyExpr>) -> Self {
         let ldf = self.ldf.clone();
         ldf.with_columns(exprs.to_exprs()).into()
+    }
+
+    fn with_columns_seq(&mut self, exprs: Vec<PyExpr>) -> Self {
+        let ldf = self.ldf.clone();
+        ldf.with_columns_seq(exprs.to_exprs()).into()
     }
 
     fn rename(&mut self, existing: Vec<String>, new: Vec<String>) -> Self {

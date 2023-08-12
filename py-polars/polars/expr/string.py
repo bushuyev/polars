@@ -7,7 +7,10 @@ from polars.datatypes import Date, Datetime, Time, py_type_to_dtype
 from polars.exceptions import ChronoFormatWarning
 from polars.utils._parse_expr_input import parse_as_expression
 from polars.utils._wrap import wrap_expr
-from polars.utils.decorators import deprecated_alias
+from polars.utils.deprecation import (
+    deprecate_renamed_parameter,
+    issue_deprecation_warning,
+)
 from polars.utils.various import find_stacklevel
 
 if TYPE_CHECKING:
@@ -136,14 +139,13 @@ class ExprStringNameSpace:
         """
         _validate_format_argument(format)
         if utc is not None:
-            warnings.warn(
+            issue_deprecation_warning(
                 "The `utc` argument is now a no-op and has no effect. "
                 "You can safely remove it. "
                 "Offset-naive strings are parsed as ``pl.Datetime(time_unit)``, "
                 "and offset-aware strings are converted to "
                 '``pl.Datetime(time_unit, "UTC")``.',
-                DeprecationWarning,
-                stacklevel=find_stacklevel(),
+                version="0.17.15",
             )
         return wrap_expr(
             self._pyexpr.str_to_datetime(
@@ -194,7 +196,8 @@ class ExprStringNameSpace:
         _validate_format_argument(format)
         return wrap_expr(self._pyexpr.str_to_time(format, strict, cache))
 
-    @deprecated_alias(datatype="dtype", fmt="format")
+    @deprecate_renamed_parameter("datatype", "dtype", version="0.17.3")
+    @deprecate_renamed_parameter("fmt", "format", version="0.17.3")
     def strptime(
         self,
         dtype: PolarsTemporalType,
@@ -431,7 +434,8 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        Series of dtype Utf8
+        Expr
+            Expression of data type :class:`Utf8`.
 
         Examples
         --------
@@ -989,10 +993,11 @@ class ExprStringNameSpace:
 
     def json_path_match(self, json_path: str) -> Expr:
         """
-        Extract the first match of json string with provided JSONPath expression.
+        Extract the first match of JSON string with the provided JSONPath expression.
 
-        Throw errors if encounter invalid json strings.
-        All return value will be casted to Utf8 regardless of the original value.
+        Throws errors if invalid JSON strings are encountered.
+        All return values will be cast to :class:`Utf8` regardless of the original
+        value.
 
         Documentation on JSONPath standard can be found
         `here <https://goessner.net/articles/JsonPath/>`_.
@@ -1004,8 +1009,9 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        Utf8 array. Contain null if original value is null or the json_path return
-        nothing.
+        Expr
+            Expression of data type :class:`Utf8`. Contains null values if original
+            value is null or the json_path returns nothing.
 
         Examples
         --------
@@ -1062,7 +1068,8 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        Utf8 array with values encoded using provided encoding
+        Expr
+            Expression of data type :class:`Utf8`.
 
         Examples
         --------
@@ -1135,7 +1142,9 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        Utf8 array. Contain null if original value is null or regex capture nothing.
+        Expr
+            Expression of data type :class:`Utf8`. Contains null values if original
+            value is null or the regex captures nothing.
 
         Examples
         --------
@@ -1229,7 +1238,8 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        List[Utf8]
+        Expr
+            Expression of data type ``List(Utf8)``.
 
         Examples
         --------
@@ -1251,6 +1261,94 @@ class ExprStringNameSpace:
         pattern = parse_as_expression(pattern, str_as_lit=True)
         return wrap_expr(self._pyexpr.str_extract_all(pattern))
 
+    def extract_groups(self, pattern: str) -> Expr:
+        r"""
+        Extract all capture groups for the given regex pattern.
+
+        Parameters
+        ----------
+        pattern
+            A valid regular expression pattern, compatible with the `regex crate
+            <https://docs.rs/regex/latest/regex/>`_.
+
+        Notes
+        -----
+        All group names are **strings**.
+
+        If your pattern contains unnamed groups, their numerical position is converted
+        to a string.
+
+        For example, here we access groups 2 and 3 via the names `"2"` and `"3"`::
+
+            >>> df = pl.DataFrame({"col": ["foo bar baz"]})
+            >>> (
+            ...     df.with_columns(
+            ...         pl.col("col").str.extract_groups(r"(\S+) (\S+) (.+)")
+            ...     ).select(pl.col("col").struct["2"], pl.col("col").struct["3"])
+            ... )
+            shape: (1, 2)
+            ┌─────┬─────┐
+            │ 2   ┆ 3   │
+            │ --- ┆ --- │
+            │ str ┆ str │
+            ╞═════╪═════╡
+            │ bar ┆ baz │
+            └─────┴─────┘
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Struct` with fields of data type
+            :class:`Utf8`.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     data={
+        ...         "url": [
+        ...             "http://vote.com/ballon_dor?candidate=messi&ref=python",
+        ...             "http://vote.com/ballon_dor?candidate=weghorst&ref=polars",
+        ...             "http://vote.com/ballon_dor?error=404&ref=rust",
+        ...         ]
+        ...     }
+        ... )
+        >>> pattern = r"candidate=(?<candidate>\w+)&ref=(?<ref>\w+)"
+        >>> df.select(captures=pl.col("url").str.extract_groups(pattern)).unnest(
+        ...     "captures"
+        ... )
+        shape: (3, 2)
+        ┌───────────┬────────┐
+        │ candidate ┆ ref    │
+        │ ---       ┆ ---    │
+        │ str       ┆ str    │
+        ╞═══════════╪════════╡
+        │ messi     ┆ python │
+        │ weghorst  ┆ polars │
+        │ null      ┆ null   │
+        └───────────┴────────┘
+
+        Unnamed groups have their numerical position converted to a string:
+
+        >>> pattern = r"candidate=(\w+)&ref=(\w+)"
+        >>> (
+        ...     df.with_columns(
+        ...         captures=pl.col("url").str.extract_groups(pattern)
+        ...     ).with_columns(name=pl.col("captures").struct["1"].str.to_uppercase())
+        ... )
+        shape: (3, 3)
+        ┌───────────────────────────────────┬───────────────────────┬──────────┐
+        │ url                               ┆ captures              ┆ name     │
+        │ ---                               ┆ ---                   ┆ ---      │
+        │ str                               ┆ struct[2]             ┆ str      │
+        ╞═══════════════════════════════════╪═══════════════════════╪══════════╡
+        │ http://vote.com/ballon_dor?candi… ┆ {"messi","python"}    ┆ MESSI    │
+        │ http://vote.com/ballon_dor?candi… ┆ {"weghorst","polars"} ┆ WEGHORST │
+        │ http://vote.com/ballon_dor?error… ┆ {null,null}           ┆ null     │
+        └───────────────────────────────────┴───────────────────────┴──────────┘
+
+        """
+        return wrap_expr(self._pyexpr.str_extract_groups(pattern))
+
     def count_match(self, pattern: str) -> Expr:
         r"""
         Count all successive non-overlapping regex matches.
@@ -1263,7 +1361,9 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        UInt32 array. Contain null if original value is null or regex capture nothing.
+        Expr
+            Expression of data type :class:`UInt32`. Contains null values if the
+            original value is null or the regex captures nothing.
 
         Examples
         --------
@@ -1312,7 +1412,8 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        List of Utf8 type
+        Expr
+            Expression of data type :class:`Utf8`.
 
         """
         if inclusive:
@@ -1335,6 +1436,12 @@ class ExprStringNameSpace:
             Number of splits to make.
         inclusive
             If True, include the split character/string in the results.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Struct` with fields of data type
+            :class:`Utf8`.
 
         Examples
         --------
@@ -1378,10 +1485,6 @@ class ExprStringNameSpace:
         │ d_4  ┆ d          ┆ 4           │
         └──────┴────────────┴─────────────┘
 
-        Returns
-        -------
-        Struct of Utf8 type
-
         """
         if inclusive:
             return wrap_expr(self._pyexpr.str_split_exact_inclusive(by, n))
@@ -1401,6 +1504,12 @@ class ExprStringNameSpace:
             Substring to split by.
         n
             Max number of items to return.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Struct` with fields of data type
+            :class:`Utf8`.
 
         Examples
         --------
@@ -1440,10 +1549,6 @@ class ExprStringNameSpace:
         │ foo-bar     ┆ foo-bar    ┆ null        │
         │ foo bar baz ┆ foo        ┆ bar baz     │
         └─────────────┴────────────┴─────────────┘
-
-        Returns
-        -------
-        Struct of Utf8 type
 
         """
         return wrap_expr(self._pyexpr.str_splitn(by, n))
@@ -1582,7 +1687,7 @@ class ExprStringNameSpace:
         Returns
         -------
         Expr
-            Series of dtype Utf8.
+            Expression of data type :class:`Utf8`.
 
         Examples
         --------
@@ -1628,7 +1733,8 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        Exploded column with string datatype.
+        Expr
+            Expression of data type :class:`Utf8`.
 
         Examples
         --------
@@ -1669,7 +1775,8 @@ class ExprStringNameSpace:
 
         Returns
         -------
-        Expr : Series of parsed integers in i32 format
+        Expr
+            Expression of data type :class:`Int32`.
 
         Examples
         --------
