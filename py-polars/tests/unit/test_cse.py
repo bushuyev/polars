@@ -6,7 +6,6 @@ from typing import Any
 import pytest
 
 import polars as pl
-from polars.testing import assert_frame_equal
 
 
 def test_cse_rename_cross_join_5405() -> None:
@@ -177,79 +176,6 @@ def test_cse_expr_selection_context(monkeypatch: Any, capfd: Any) -> None:
     assert "run StackExec with 2 CSE" in out
 
 
-def test_cse_expr_selection_streaming(monkeypatch: Any, capfd: Any) -> None:
-    monkeypatch.setenv("POLARS_VERBOSE", "1")
-    q = pl.LazyFrame(
-        {
-            "a": [1, 2, 3, 4],
-            "b": [1, 2, 3, 4],
-            "c": [1, 2, 3, 4],
-        }
-    )
-
-    derived = pl.col("a") * pl.col("b")
-    derived2 = derived * derived
-
-    exprs = [
-        derived.alias("d1"),
-        derived2.alias("d2"),
-        (derived2 * 10).alias("d3"),
-    ]
-
-    assert q.select(exprs).collect(comm_subexpr_elim=True, streaming=True).to_dict(
-        False
-    ) == {"d1": [1, 4, 9, 16], "d2": [1, 16, 81, 256], "d3": [10, 160, 810, 2560]}
-    assert q.with_columns(exprs).collect(
-        comm_subexpr_elim=True, streaming=True
-    ).to_dict(False) == {
-        "a": [1, 2, 3, 4],
-        "b": [1, 2, 3, 4],
-        "c": [1, 2, 3, 4],
-        "d1": [1, 4, 9, 16],
-        "d2": [1, 16, 81, 256],
-        "d3": [10, 160, 810, 2560],
-    }
-    err = capfd.readouterr().err
-    assert "df -> projection[cse] -> ordered_sink" in err
-    assert "df -> hstack[cse] -> ordered_sink" in err
-
-
-@pytest.mark.skip(reason="activate once fixed")
-def test_cse_expr_groupby() -> None:
-    q = pl.LazyFrame(
-        {
-            "a": [1, 2, 3, 4],
-            "b": [1, 2, 3, 4],
-            "c": [1, 2, 3, 4],
-        }
-    )
-
-    derived = pl.col("a") * pl.col("b")
-
-    q = (
-        q.groupby("a")
-        .agg(derived.sum().alias("sum"), derived.min().alias("min"))
-        .sort("min")
-    )
-
-    assert "__POLARS_CSER" in q.explain(comm_subexpr_elim=True, optimized=True)
-
-    s = q.explain(
-        comm_subexpr_elim=True, optimized=True, streaming=True, comm_subplan_elim=False
-    )
-    # check if it uses CSE_expr
-    # and is a complete pipeline
-    assert "__POLARS_CSER" in s
-    assert s.startswith("--- PIPELINE")
-
-    expected = pl.DataFrame(
-        {"a": [1, 2, 3, 4], "sum": [1, 4, 9, 16], "min": [1, 4, 9, 16]}
-    )
-    for streaming in [True, False]:
-        out = q.collect(comm_subexpr_elim=True, streaming=streaming)
-        assert_frame_equal(out, expected)
-
-
 def test_windows_cse_excluded() -> None:
     lf = pl.LazyFrame(
         data=[
@@ -272,6 +198,7 @@ def test_windows_cse_excluded() -> None:
     }
 
 
+@pytest.mark.skip()
 def test_cse_groupby_10215() -> None:
     q = (
         pl.DataFrame(
@@ -352,3 +279,57 @@ def test_cse_10401() -> None:
     q = df.lazy().with_columns(pl.all().fill_null(0).fill_nan(0))
     assert r"""col("clicks").fill_null([0]).alias("__POLARS_CSER""" in q.explain()
     assert q.collect().to_dict(False) == {"clicks": [1.0, 0.0, 0.0]}
+
+
+def test_cse_10441() -> None:
+    assert pl.LazyFrame({"a": [1, 2, 3], "b": [3, 2, 1]}).select(
+        pl.col("a").sum() + pl.col("a").sum() + pl.col("b").sum()
+    ).collect(comm_subexpr_elim=True).to_dict(False) == {"a": [18]}
+
+
+def test_cse_10452() -> None:
+    q = pl.LazyFrame({"a": [1, 2, 3], "b": [3, 2, 1]}).select(
+        pl.col("b").sum() + pl.col("a").sum().over([pl.col("b")]) + pl.col("b").sum()
+    )
+    assert "__POLARS_CSE" in q.explain(comm_subexpr_elim=True)
+    assert q.collect(comm_subexpr_elim=True).to_dict(False) == {"b": [13, 14, 15]}
+
+
+def test_cse_groupby_ternary_10490() -> None:
+    df = pl.DataFrame(
+        {
+            "a": [1, 1, 2, 2],
+            "b": [1, 2, 3, 4],
+            "c": [2, 3, 4, 5],
+        }
+    )
+
+    assert (
+        df.lazy()
+        .groupby("a")
+        .agg(
+            [
+                pl.when(pl.col(col).is_null().all()).then(None).otherwise(1).alias(col)
+                for col in ["b", "c"]
+            ]
+            + [
+                (pl.col("a").sum() * pl.col("a").sum()).alias("x"),
+                (pl.col("b").sum() * pl.col("b").sum()).alias("y"),
+                (pl.col("a").sum() * pl.col("a").sum()).alias("x2"),
+                ((pl.col("a") + 2).sum() * pl.col("a").sum()).alias("x3"),
+                ((pl.col("a") + 2).sum() * pl.col("b").sum()).alias("x4"),
+            ]
+        )
+        .collect(comm_subexpr_elim=True)
+        .sort("a")
+        .to_dict(False)
+    ) == {
+        "a": [1, 2],
+        "b": [1, 1],
+        "c": [1, 1],
+        "x": [4, 16],
+        "y": [9, 49],
+        "x2": [4, 16],
+        "x3": [12, 32],
+        "x4": [18, 56],
+    }

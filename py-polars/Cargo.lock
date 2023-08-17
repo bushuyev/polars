@@ -3,15 +3,6 @@
 version = 3
 
 [[package]]
-name = "addr2line"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4fa78e18c64fce05e902adecd7a5eed15a5e0a3439f7b0e169f0252214865e3"
-dependencies = [
- "gimli",
-]
-
-[[package]]
 name = "adler"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -107,8 +98,9 @@ dependencies = [
 
 [[package]]
 name = "arrow2"
-version = "0.17.3"
-source = "git+https://github.com/jorgecarleitao/arrow2?rev=9beabec8cfb5502582d31ab898fdd36e7af0873c#9beabec8cfb5502582d31ab898fdd36e7af0873c"
+version = "0.17.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59c468daea140b747d781a1da9f7db5f0a8e6636d4af20cc539e43d05b0604fa"
 dependencies = [
  "ahash",
  "arrow-format",
@@ -202,21 +194,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backtrace"
-version = "0.3.68"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4319208da049c43661739c5fade2ba182f09d1dc2299b32298d3a31692b17e12"
-dependencies = [
- "addr2line",
- "cc",
- "cfg-if",
- "libc",
- "miniz_oxide",
- "object",
- "rustc-demangle",
-]
-
-[[package]]
 name = "base64"
 version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,6 +210,9 @@ name = "bitflags"
 version = "2.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "630be753d4e58660abd17930c71b647fe46c27ea6b63cc59e1e3851406972e42"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "brotli"
@@ -386,6 +366,15 @@ checksum = "defaa24ecc093c77630e6c15e17c51f5e187bf35ee514f4e2d67baaa96dae22b"
 dependencies = [
  "ciborium-io",
  "half",
+]
+
+[[package]]
+name = "cmake"
+version = "0.1.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31c789563b815f77f4250caee12365734369f942439b7defd71e18a48197130"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -563,6 +552,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b9429470923de8e8cbd4d2dc513535400b4b3fef0319fb5c4e1f520a7bef743"
 dependencies = [
  "crc32fast",
+ "libz-ng-sys",
  "miniz_oxide",
 ]
 
@@ -691,12 +681,6 @@ dependencies = [
  "wasi",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "gimli"
-version = "0.27.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6c80984affa11d98d1b88b66ac8853f143217b399d3c74116778ff8fdb4ed2e"
 
 [[package]]
 name = "git2"
@@ -1030,6 +1014,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-ng-sys"
+version = "1.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dd9f43e75536a46ee0f92b758f6b63846e594e86638c61a9251338a65baea63"
+dependencies = [
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1143,9 +1137,9 @@ dependencies = [
 
 [[package]]
 name = "multiversion"
-version = "0.7.2"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cda45dade5144c2c929bf2ed6c24bebbba784e9198df049ec87d722b9462bd1"
+checksum = "b2c7b9d7fe61760ce5ea19532ead98541f6b4c495d87247aff9826445cf6872a"
 dependencies = [
  "multiversion-macros",
  "target-features",
@@ -1153,9 +1147,9 @@ dependencies = [
 
 [[package]]
 name = "multiversion-macros"
-version = "0.7.2"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04bffdccbd4798b61dce08c97ce8c66a68976f95541aaf284a6e90c1d1c306e1"
+checksum = "26a83d8500ed06d68877e9de1dde76c1dbb83885dcdbda4ef44ccbc3fbda2ac8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1246,15 +1240,6 @@ dependencies = [
  "num-traits",
  "pyo3",
  "rustc-hash",
-]
-
-[[package]]
-name = "object"
-version = "0.31.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bda667d9f2b5051b8833f59f3bf748b28ef54f850f4fcb389a252aa383866d1"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
@@ -1396,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "polars"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "getrandom",
  "polars-core",
@@ -1410,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "polars-algo"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "polars-core",
  "polars-lazy",
@@ -1419,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "polars-arrow"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "arrow2",
  "atoi",
@@ -1437,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "polars-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "ahash",
  "arrow2",
@@ -1470,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "polars-error"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "arrow2",
  "regex",
@@ -1479,17 +1464,15 @@ dependencies = [
 
 [[package]]
 name = "polars-io"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "ahash",
  "arrow2",
- "async-trait",
  "bytes",
  "chrono",
  "chrono-tz",
  "fast-float",
  "flate2",
- "futures",
  "home",
  "lexical",
  "lexical-core",
@@ -1509,12 +1492,11 @@ dependencies = [
  "serde_json",
  "simd-json",
  "simdutf8",
- "tokio",
 ]
 
 [[package]]
 name = "polars-json"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "ahash",
  "arrow2",
@@ -1530,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "polars-lazy"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "ahash",
  "bitflags 2.3.3",
@@ -1553,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "polars-ops"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "argminmax",
  "arrow2",
@@ -1577,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "polars-pipe"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-queue",
@@ -1598,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "polars-plan"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "ahash",
  "arrow2",
@@ -1623,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "polars-row"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "arrow2",
  "polars-error",
@@ -1632,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "polars-sql"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "polars-arrow",
  "polars-core",
@@ -1645,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "polars-time"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "arrow2",
  "atoi",
@@ -1664,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "polars-utils"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "ahash",
  "hashbrown 0.14.0",
@@ -1694,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "py-polars"
-version = "0.18.13"
+version = "0.18.15"
 dependencies = [
  "ahash",
  "built",
@@ -1914,12 +1896,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
 
 [[package]]
-name = "rustc-demangle"
-version = "0.1.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d626bb9dae77e28219937af045c257c28bfd3f69333c512553507f5f9798cb76"
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2099,16 +2075,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e9f0ab6ef7eb7353d9119c170a436d1bf248eea575ac42d19d12f4e34130831"
 
 [[package]]
-name = "socket2"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2538b18701741680e0322a2302176d3253a35388e2e62f172f64f4f16605f877"
-dependencies = [
- "libc",
- "windows-sys",
-]
-
-[[package]]
 name = "sqlparser"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2258,20 +2224,6 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
-
-[[package]]
-name = "tokio"
-version = "1.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d3ce25f50619af8b0aec2eb23deebe84249e19e2ddd393a6e16e3300a6dadfd"
-dependencies = [
- "backtrace",
- "libc",
- "mio",
- "pin-project-lite",
- "socket2",
- "windows-sys",
-]
 
 [[package]]
 name = "toml"

@@ -60,7 +60,6 @@ from polars.utils.deprecation import (
     deprecate_renamed_function,
     deprecate_renamed_methods,
     deprecate_renamed_parameter,
-    issue_deprecation_warning,
 )
 from polars.utils.various import (
     _in_notebook,
@@ -80,7 +79,6 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from polars import DataFrame, Expr
-    from polars.polars import PyExpr
     from polars.type_aliases import (
         AsofJoinStrategy,
         ClosedInterval,
@@ -113,29 +111,6 @@ if TYPE_CHECKING:
 
     T = TypeVar("T")
     P = ParamSpec("P")
-
-
-def _prepare_select(
-    *exprs: IntoExpr | Iterable[IntoExpr], **named_exprs: IntoExpr
-) -> list[PyExpr]:
-    structify = bool(int(os.environ.get("POLARS_AUTO_STRUCTIFY", 0)))
-
-    if "exprs" in named_exprs:
-        issue_deprecation_warning(
-            "passing expressions to `select` using the keyword argument `exprs` is"
-            " deprecated. Use positional syntax instead.",
-            version="0.18.1",
-        )
-        first_input = named_exprs.pop("exprs")
-        pyexprs = parse_as_list_of_expressions(
-            first_input, *exprs, **named_exprs, __structify=structify
-        )
-    else:
-        pyexprs = parse_as_list_of_expressions(
-            *exprs, **named_exprs, __structify=structify
-        )
-
-    return pyexprs
 
 
 @deprecate_renamed_methods(
@@ -364,6 +339,7 @@ class LazyFrame:
         row_count_offset: int = 0,
         try_parse_dates: bool = False,
         eol_char: str = "\n",
+        raise_if_empty: bool = True,
     ) -> Self:
         """
         Lazily read from a CSV file or multiple files via glob patterns.
@@ -405,6 +381,7 @@ class LazyFrame:
             _prepare_row_count_args(row_count_name, row_count_offset),
             try_parse_dates,
             eol_char=eol_char,
+            raise_if_empty=raise_if_empty,
         )
         return self
 
@@ -593,7 +570,9 @@ class LazyFrame:
         Parameters
         ----------
         source
-            Path to a file or a file-like object.
+            Path to a file or a file-like object (by file-like object, we refer to
+            objects that have a ``read()`` method, such as a file handler (e.g.
+            via builtin ``open`` function) or ``BytesIO``).
 
         See Also
         --------
@@ -610,7 +589,9 @@ class LazyFrame:
         Parameters
         ----------
         source
-            Path to a file or a file-like object.
+            Path to a file or a file-like object (by file-like object, we refer to
+            objects that have a ``read()`` method, such as a file handler (e.g.
+            via builtin ``open`` function) or ``BytesIO``).
 
         See Also
         --------
@@ -737,12 +718,14 @@ class LazyFrame:
 
     def __bool__(self) -> NoReturn:
         raise ValueError(
-            "The truth value of a LazyFrame is ambiguous; consequently it "
-            "cannot be used in boolean context with and/or/not operators. "
+            "the truth value of a LazyFrame is ambiguous"
+            "\n\nLazyFrames cannot be used in boolean context with and/or/not operators"
         )
 
     def _comparison_error(self, operator: str) -> NoReturn:
-        raise TypeError(f'"{operator}" comparison not supported for LazyFrame objects.')
+        raise TypeError(
+            f'"{operator!r}" comparison not supported for LazyFrame objects'
+        )
 
     def __eq__(self, other: Any) -> NoReturn:
         self._comparison_error("==")
@@ -775,7 +758,7 @@ class LazyFrame:
         if not isinstance(item, slice):
             raise TypeError(
                 "'LazyFrame' object is not subscriptable (aside from slicing). Use"
-                " 'select()' or 'filter()' instead."
+                " 'select()' or 'filter()' instead"
             )
         return LazyPolarsSlice(self).apply(item)
 
@@ -846,7 +829,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         >>> lf = pl.LazyFrame({"a": [1, 2, 3]}).sum()
         >>> json = lf.serialize()
         >>> json
-        '{"LocalProjection":{"expr":[{"Agg":{"Sum":{"Column":"a"}}}],"input":{"DataFrameScan":{"df":{"columns":[{"name":"a","datatype":"Int64","bit_settings":0,"values":[1,2,3]}]},"schema":{"inner":{"a":"Int64"}},"output_schema":null,"projection":null,"selection":null}},"schema":{"inner":{"a":"Int64"}}}}'
+        '{"LocalProjection":{"expr":[{"Agg":{"Sum":{"Column":"a"}}}],"input":{"DataFrameScan":{"df":{"columns":[{"name":"a","datatype":"Int64","bit_settings":"","values":[1,2,3]}]},"schema":{"inner":{"a":"Int64"}},"output_schema":null,"projection":null,"selection":null}},"schema":{"inner":{"a":"Int64"}}}}'
 
         The logical plan can later be deserialized back into a LazyFrame.
 
@@ -1132,7 +1115,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 import matplotlib.pyplot as plt
             except ImportError:
                 raise ImportError(
-                    "matplotlib should be installed to show graph."
+                    "matplotlib should be installed to show graph"
                 ) from None
             plt.figure(figsize=figsize)
             img = mpimg.imread(BytesIO(graph))
@@ -1592,7 +1575,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
             except ImportError:
                 raise ImportError(
-                    "matplotlib should be installed to show profiling plot."
+                    "matplotlib should be installed to show profiling plot"
                 ) from None
 
         return df, timings
@@ -2225,7 +2208,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         └───────────┘
 
         """
-        pyexprs = _prepare_select(*exprs, **named_exprs)
+        structify = bool(int(os.environ.get("POLARS_AUTO_STRUCTIFY", 0)))
+
+        pyexprs = parse_as_list_of_expressions(
+            *exprs, **named_exprs, __structify=structify
+        )
         return self._from_pyldf(self._ldf.select(pyexprs))
 
     def select_seq(
@@ -2252,7 +2239,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         select
 
         """
-        pyexprs = _prepare_select(*exprs, **named_exprs)
+        structify = bool(int(os.environ.get("POLARS_AUTO_STRUCTIFY", 0)))
+
+        pyexprs = parse_as_list_of_expressions(
+            *exprs, **named_exprs, __structify=structify
+        )
         return self._from_pyldf(self._ldf.select_seq(pyexprs))
 
     def groupby(
@@ -2994,7 +2985,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         if not isinstance(other, LazyFrame):
             raise TypeError(
-                f"Expected 'other' join table to be a LazyFrame, not a {type(other).__name__}"
+                f"expected 'other' join table to be a LazyFrame, not a {type(other).__name__!r}"
             )
 
         if isinstance(on, (str, pl.Expr)):
@@ -3002,20 +2993,18 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             right_on = on
 
         if left_on is None or right_on is None:
-            raise ValueError("You should pass the column to join on as an argument.")
+            raise ValueError("you should pass the column to join on as an argument")
 
-        by_left_: Sequence[str] | None
-        by_left_ = [by_left] if isinstance(by_left, str) else by_left
-
-        by_right_: Sequence[str] | None
-        by_right_ = [by_right] if isinstance(by_right, (str, pl.Expr)) else by_right
-
-        if isinstance(by, str):
-            by_left_ = [by]
-            by_right_ = [by]
-        elif isinstance(by, list):
-            by_left_ = by
-            by_right_ = by
+        if by is not None:
+            by_left_ = [by] if isinstance(by, str) else by
+            by_right_ = by_left_
+        elif (by_left is not None) and (by_right is not None):
+            by_left_ = [by_left] if isinstance(by_left, str) else by_left
+            by_right_ = [by_right] if isinstance(by_right, str) else by_right
+        else:
+            # no by
+            by_left_ = None
+            by_right_ = None
 
         tolerance_str: str | None = None
         tolerance_num: float | int | None = None
@@ -3174,7 +3163,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         if not isinstance(other, LazyFrame):
             raise TypeError(
-                f"Expected 'other' join table to be a LazyFrame, not a {type(other).__name__}"
+                f"expected 'other' join table to be a LazyFrame, not a {type(other).__name__!r}"
             )
 
         if how == "cross":
@@ -3362,7 +3351,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         └─────┴──────┴─────────────┘
 
         """
-        pyexprs = _prepare_select(*exprs, **named_exprs)
+        structify = bool(int(os.environ.get("POLARS_AUTO_STRUCTIFY", 0)))
+
+        pyexprs = parse_as_list_of_expressions(
+            *exprs, **named_exprs, __structify=structify
+        )
         return self._from_pyldf(self._ldf.with_columns(pyexprs))
 
     def with_columns_seq(
@@ -3398,7 +3391,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         with_columns
 
         """
-        pyexprs = _prepare_select(*exprs, **named_exprs)
+        structify = bool(int(os.environ.get("POLARS_AUTO_STRUCTIFY", 0)))
+
+        pyexprs = parse_as_list_of_expressions(
+            *exprs, **named_exprs, __structify=structify
+        )
         return self._from_pyldf(self._ldf.with_columns_seq(pyexprs))
 
     def with_context(self, other: Self | list[Self]) -> Self:
@@ -3727,7 +3724,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         if length and length < 0:
             raise ValueError(
-                f"Negative slice lengths ({length}) are invalid for LazyFrame"
+                f"negative slice lengths ({length!r}) are invalid for LazyFrame"
             )
         return self._from_pyldf(self._ldf.slice(offset, length))
 
@@ -5114,7 +5111,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
         for name in on:
             if name not in union_names:
-                raise ValueError(f"Join column {name} not found.")
+                raise ValueError(f"join column {name!r} not found")
 
         right_added_names = union_names - set(on)
 

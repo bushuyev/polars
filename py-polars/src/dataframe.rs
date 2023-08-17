@@ -139,7 +139,7 @@ impl PyDataFrame {
         skip_rows, projection, separator, rechunk, columns, encoding, n_threads, path,
         overwrite_dtype, overwrite_dtype_slice, low_memory, comment_char, quote_char,
         null_values, missing_utf8_is_empty_string, try_parse_dates, skip_rows_after_header,
-        row_count, sample_size, eol_char)
+        row_count, sample_size, eol_char, raise_if_empty)
     )]
     pub fn read_csv(
         py_f: &PyAny,
@@ -168,6 +168,7 @@ impl PyDataFrame {
         row_count: Option<(String, IdxSize)>,
         sample_size: usize,
         eol_char: &str,
+        raise_if_empty: bool,
     ) -> PyResult<Self> {
         let null_values = null_values.map(|w| w.0);
         let comment_char = comment_char.map(|s| s.as_bytes()[0]);
@@ -227,6 +228,7 @@ impl PyDataFrame {
             .with_skip_rows_after_header(skip_rows_after_header)
             .with_row_count(row_count)
             .sample_size(sample_size)
+            .raise_if_empty(raise_if_empty)
             .finish()
             .map_err(PyPolarsErr::from)?;
         Ok(df.into())
@@ -554,6 +556,7 @@ impl PyDataFrame {
         time_format: Option<String>,
         float_precision: Option<usize>,
         null_value: Option<String>,
+        quote_style: Option<Wrap<QuoteStyle>>,
     ) -> PyResult<()> {
         let null = null_value.unwrap_or_default();
 
@@ -572,6 +575,7 @@ impl PyDataFrame {
                     .with_time_format(time_format)
                     .with_float_precision(float_precision)
                     .with_null_value(null)
+                    .with_quote_style(quote_style.map(|wrap| wrap.0).unwrap_or(Default::default()))
                     .finish(&mut self.df)
                     .map_err(PyPolarsErr::from)
             })?;
@@ -588,6 +592,7 @@ impl PyDataFrame {
                 .with_time_format(time_format)
                 .with_float_precision(float_precision)
                 .with_null_value(null)
+                .with_quote_style(quote_style.map(|wrap| wrap.0).unwrap_or(Default::default()))
                 .finish(&mut self.df)
                 .map_err(PyPolarsErr::from)?;
         }
@@ -1107,7 +1112,7 @@ impl PyDataFrame {
                 };
                 // unpack the wrapper in a PyDataFrame
                 let py_pydf = result_df_wrapper.getattr(py, "_df").expect(
-                "Could net get DataFrame attribute '_df'. Make sure that you return a DataFrame object.",
+                "Could not get DataFrame attribute '_df'. Make sure that you return a DataFrame object.",
             );
                 // Downcast to Rust
                 let pydf = py_pydf.extract::<PyDataFrame>(py).unwrap();

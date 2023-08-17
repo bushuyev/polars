@@ -44,7 +44,7 @@ pub(crate) fn cast_columns(
         (DataType::Utf8, DataType::Datetime(tu, _)) => s
             .utf8()
             .unwrap()
-            .as_datetime(None, *tu, false, false, None)
+            .as_datetime(None, *tu, false, false, None, None)
             .map(|ca| ca.into_series()),
         (_, dt) => s.cast(dt),
     };
@@ -193,6 +193,7 @@ impl<'a> CoreReader<'a> {
         skip_rows_after_header: usize,
         row_count: Option<RowCount>,
         try_parse_dates: bool,
+        raise_if_empty: bool,
     ) -> PolarsResult<CoreReader<'a>> {
         #[cfg(any(feature = "decompress", feature = "decompress-fast"))]
         let mut reader_bytes = reader_bytes;
@@ -235,6 +236,7 @@ impl<'a> CoreReader<'a> {
                         eol_char,
                         null_values.as_ref(),
                         try_parse_dates,
+                        raise_if_empty,
                     )?;
                     Arc::new(inferred_schema)
                 }

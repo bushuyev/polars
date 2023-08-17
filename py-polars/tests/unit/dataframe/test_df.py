@@ -238,7 +238,7 @@ def test_from_arrow(monkeypatch: Any) -> None:
             Decimal("2.0"),
         ),
     ]
-    for arrow_data in (tbl, record_batches):
+    for arrow_data in (tbl, record_batches, (rb for rb in record_batches)):
         df = cast(pl.DataFrame, pl.from_arrow(arrow_data))
         assert df.schema == expected_schema
         assert df.rows() == expected_data
@@ -285,6 +285,12 @@ def test_from_arrow(monkeypatch: Any) -> None:
     assert df0.schema == {"id": pl.Utf8, "points": pl.Int64}
     assert df1.schema == {"x": pl.Utf8, "y": pl.Int32}
     assert df2.schema == {"x": pl.Utf8, "y": pl.Int32}
+
+    with pytest.raises(TypeError, match="Cannot convert str"):
+        pl.from_arrow(data="xyz")
+
+    with pytest.raises(TypeError, match="Cannot convert int"):
+        pl.from_arrow(data=(x for x in (1, 2, 3)))
 
 
 def test_from_dict_with_column_order() -> None:
@@ -2338,7 +2344,7 @@ def test_arithmetic() -> None:
     assert_frame_equal(out, expected)
 
     # cannot do arithmetic with a sequence
-    with pytest.raises(ValueError, match="Operation not supported"):
+    with pytest.raises(ValueError, match="operation not supported"):
         _ = df + [1]  # type: ignore[operator]
 
 
@@ -2397,11 +2403,11 @@ def test_getitem() -> None:
     assert df[2, 1] == 5
     assert df[2, -2] == 3.0
 
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         # Column index out of bounds
         df[2, 2]
 
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         # Column index out of bounds
         df[2, -3]
 
@@ -2410,11 +2416,11 @@ def test_getitem() -> None:
     assert_frame_equal(df[2, [1, 0]], pl.DataFrame({"b": [5], "a": [3.0]}))
     assert_frame_equal(df[2, [-1, -2]], pl.DataFrame({"b": [5], "a": [3.0]}))
 
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         # Column index out of bounds
         df[2, [2, 0]]
 
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         # Column index out of bounds
         df[2, [2, -3]]
 
@@ -2469,7 +2475,7 @@ def test_getitem() -> None:
 
     # note that we cannot use floats (even if they could be casted to integer without
     # loss)
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         _ = df[np.array([1.0])]
 
     # sequences (lists or tuples; tuple only if length != 2)
@@ -2515,11 +2521,11 @@ def test_getitem() -> None:
         )
 
     # Boolean masks not supported
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         df[np.array([True, False, True])]
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         df[[True, False, True], [False, True]]  # type: ignore[index]
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         df[pl.Series([True, False, True]), "b"]
 
     # 5343
@@ -3014,24 +3020,21 @@ def test_set() -> None:
     )
     with pytest.raises(
         TypeError,
-        match=r"'DataFrame' object does not support "
-        r"'Series' assignment by index. Use "
-        r"'DataFrame.with_columns'",
+        match=r"DataFrame object does not support `Series` assignment by index."
+        r"\n\nUse `DataFrame.with_columns`",
     ):
         df["new"] = np.random.rand(10)
 
     with pytest.raises(
         ValueError,
-        match=r"Not allowed to set 'DataFrame' by "
-        r"boolean mask in the row position. "
-        r"Consider using 'DataFrame.with_columns'",
+        match=r"not allowed to set 'DataFrame' by boolean mask in the row position."
+        r"\n\nConsider using `DataFrame.with_columns`.",
     ):
         df[df["ham"] > 0.5, "ham"] = "a"
     with pytest.raises(
         ValueError,
-        match=r"Not allowed to set 'DataFrame' by "
-        r"boolean mask in the row position. "
-        r"Consider using 'DataFrame.with_columns'",
+        match=r"not allowed to set 'DataFrame' by boolean mask in the row position."
+        r"\n\nConsider using `DataFrame.with_columns`.",
     ):
         df[[True, False], "ham"] = "a"
 
@@ -3065,7 +3068,7 @@ def test_set() -> None:
         df[(1, 2, 3)] = 1
 
     # we cannot index with any type, such as bool
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         df[True] = 1  # type: ignore[index]
 
 
@@ -3109,7 +3112,7 @@ def test_init_datetimes_with_timezone() -> None:
         ):
             with pytest.raises(
                 ValueError,
-                match="Given time_zone is different from that of timezone aware datetimes",
+                match="given time_zone is different from that of timezone aware datetimes",
             ):
                 pl.DataFrame(  # type: ignore[arg-type]
                     data={"d1": [dtm], "d2": [dtm]},
