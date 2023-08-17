@@ -29,7 +29,7 @@ chrono-tz = "0.8.1"
 ciborium = "0.2"
 either = "1.8"
 futures = "0.3.25"
-hashbrown = { version = "0.14", features = ["ahash"] }
+hashbrown = { version = "0.14", features = ["rayon", "ahash"] }
 indexmap = { version = "2", features = ["std"] }
 memchr = "2"
 multiversion = "0.7"
@@ -59,7 +59,7 @@ package = "arrow2"
 # rev = "9beabec8cfb5502582d31ab898fdd36e7af0873c"
 path = "../arrow2"
 # branch = "duration_json"
-version = "0.17.4"
+#version = "0.17.4"
 default-features = false
 features = [
   "compute_aggregate",

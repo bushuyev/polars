@@ -60,9 +60,9 @@ json = [
   "dtype-struct",
 ]
 # support for arrows ipc file parsing
-ipc = ["memmap"] #"arrow/io_ipc", "arrow/io_ipc_compression",
+ipc = ["arrow/io_ipc", "arrow/io_ipc_compression", "memmap"]
 # support for arrows streaming ipc file parsing
-ipc_streaming = []#"arrow/io_ipc", "arrow/io_ipc_compression"
+ipc_streaming = ["arrow/io_ipc", "arrow/io_ipc_compression"]
 # support for arrow avro parsing
 avro = ["arrow/io_avro", "arrow/io_avro_compression"]
 csv = ["memmap", "lexical", "polars-core/rows", "lexical-core", "fast-float", "simdutf8"]
@@ -87,11 +87,11 @@ dtype-decimal = ["polars-core/dtype-decimal"]
 fmt = ["polars-core/fmt"]
 lazy = []
 parquet = ["polars-core/parquet", "arrow/io_parquet", "arrow/io_parquet_compression", "memmap"]
-async = ["async-trait", "futures",  "arrow/io_ipc_write_async", "polars-error/regex"] #tokio
-cloud = ["async", "url"]
-aws = [ "cloud", "polars-core/aws"]
-azure = ["cloud", "polars-core/azure"]
-gcp = [ "cloud", "polars-core/gcp"]
+async = ["async-trait", "futures", "tokio", "arrow/io_ipc_write_async", "polars-error/regex"]
+cloud = ["object_store", "async", "url"]
+aws = ["object_store/aws", "cloud", "polars-core/aws"]
+azure = ["object_store/azure", "cloud", "polars-core/azure"]
+gcp = ["object_store/gcp", "cloud", "polars-core/gcp"]
 partition = ["polars-core/partition_by"]
 temporal = ["dtype-datetime", "dtype-date", "dtype-time"]
 simd = []
