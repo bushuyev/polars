@@ -29,7 +29,12 @@ chrono-tz = "0.8.1"
 ciborium = "0.2"
 either = "1.8"
 futures = "0.3.25"
-hashbrown = { version = "0.14", features = ["rayon", "ahash"] }
+#rayon feature causes
+#error: failed to select a version for `rayon-core`.
+#... required by package `rayon v1.0.3`
+#... which satisfies dependency `rayon = "^1.0"` (locked to 1.0.3) of package `hashbrown v0.14.0`
+#... which satisfies dependency `hashbrown = "^0.14"` (locked to 0.14.0) of package `indexmap v2.0.0`
+hashbrown = { version = "0.14", features = ["ahash"] }
 indexmap = { version = "2", features = ["std"] }
 memchr = "2"
 multiversion = "0.7"
