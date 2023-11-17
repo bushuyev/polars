@@ -1,13 +1,7 @@
 from __future__ import annotations
 
 import contextlib
-from typing import (
-    TYPE_CHECKING,
-    Collection,
-    Generic,
-    Mapping,
-    overload,
-)
+from typing import TYPE_CHECKING, Collection, Generic, Mapping, overload
 
 from polars.dataframe import DataFrame
 from polars.lazyframe import LazyFrame
@@ -81,18 +75,18 @@ class SQLContext(Generic[FrameType]):
         **named_frames: DataFrame | LazyFrame,
     ) -> None:
         """
-        Initialise a new ``SQLContext``.
+        Initialise a new `SQLContext`.
 
         Parameters
         ----------
         frames
-            A ``{name:frame, ...}`` mapping.
+            A `{name:frame, ...}` mapping.
         register_globals
             Register all eager/lazy frames found in the globals, automatically
             mapping their variable name to a table name. If given an integer
             then only the most recent "n" frames found will be registered.
         eager_execution
-            Return query execution results as ``DataFrame`` instead of ``LazyFrame``.
+            Return query execution results as `DataFrame` instead of `LazyFrame`.
             (Note that the query itself is always executed in lazy-mode; this
             parameter impacts whether :meth:`execute` returns an eager or lazy
             result frame).
@@ -208,7 +202,7 @@ class SQLContext(Generic[FrameType]):
         query
             A valid string SQL query.
         eager
-            Apply the query eagerly, returning ``DataFrame`` instead of ``LazyFrame``.
+            Apply the query eagerly, returning `DataFrame` instead of `LazyFrame`.
             If unset, the value of the init-time parameter "eager_execution" will be
             used. (Note that the query itself is always executed in lazy-mode; this
             parameter only impacts the type of the returned frame).
@@ -291,6 +285,12 @@ class SQLContext(Generic[FrameType]):
         frame
             eager/lazy frame to associate with this table name.
 
+        See Also
+        --------
+        register_globals
+        register_many
+        unregister
+
         Examples
         --------
         >>> df = pl.DataFrame({"hello": ["world"]})
@@ -305,12 +305,6 @@ class SQLContext(Generic[FrameType]):
         │ world │
         └───────┘
 
-        See Also
-        --------
-        register_globals
-        register_many
-        unregister
-
         """
         if isinstance(frame, DataFrame):
             frame = frame.lazy()
@@ -322,6 +316,12 @@ class SQLContext(Generic[FrameType]):
         Register all frames (lazy or eager) found in the current globals scope.
 
         Automatically maps variable names to table names.
+
+        See Also
+        --------
+        register
+        register_many
+        unregister
 
         Parameters
         ----------
@@ -355,12 +355,6 @@ class SQLContext(Generic[FrameType]):
         │ 1   ┆ x    ┆ null │
         └─────┴──────┴──────┘
 
-        See Also
-        --------
-        register
-        register_many
-        unregister
-
         """
         return self.register_many(
             frames=_get_stack_locals(of_type=(DataFrame, LazyFrame), n_objects=n)
@@ -377,9 +371,15 @@ class SQLContext(Generic[FrameType]):
         Parameters
         ----------
         frames
-            A ``{name:frame, ...}`` mapping.
+            A `{name:frame, ...}` mapping.
         **named_frames
             Named eager/lazy frames, provided as kwargs.
+
+        See Also
+        --------
+        register
+        register_globals
+        unregister
 
         Examples
         --------
@@ -399,12 +399,6 @@ class SQLContext(Generic[FrameType]):
         >>> ctx.register_many(tbl3=lf3, tbl4=lf4).tables()
         ['tbl1', 'tbl2', 'tbl3', 'tbl4']
 
-        See Also
-        --------
-        register
-        register_globals
-        unregister
-
         """
         frames = dict(frames or {})
         frames.update(named_frames)
@@ -423,7 +417,7 @@ class SQLContext(Generic[FrameType]):
 
         Notes
         -----
-        You can also control table registration lifetime by using ``SQLContext`` as a
+        You can also control table registration lifetime by using `SQLContext` as a
         context manager; this can often be more useful when such control is wanted:
 
         >>> df0 = pl.DataFrame({"colx": [0, 1, 2]})
@@ -444,6 +438,12 @@ class SQLContext(Generic[FrameType]):
         >>> ctx.tables()
         ['tbl0']
 
+        See Also
+        --------
+        register
+        register_globals
+        register_many
+
         Examples
         --------
         >>> df0 = pl.DataFrame({"ints": [9, 8, 7, 6, 5]})
@@ -462,12 +462,6 @@ class SQLContext(Generic[FrameType]):
         ['test2']
         >>> ctx.unregister("test2").tables()
         []
-
-        See Also
-        --------
-        register
-        register_globals
-        register_many
 
         """
         if isinstance(names, str):

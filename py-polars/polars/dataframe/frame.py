@@ -4,7 +4,7 @@ from __future__ import annotations
 import contextlib
 import os
 import random
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Sized
 from io import BytesIO, StringIO, TextIOWrapper
 from operator import itemgetter
@@ -23,6 +23,7 @@ from typing import (
     NoReturn,
     Sequence,
     TypeVar,
+    Union,
     cast,
     overload,
 )
@@ -30,14 +31,12 @@ from typing import (
 import polars._reexport as pl
 from polars import functions as F
 from polars.dataframe._html import NotebookFormatter
-from polars.dataframe.groupby import DynamicGroupBy, GroupBy, RollingGroupBy
+from polars.dataframe.group_by import DynamicGroupBy, GroupBy, RollingGroupBy
 from polars.datatypes import (
-    FLOAT_DTYPES,
     INTEGER_DTYPES,
     N_INFER_DEFAULT,
     NUMERIC_DTYPES,
     Boolean,
-    DataTypeClass,
     Float64,
     Object,
     Utf8,
@@ -56,7 +55,8 @@ from polars.dependencies import pyarrow as pa
 from polars.exceptions import NoRowsReturnedError, TooManyRowsReturnedError
 from polars.functions import col, lit
 from polars.io._utils import _is_glob_pattern, _is_local_file
-from polars.io.excel._write_utils import (
+from polars.io.csv._utils import _check_arg_is_1byte
+from polars.io.spreadsheet._write_utils import (
     _unpack_multi_column_dict,
     _xl_apply_conditional_formats,
     _xl_inject_sparklines,
@@ -66,7 +66,7 @@ from polars.io.excel._write_utils import (
     _xl_unique_table_name,
     _XLFormatCache,
 )
-from polars.selectors import _expand_selectors
+from polars.selectors import _expand_selector_dicts, _expand_selectors
 from polars.slice import PolarsSlice
 from polars.utils._construction import (
     _post_apply_columns,
@@ -83,8 +83,12 @@ from polars.utils._parse_expr_input import parse_as_expression
 from polars.utils._wrap import wrap_expr, wrap_ldf, wrap_s
 from polars.utils.convert import _timedelta_to_pl_duration
 from polars.utils.deprecation import (
-    deprecate_renamed_methods,
+    deprecate_function,
+    deprecate_nonkeyword_arguments,
+    deprecate_renamed_function,
     deprecate_renamed_parameter,
+    deprecate_saturating,
+    issue_deprecation_warning,
 )
 from polars.utils.various import (
     _prepare_row_count_args,
@@ -94,7 +98,7 @@ from polars.utils.various import (
     is_bool_sequence,
     is_int_sequence,
     is_str_sequence,
-    normalise_filepath,
+    normalize_filepath,
     parse_percentiles,
     parse_version,
     range_to_slice,
@@ -103,6 +107,7 @@ from polars.utils.various import (
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import PyDataFrame
+    from polars.polars import dtype_str_repr as _dtype_str_repr
 
 if TYPE_CHECKING:
     import sys
@@ -119,8 +124,10 @@ if TYPE_CHECKING:
         AsofJoinStrategy,
         AvroCompression,
         ClosedInterval,
+        ColumnFormatDict,
         ColumnNameOrSelector,
         ColumnTotalsDefinition,
+        ColumnWidthsDefinition,
         ComparisonOperator,
         ConditionalFormatDict,
         CsvEncoding,
@@ -131,9 +138,11 @@ if TYPE_CHECKING:
         FrameInitTypes,
         IndexOrder,
         IntoExpr,
+        IntoExprColumn,
         IpcCompression,
         JoinStrategy,
         JoinValidation,
+        Label,
         NullStrategy,
         OneOrMoreDataTypes,
         Orientation,
@@ -145,6 +154,7 @@ if TYPE_CHECKING:
         RowTotalsDefinition,
         SchemaDefinition,
         SchemaDict,
+        SelectorType,
         SizeUnit,
         StartBy,
         UniqueKeepStrategy,
@@ -166,19 +176,15 @@ if TYPE_CHECKING:
     # MultiColSelector indexes into the horizontal axis
     # NOTE: wrapping these as strings is necessary for Python <3.10
 
-    MultiRowSelector: TypeAlias = "slice | range | list[int] | Series"
-    MultiColSelector: TypeAlias = (
-        "slice | range | list[int] | list[str] | list[bool] | Series"
-    )
+    MultiRowSelector: TypeAlias = Union[slice, range, "list[int]", "Series"]
+    MultiColSelector: TypeAlias = Union[
+        slice, range, "list[int]", "list[str]", "list[bool]", "Series"
+    ]
 
     T = TypeVar("T")
     P = ParamSpec("P")
 
 
-@deprecate_renamed_methods(
-    mapping={"approx_unique": "approx_n_unique"},
-    versions={"approx_unique": "0.18.12"},
-)
 class DataFrame:
     """
     Two-dimensional data structure representing data as a table with rows and columns.
@@ -187,7 +193,7 @@ class DataFrame:
     ----------
     data : dict, Sequence, ndarray, Series, or pandas.DataFrame
         Two-dimensional data in various forms; dict input must contain Sequences,
-        Generators, or a ``range``. Sequence may contain Series or other Sequences.
+        Generators, or a `range`. Sequence may contain Series or other Sequences.
     schema : Sequence of str, (str,DataType) pairs, or a {str:DataType,} dict
         The DataFrame schema may be declared in several ways:
 
@@ -205,7 +211,7 @@ class DataFrame:
 
         The number of entries in the schema should match the underlying data
         dimensions, unless a sequence of dictionaries is being passed, in which case
-        a _partial_ schema can be declared to prevent specific fields from being loaded.
+        a *partial* schema can be declared to prevent specific fields from being loaded.
     orient : {'col', 'row'}, default None
         Whether to interpret two-dimensional data as columns or as rows. If None,
         the orientation is inferred by matching the columns and data dimensions. If
@@ -400,7 +406,7 @@ class DataFrame:
             )
         else:
             raise TypeError(
-                f"DataFrame constructor received unsupported type {type(data).__name__!r}"
+                f"DataFrame constructor called with unsupported type {type(data).__name__!r}"
                 " for the `data` parameter"
             )
 
@@ -420,7 +426,9 @@ class DataFrame:
         schema_overrides: SchemaDict | None = None,
         infer_schema_length: int | None = N_INFER_DEFAULT,
     ) -> Self:
-        pydf = PyDataFrame.read_dicts(data, infer_schema_length, schema)
+        pydf = PyDataFrame.read_dicts(
+            data, infer_schema_length, schema, schema_overrides
+        )
         if schema or schema_overrides:
             pydf = _post_apply_columns(
                 pydf, list(schema or pydf.columns()), schema_overrides=schema_overrides
@@ -655,9 +663,10 @@ class DataFrame:
         columns: Sequence[int] | Sequence[str] | None = None,
         separator: str = ",",
         comment_char: str | None = None,
-        quote_char: str | None = r'"',
+        quote_char: str | None = '"',
         skip_rows: int = 0,
         dtypes: None | (SchemaDict | Sequence[PolarsDataType]) = None,
+        schema: None | SchemaDict = None,
         null_values: str | Sequence[str] | dict[str, str] | None = None,
         missing_utf8_is_empty_string: bool = False,
         ignore_errors: bool = False,
@@ -675,11 +684,12 @@ class DataFrame:
         sample_size: int = 1024,
         eol_char: str = "\n",
         raise_if_empty: bool = True,
+        truncate_ragged_lines: bool = False,
     ) -> DataFrame:
         """
         Read a CSV file into a DataFrame.
 
-        Use ``pl.read_csv`` to dispatch to this method.
+        Use `pl.read_csv` to dispatch to this method.
 
         See Also
         --------
@@ -690,7 +700,7 @@ class DataFrame:
 
         path: str | None
         if isinstance(source, (str, Path)):
-            path = normalise_filepath(source)
+            path = normalize_filepath(source)
         else:
             path = None
             if isinstance(source, BytesIO):
@@ -708,7 +718,9 @@ class DataFrame:
             elif isinstance(dtypes, Sequence):
                 dtype_slice = dtypes
             else:
-                raise ValueError("dtype arg should be list or dict")
+                raise TypeError(
+                    f"`dtypes` should be of type list or dict, got {type(dtypes).__name__!r}"
+                )
 
         processed_null_values = _process_null_values(null_values)
 
@@ -720,8 +732,8 @@ class DataFrame:
                 dtypes_dict = dict(dtype_list)
             if dtype_slice is not None:
                 raise ValueError(
-                    "cannot use glob patterns and unnamed dtypes as `dtypes` argument;"
-                    " Use dtypes: Mapping[str, Type[DataType]"
+                    "cannot use glob patterns and unnamed dtypes as `dtypes` argument"
+                    "\n\nUse `dtypes`: Mapping[str, Type[DataType]]"
                 )
             from polars import scan_csv
 
@@ -733,6 +745,7 @@ class DataFrame:
                 quote_char=quote_char,
                 skip_rows=skip_rows,
                 dtypes=dtypes_dict,
+                schema=schema,
                 null_values=null_values,
                 missing_utf8_is_empty_string=missing_utf8_is_empty_string,
                 ignore_errors=ignore_errors,
@@ -745,6 +758,7 @@ class DataFrame:
                 row_count_offset=row_count_offset,
                 eol_char=eol_char,
                 raise_if_empty=raise_if_empty,
+                truncate_ragged_lines=truncate_ragged_lines,
             )
             if columns is None:
                 return scan.collect()
@@ -752,8 +766,8 @@ class DataFrame:
                 return scan.select(columns).collect()
             else:
                 raise ValueError(
-                    "cannot use glob patterns and integer based projection as `columns`"
-                    " argument; Use columns: List[str]"
+                    "cannot use glob patterns and integer based projection as `columns` argument"
+                    "\n\nUse columns: List[str]"
                 )
 
         projection, columns = handle_projection_columns(columns)
@@ -786,6 +800,8 @@ class DataFrame:
             sample_size=sample_size,
             eol_char=eol_char,
             raise_if_empty=raise_if_empty,
+            truncate_ragged_lines=truncate_ragged_lines,
+            schema=schema,
         )
         return self
 
@@ -806,7 +822,7 @@ class DataFrame:
         """
         Read into a DataFrame from a parquet file.
 
-        Use ``pl.read_parquet`` to dispatch to this method.
+        Use `pl.read_parquet` to dispatch to this method.
 
         See Also
         --------
@@ -814,15 +830,11 @@ class DataFrame:
 
         """
         if isinstance(source, (str, Path)):
-            source = normalise_filepath(source)
+            source = normalize_filepath(source)
         if isinstance(columns, str):
             columns = [columns]
 
-        if (
-            isinstance(source, str)
-            and _is_glob_pattern(source)
-            and _is_local_file(source)
-        ):
+        if isinstance(source, str) and _is_glob_pattern(source):
             from polars import scan_parquet
 
             scan = scan_parquet(
@@ -840,9 +852,9 @@ class DataFrame:
             elif is_str_sequence(columns, allow_str=False):
                 return scan.select(columns).collect()
             else:
-                raise ValueError(
-                    "cannot use glob patterns and integer based projection as `columns`"
-                    " argument; Use columns: List[str]"
+                raise TypeError(
+                    "cannot use glob patterns and integer based projection as `columns` argument"
+                    "\n\nUse columns: List[str]"
                 )
 
         projection, columns = handle_projection_columns(columns)
@@ -875,16 +887,16 @@ class DataFrame:
         ----------
         source
             Path to a file or a file-like object (by file-like object, we refer to
-            objects that have a ``read()`` method, such as a file handler (e.g.
-            via builtin ``open`` function) or ``BytesIO``).
+            objects that have a `read()` method, such as a file handler (e.g.
+            via builtin `open` function) or `BytesIO`).
         columns
             Columns.
         n_rows
-            Stop reading from Apache Avro file after reading ``n_rows``.
+            Stop reading from Apache Avro file after reading `n_rows`.
 
         """
         if isinstance(source, (str, Path)):
-            source = normalise_filepath(source)
+            source = normalize_filepath(source)
         projection, columns = handle_projection_columns(columns)
         self = cls.__new__(cls)
         self._df = PyDataFrame.read_avro(source, columns, projection, n_rows)
@@ -903,21 +915,22 @@ class DataFrame:
         memory_map: bool = True,
     ) -> Self:
         """
-        Read into a DataFrame from Arrow IPC stream format.
+        Read into a DataFrame from Arrow IPC file format.
 
-        Arrow IPC is also know as Feather (v2).
+        See "File or Random Access format" on https://arrow.apache.org/docs/python/ipc.html.
+        Arrow IPC files are also known as Feather (v2) files.
 
         Parameters
         ----------
         source
             Path to a file or a file-like object (by file-like object, we refer to
-            objects that have a ``read()`` method, such as a file handler (e.g.
-            via builtin ``open`` function) or ``BytesIO``).
+            objects that have a `read()` method, such as a file handler (e.g.
+            via builtin `open` function) or `BytesIO`).
         columns
             Columns to select. Accepts a list of column indices (starting at zero) or a
             list of column names.
         n_rows
-            Stop reading from IPC file after reading ``n_rows``.
+            Stop reading from IPC file after reading `n_rows`.
         row_count_name
             Row count name.
         row_count_offset
@@ -929,7 +942,7 @@ class DataFrame:
 
         """
         if isinstance(source, (str, Path)):
-            source = normalise_filepath(source)
+            source = normalize_filepath(source)
         if isinstance(columns, str):
             columns = [columns]
 
@@ -953,9 +966,9 @@ class DataFrame:
             elif is_str_sequence(columns, allow_str=False):
                 df = scan.select(columns).collect()
             else:
-                raise ValueError(
-                    "cannot use glob patterns and integer based projection as `columns`"
-                    " argument; Use columns: List[str]"
+                raise TypeError(
+                    "cannot use glob patterns and integer based projection as `columns` argument"
+                    "\n\nUse columns: List[str]"
                 )
             return cls._from_pydf(df._df)
 
@@ -972,17 +985,70 @@ class DataFrame:
         return self
 
     @classmethod
+    def _read_ipc_stream(
+        cls,
+        source: str | Path | BinaryIO | bytes,
+        *,
+        columns: Sequence[int] | Sequence[str] | None = None,
+        n_rows: int | None = None,
+        row_count_name: str | None = None,
+        row_count_offset: int = 0,
+        rechunk: bool = True,
+    ) -> Self:
+        """
+        Read into a DataFrame from Arrow IPC record batch stream format.
+
+        See "Streaming format" on https://arrow.apache.org/docs/python/ipc.html.
+
+        Parameters
+        ----------
+        source
+            Path to a file or a file-like object (by file-like object, we refer to
+            objects that have a `read()` method, such as a file handler (e.g.
+            via builtin `open` function) or `BytesIO`).
+        columns
+            Columns to select. Accepts a list of column indices (starting at zero) or a
+            list of column names.
+        n_rows
+            Stop reading from IPC stream after reading `n_rows`.
+        row_count_name
+            Row count name.
+        row_count_offset
+            Row count offset.
+        rechunk
+            Make sure that all data is contiguous.
+
+        """
+        if isinstance(source, (str, Path)):
+            source = normalize_filepath(source)
+        if isinstance(columns, str):
+            columns = [columns]
+
+        projection, columns = handle_projection_columns(columns)
+        self = cls.__new__(cls)
+        self._df = PyDataFrame.read_ipc_stream(
+            source,
+            columns,
+            projection,
+            n_rows,
+            _prepare_row_count_args(row_count_name, row_count_offset),
+            rechunk,
+        )
+        return self
+
+    @classmethod
     def _read_json(
         cls,
         source: str | Path | IOBase | bytes,
         *,
+        infer_schema_length: int | None = N_INFER_DEFAULT,
         schema: SchemaDefinition | None = None,
         schema_overrides: SchemaDefinition | None = None,
     ) -> Self:
         """
         Read into a DataFrame from a JSON file.
 
-        Use ``pl.read_json`` to dispatch to this method.
+        Use `pl.read_json` to dispatch to this method.
 
         See Also
         --------
@@ -992,11 +1058,14 @@ class DataFrame:
         if isinstance(source, StringIO):
             source = BytesIO(source.getvalue().encode())
         elif isinstance(source, (str, Path)):
-            source = normalise_filepath(source)
+            source = normalize_filepath(source)
 
         self = cls.__new__(cls)
         self._df = PyDataFrame.read_json(
-            source, schema=schema, schema_overrides=schema_overrides
+            source,
+            infer_schema_length=infer_schema_length,
+            schema=schema,
+            schema_overrides=schema_overrides,
         )
         return self
 
@@ -1012,7 +1081,7 @@ class DataFrame:
         """
         Read into a DataFrame from a newline delimited JSON file.
 
-        Use ``pl.read_ndjson`` to dispatch to this method.
+        Use `pl.read_ndjson` to dispatch to this method.
 
         See Also
         --------
@@ -1022,7 +1091,7 @@ class DataFrame:
         if isinstance(source, StringIO):
             source = BytesIO(source.getvalue().encode())
         elif isinstance(source, (str, Path)):
-            source = normalise_filepath(source)
+            source = normalize_filepath(source)
 
         self = cls.__new__(cls)
         self._df = PyDataFrame.read_ndjson(
@@ -1031,6 +1100,11 @@ class DataFrame:
             schema=schema,
             schema_overrides=schema_overrides,
         )
+        return self
+
+    def _replace(self, column: str, new_column: Series) -> Self:
+        """Replace a column by a new Series (in place)."""
+        self._df.replace(column, new_column._s)
         return self
 
     @property
@@ -1131,6 +1205,10 @@ class DataFrame:
 
         The datatypes can also be found in column headers when printing the DataFrame.
 
+        See Also
+        --------
+        schema : Returns a {colname:dtype} mapping.
+
         Examples
         --------
         >>> df = pl.DataFrame(
@@ -1153,10 +1231,6 @@ class DataFrame:
         │ 2   ┆ 7.0 ┆ b   │
         │ 3   ┆ 8.0 ┆ c   │
         └─────┴─────┴─────┘
-
-        See Also
-        --------
-        schema : Returns a {colname:dtype} mapping.
 
         """
         return self._df.dtypes()
@@ -1188,10 +1262,10 @@ class DataFrame:
         ...     }
         ... )
         >>> df.schema
-        {'foo': Int64, 'bar': Float64, 'ham': Utf8}
+        OrderedDict({'foo': Int64, 'bar': Float64, 'ham': Utf8})
 
         """
-        return dict(zip(self.columns, self.dtypes))
+        return OrderedDict(zip(self.columns, self.dtypes))
 
     def __array__(self, dtype: Any = None) -> np.ndarray[Any, Any]:
         """
@@ -1206,7 +1280,9 @@ class DataFrame:
             return self.to_numpy().__array__()
 
     def __dataframe__(
-        self, nan_as_null: bool = False, allow_copy: bool = True
+        self,
+        nan_as_null: bool = False,  # noqa: FBT001
+        allow_copy: bool = True,  # noqa: FBT001
     ) -> PolarsDataFrame:
         """
         Convert to a dataframe object implementing the dataframe interchange protocol.
@@ -1214,14 +1290,14 @@ class DataFrame:
         Parameters
         ----------
         nan_as_null
-            Overwrite null values in the data with ``NaN``.
+            Overwrite null values in the data with `NaN`.
 
             .. warning::
                 This functionality has not been implemented and the parameter will be
                 removed in a future version.
-                Setting this to ``True`` will raise a ``NotImplementedError``.
+                Setting this to `True` will raise a `NotImplementedError`.
         allow_copy
-            Allow memory to be copied to perform the conversion. If set to ``False``,
+            Allow memory to be copied to perform the conversion. If set to `False`,
             causes conversions that are not zero-copy to fail.
 
         Notes
@@ -1231,7 +1307,7 @@ class DataFrame:
 
         Examples
         --------
-        Convert a Polars dataframe to a generic dataframe object and access some
+        Convert a Polars DataFrame to a generic dataframe object and access some
         properties.
 
         >>> df = pl.DataFrame({"a": [1, 2], "b": [3.0, 4.0], "c": ["x", "y"]})
@@ -1263,7 +1339,7 @@ class DataFrame:
         Please report any issues to https://github.com/data-apis/dataframe-api-compat.
         """
         return dataframe_api_compat.polars_standard.convert_to_standard_compliant_dataframe(
-            self, api_version=api_version
+            self.lazy(), api_version=api_version
         )
 
     def _comp(self, other: Any, op: ComparisonOperator) -> DataFrame:
@@ -1285,7 +1361,7 @@ class DataFrame:
             raise ValueError("DataFrame dimensions do not match")
 
         suffix = "__POLARS_CMP_OTHER"
-        other_renamed = other.select(F.all().suffix(suffix))
+        other_renamed = other.select(F.all().name.suffix(suffix))
         combined = F.concat([self, other_renamed], how="horizontal")
 
         if op == "eq":
@@ -1326,7 +1402,7 @@ class DataFrame:
         else:
             raise ValueError(f"unexpected comparison operator {op!r}")
 
-    def _div(self, other: Any, floordiv: bool) -> DataFrame:
+    def _div(self, other: Any, *, floordiv: bool) -> DataFrame:
         if isinstance(other, pl.Series):
             if floordiv:
                 return self.select(F.all() // lit(other))
@@ -1343,13 +1419,13 @@ class DataFrame:
         df = (
             df
             if not floordiv
-            else df.with_columns([s.floor() for s in df if s.dtype() in FLOAT_DTYPES])
+            else df.with_columns([s.floor() for s in df if s.dtype.is_float()])
         )
         if floordiv:
             int_casts = [
                 col(column).cast(tp)
                 for i, (column, tp) in enumerate(self.schema.items())
-                if tp in INTEGER_DTYPES and orig_dtypes[i] in INTEGER_DTYPES
+                if tp.is_integer() and orig_dtypes[i].is_integer()
             ]
             if int_casts:
                 return df.with_columns(int_casts)
@@ -1358,7 +1434,7 @@ class DataFrame:
     def _cast_all_from_to(
         self, df: DataFrame, from_: frozenset[PolarsDataType], to: PolarsDataType
     ) -> DataFrame:
-        casts = [s.cast(to).alias(s.name) for s in df if s.dtype() in from_]
+        casts = [s.cast(to).alias(s.name) for s in df if s.dtype in from_]
         return df.with_columns(casts) if casts else df
 
     def __floordiv__(self, other: DataFrame | Series | int | float) -> DataFrame:
@@ -1368,7 +1444,7 @@ class DataFrame:
         return self._div(other, floordiv=False)
 
     def __bool__(self) -> NoReturn:
-        raise ValueError(
+        raise TypeError(
             "the truth value of a DataFrame is ambiguous"
             "\n\nHint: to check if a DataFrame contains any values, use `is_empty()`."
         )
@@ -1394,7 +1470,7 @@ class DataFrame:
     def __getstate__(self) -> list[Series]:
         return self.get_columns()
 
-    def __setstate__(self, state) -> None:  # type: ignore[no-untyped-def]
+    def __setstate__(self, state: list[Series]) -> None:
         self._df = DataFrame(state)._df
 
     def __mul__(self, other: DataFrame | Series | int | float) -> Self:
@@ -1419,7 +1495,7 @@ class DataFrame:
         self, other: DataFrame | Series | int | float | bool | str
     ) -> DataFrame:
         if isinstance(other, str):
-            return self.select((lit(other) + F.col("*")).keep_name())
+            return self.select((lit(other) + F.col("*")).name.keep())
         return self + other
 
     def __sub__(self, other: DataFrame | Series | int | float) -> Self:
@@ -1443,8 +1519,11 @@ class DataFrame:
     def __contains__(self, key: str) -> bool:
         return key in self.columns
 
-    def __iter__(self) -> Iterator[Any]:
-        return self.get_columns().__iter__()
+    def __iter__(self) -> Iterator[Series]:
+        return iter(self.get_columns())
+
+    def __reversed__(self) -> Iterator[Series]:
+        return reversed(self.get_columns())
 
     def _pos_idx(self, idx: int, dim: int) -> int:
         if idx >= 0:
@@ -1562,13 +1641,11 @@ class DataFrame:
                 ):
                     df = self[:, col_selection]
                     return df.slice(row_selection, 1)
-                # df[2, "a"]
-                if isinstance(col_selection, str):
-                    return self[col_selection][row_selection]
 
-            # column selection can be "a" and ["a", "b"]
+            # df[:, "a"]
             if isinstance(col_selection, str):
-                col_selection = [col_selection]
+                series = self.get_column(col_selection)
+                return series[row_selection]
 
             # df[:, 1]
             if isinstance(col_selection, int):
@@ -1597,7 +1674,7 @@ class DataFrame:
         # select single column
         # df["foo"]
         if isinstance(item, str):
-            return wrap_s(self._df.column(item))
+            return self.get_column(item)
 
         # df[idx]
         if isinstance(item, int):
@@ -1634,7 +1711,7 @@ class DataFrame:
             dtype = item.dtype
             if dtype == Utf8:
                 return self._from_pydf(self._df.select(item))
-            elif dtype in INTEGER_DTYPES:
+            elif dtype.is_integer():
                 return self._take_with_series(item._pos_idxs(self.shape[0]))
 
         # if no data has been returned, the operation is not supported
@@ -1651,7 +1728,7 @@ class DataFrame:
         # df["foo"] = series
         if isinstance(key, str):
             raise TypeError(
-                "DataFrame object does not support `Series` assignment by index."
+                "DataFrame object does not support `Series` assignment by index"
                 "\n\nUse `DataFrame.with_columns`."
             )
 
@@ -1663,10 +1740,10 @@ class DataFrame:
                 raise ValueError("can only set multiple columns with 2D matrix")
             if value.shape[1] != len(key):
                 raise ValueError(
-                    "matrix columns should be equal to list use to determine column names"
+                    "matrix columns should be equal to list used to determine column names"
                 )
 
-            # todo! we can parallelize this by calling from_numpy
+            # TODO: we can parallelize this by calling from_numpy
             columns = []
             for i, name in enumerate(key):
                 columns.append(pl.Series(name, value[:, i]))
@@ -1679,8 +1756,8 @@ class DataFrame:
             if (
                 isinstance(row_selection, pl.Series) and row_selection.dtype == Boolean
             ) or is_bool_sequence(row_selection):
-                raise ValueError(
-                    "not allowed to set 'DataFrame' by boolean mask in the row position."
+                raise TypeError(
+                    "not allowed to set DataFrame by boolean mask in the row position"
                     "\n\nConsider using `DataFrame.with_columns`."
                 )
 
@@ -1690,7 +1767,7 @@ class DataFrame:
             elif isinstance(col_selection, int):
                 s = self[:, col_selection]
             else:
-                raise ValueError(f"unexpected column selection {col_selection!r}")
+                raise TypeError(f"unexpected column selection {col_selection!r}")
 
             # dispatch to __setitem__ of Series to do modification
             s[row_selection] = value
@@ -1701,7 +1778,7 @@ class DataFrame:
                 self.replace_at_idx(col_selection, s)
             # df["foo"]
             elif isinstance(col_selection, str):
-                self.replace(col_selection, s)
+                self._replace(col_selection, s)
         else:
             raise TypeError(
                 f"cannot use `__setitem__` on DataFrame"
@@ -1751,12 +1828,7 @@ class DataFrame:
 
     def item(self, row: int | None = None, column: int | str | None = None) -> Any:
         """
-        Return the dataframe as a scalar, or return the element at the given row/column.
-
-        Notes
-        -----
-        If row/col not provided, this is equivalent to ``df[0,0]``, with a check that
-        the shape is (1,1). With row/col, this is equivalent to ``df[row,col]``.
+        Return the DataFrame as a scalar, or return the element at the given row/column.
 
         Parameters
         ----------
@@ -1764,6 +1836,15 @@ class DataFrame:
             Optional row index.
         column
             Optional column index or name.
+
+        See Also
+        --------
+        row: Get the values of a single row, either by index or by predicate.
+
+        Notes
+        -----
+        If row/col not provided, this is equivalent to `df[0,0]`, with a check that
+        the shape is (1,1). With row/col, this is equivalent to `df[row,col]`.
 
         Examples
         --------
@@ -1775,18 +1856,15 @@ class DataFrame:
         >>> df.item(2, "b")
         6
 
-        See Also
-        --------
-        row: Get the values of a single row, either by index or by predicate.
-
         """
         if row is None and column is None:
             if self.shape != (1, 1):
                 raise ValueError(
-                    f"can only call `.item()` if the dataframe is of shape (1, 1), or if"
-                    f" explicit row/col values are provided; frame has shape {self.shape!r}"
+                    "can only call `.item()` if the dataframe is of shape (1, 1),"
+                    " or if explicit row/col values are provided;"
+                    f" frame has shape {self.shape!r}"
                 )
-            return self._df.select_at_idx(0).get_idx(0)
+            return self._df.select_at_idx(0).get_index(0)
 
         elif row is None or column is None:
             raise ValueError("cannot call `.item()` with only one of `row` or `column`")
@@ -1794,11 +1872,11 @@ class DataFrame:
         s = (
             self._df.select_at_idx(column)
             if isinstance(column, int)
-            else self._df.column(column)
+            else self._df.get_column(column)
         )
         if s is None:
-            raise ValueError(f"column index {column!r} is out of bounds")
-        return s.get_idx(row)
+            raise IndexError(f"column index {column!r} is out of bounds")
+        return s.get_index_signed(row)
 
     def to_arrow(self) -> pa.Table:
         """
@@ -1839,12 +1917,15 @@ class DataFrame:
 
     @overload
     def to_dict(
-        self, as_series: bool = True
+        self,
+        as_series: bool,  # noqa: FBT001
     ) -> dict[str, Series] | dict[str, list[Any]]:
         ...
 
+    @deprecate_nonkeyword_arguments(version="0.19.13")
     def to_dict(
-        self, as_series: bool = True
+        self,
+        as_series: bool = True,  # noqa: FBT001
     ) -> dict[str, Series] | dict[str, list[Any]]:
         """
         Convert DataFrame to a dictionary mapping column name to values.
@@ -1852,7 +1933,7 @@ class DataFrame:
         Parameters
         ----------
         as_series
-            True -> Values are series
+            True -> Values are Series
             False -> Values are List[Any]
 
         Examples
@@ -1940,8 +2021,8 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that Python
-        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        If you have `ns`-precision temporal values you should be aware that Python
+        natively only supports up to `μs`-precision; `ns`-precision values will be
         truncated to microseconds on conversion to Python. If this matters to your
         use-case you should export to a different format (such as Arrow or NumPy).
 
@@ -1954,8 +2035,12 @@ class DataFrame:
         """
         return list(self.iter_rows(named=True))
 
+    @deprecate_nonkeyword_arguments(version="0.19.3")
     def to_numpy(
-        self, structured: bool = False, *, order: IndexOrder = "fortran"
+        self,
+        structured: bool = False,  # noqa: FBT001
+        *,
+        order: IndexOrder = "fortran",
     ) -> np.ndarray[Any, Any]:
         """
         Convert DataFrame to a 2D NumPy array.
@@ -1973,13 +2058,13 @@ class DataFrame:
             However, the C-like order might be more appropriate to use for downstream
             applications to prevent cloning data, e.g. when reshaping into a
             one-dimensional array. Note that this option only takes effect if
-            ``structured`` is set to ``False`` and the DataFrame dtypes allow for a
+            `structured` is set to `False` and the DataFrame dtypes allow for a
             global dtype for all columns.
 
         Notes
         -----
         If you're attempting to convert Utf8 to an array you'll need to install
-        ``pyarrow``.
+        `pyarrow`.
 
         Examples
         --------
@@ -2009,7 +2094,7 @@ class DataFrame:
         ...optionally zero-copying as a record array view:
 
         >>> import numpy as np
-        >>> df.to_numpy(True).view(np.recarray)
+        >>> df.to_numpy(structured=True).view(np.recarray)
         rec.array([(1, 6.5, 'a'), (2, 7. , 'b'), (3, 8.5, 'c')],
                   dtype=[('foo', 'u1'), ('bar', '<f4'), ('ham', '<U1')])
 
@@ -2022,7 +2107,7 @@ class DataFrame:
                 a = s.to_numpy()
                 arrays.append(
                     a.astype(str, copy=False)
-                    if tp == Utf8 and not s.has_validity()
+                    if tp == Utf8 and not s.null_count()
                     else a
                 )
 
@@ -2177,8 +2262,8 @@ class DataFrame:
 
         """
         if not isinstance(index, int):
-            raise ValueError(
-                f'Index value "{index}" should be be an int, but is {type(index)}.'
+            raise TypeError(
+                f"index value {index!r} should be an int, but is {type(index).__name__!r}"
             )
 
         if index < 0:
@@ -2276,8 +2361,8 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path to which the result should be written. If set to ``None``
-            (default), the output is returned as a string instead.
+            File path or writeable file-like object to which the result will be written.
+            If set to `None` (default), the output is returned as a string instead.
         pretty
             Pretty serialize json.
         row_oriented
@@ -2302,7 +2387,7 @@ class DataFrame:
 
         """
         if isinstance(file, (str, Path)):
-            file = normalise_filepath(file)
+            file = normalize_filepath(file)
         to_string_io = (file is not None) and isinstance(file, StringIO)
         if file is None or to_string_io:
             with BytesIO() as buf:
@@ -2333,8 +2418,8 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path to which the result should be written. If set to ``None``
-            (default), the output is returned as a string instead.
+            File path or writeable file-like object to which the result will be written.
+            If set to `None` (default), the output is returned as a string instead.
 
         Examples
         --------
@@ -2349,7 +2434,7 @@ class DataFrame:
 
         """
         if isinstance(file, (str, Path)):
-            file = normalise_filepath(file)
+            file = normalize_filepath(file)
         to_string_io = (file is not None) and isinstance(file, StringIO)
         if file is None or to_string_io:
             with BytesIO() as buf:
@@ -2370,10 +2455,11 @@ class DataFrame:
         self,
         file: None = None,
         *,
-        has_header: bool = ...,
+        include_bom: bool = ...,
+        include_header: bool = ...,
         separator: str = ...,
         line_terminator: str = ...,
-        quote: str = ...,
+        quote_char: str = ...,
         batch_size: int = ...,
         datetime_format: str | None = ...,
         date_format: str | None = ...,
@@ -2389,10 +2475,11 @@ class DataFrame:
         self,
         file: BytesIO | TextIOWrapper | str | Path,
         *,
-        has_header: bool = ...,
+        include_bom: bool = ...,
+        include_header: bool = ...,
         separator: str = ...,
         line_terminator: str = ...,
-        quote: str = ...,
+        quote_char: str = ...,
         batch_size: int = ...,
         datetime_format: str | None = ...,
         date_format: str | None = ...,
@@ -2403,14 +2490,17 @@ class DataFrame:
     ) -> None:
         ...
 
+    @deprecate_renamed_parameter("quote", "quote_char", version="0.19.8")
+    @deprecate_renamed_parameter("has_header", "include_header", version="0.19.13")
     def write_csv(
         self,
         file: BytesIO | TextIOWrapper | str | Path | None = None,
         *,
-        has_header: bool = True,
+        include_bom: bool = False,
+        include_header: bool = True,
         separator: str = ",",
         line_terminator: str = "\n",
-        quote: str = '"',
+        quote_char: str = '"',
         batch_size: int = 1024,
         datetime_format: str | None = None,
         date_format: str | None = None,
@@ -2425,15 +2515,17 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path to which the result should be written. If set to ``None``
-            (default), the output is returned as a string instead.
-        has_header
+            File path or writeable file-like object to which the result will be written.
+            If set to `None` (default), the output is returned as a string instead.
+        include_bom
+            Whether to include UTF-8 BOM in the CSV output.
+        include_header
             Whether to include header in the CSV output.
         separator
             Separate CSV fields with this symbol.
         line_terminator
             String used to end each row.
-        quote
+        quote_char
             Byte to use as quoting character.
         batch_size
             Number of rows that will be processed per thread.
@@ -2452,24 +2544,26 @@ class DataFrame:
             `chrono <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>`_
             Rust crate.
         float_precision
-            Number of decimal places to write, applied to both ``Float32`` and
-            ``Float64`` datatypes.
+            Number of decimal places to write, applied to both `Float32` and
+            `Float64` datatypes.
         null_value
             A string representing null values (defaulting to the empty string).
-        quote_style : {'necessary', 'always', 'non_numeric'}
+        quote_style : {'necessary', 'always', 'non_numeric', 'never'}
             Determines the quoting strategy used.
-            - necessary (default): This puts quotes around fields only when necessary.
-            They are necessary when fields contain a quote,
-            delimiter or record terminator.
-            Quotes are also necessary when writing an empty record
-            (which is indistinguishable from a record with one empty field).
-            This is the default.
-            - always: This puts quotes around every field. Always.
-            - non_numeric: This puts quotes around all fields that are non-numeric.
-            Namely, when writing a field that does not parse as a valid float
-            or integer, then quotes will be used even if they aren`t strictly
-            necessary.
 
+            - necessary (default): This puts quotes around fields only when necessary.
+              They are necessary when fields contain a quote,
+              separator or record terminator.
+              Quotes are also necessary when writing an empty record
+              (which is indistinguishable from a record with one empty field).
+              This is the default.
+            - always: This puts quotes around every field. Always.
+            - never: This never puts quotes around fields, even if that results in
+              invalid CSV data (e.g.: by not quoting strings containing the separator).
+            - non_numeric: This puts quotes around all fields that are non-numeric.
+              Namely, when writing a field that does not parse as a valid float
+              or integer, then quotes will be used even if they aren`t strictly
+              necessary.
 
         Examples
         --------
@@ -2486,28 +2580,27 @@ class DataFrame:
         >>> df.write_csv(path, separator=",")
 
         """
-        if len(separator) > 1:
-            raise ValueError("only single byte separator is allowed")
-        elif len(quote) > 1:
-            raise ValueError("only single byte quote char is allowed")
-        elif null_value == "":
+        _check_arg_is_1byte("separator", separator, can_be_empty=False)
+        _check_arg_is_1byte("quote_char", quote_char, can_be_empty=True)
+        if not null_value:
             null_value = None
 
         should_return_buffer = False
         if file is None:
             buffer = file = BytesIO()
             should_return_buffer = True
-        elif isinstance(file, (str, Path)):
-            file = normalise_filepath(file)
+        elif isinstance(file, (str, os.PathLike)):
+            file = normalize_filepath(file)
         elif isinstance(file, TextIOWrapper):
             file = cast(TextIOWrapper, file.buffer)
 
         self._df.write_csv(
             file,
-            has_header,
+            include_bom,
+            include_header,
             ord(separator),
             line_terminator,
-            ord(quote),
+            ord(quote_char),
             batch_size,
             datetime_format,
             date_format,
@@ -2526,6 +2619,7 @@ class DataFrame:
         self,
         file: BinaryIO | BytesIO | str | Path,
         compression: AvroCompression = "uncompressed",
+        name: str = "",
     ) -> None:
         """
         Write to Apache Avro file.
@@ -2533,9 +2627,11 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path to which the file should be written.
+            File path or writeable file-like object to which the data will be written.
         compression : {'uncompressed', 'snappy', 'deflate'}
             Compression method. Defaults to "uncompressed".
+        name
+            Schema name. Defaults to empty string.
 
         Examples
         --------
@@ -2555,10 +2651,13 @@ class DataFrame:
         if compression is None:
             compression = "uncompressed"
         if isinstance(file, (str, Path)):
-            file = normalise_filepath(file)
+            file = normalize_filepath(file)
+        if name is None:
+            name = ""
 
-        self._df.write_avro(file, compression)
+        self._df.write_avro(file, compression, name)
 
+    @deprecate_renamed_parameter("has_header", "include_header", version="0.19.13")
     def write_excel(
         self,
         workbook: Workbook | BytesIO | Path | str | None = None,
@@ -2567,21 +2666,21 @@ class DataFrame:
         position: tuple[int, int] | str = "A1",
         table_style: str | dict[str, Any] | None = None,
         table_name: str | None = None,
-        column_formats: dict[str | tuple[str, ...], str | dict[str, str]] | None = None,
+        column_formats: ColumnFormatDict | None = None,
         dtype_formats: dict[OneOrMoreDataTypes, str] | None = None,
         conditional_formats: ConditionalFormatDict | None = None,
         header_format: dict[str, Any] | None = None,
         column_totals: ColumnTotalsDefinition | None = None,
-        column_widths: dict[str | tuple[str, ...], int] | int | None = None,
+        column_widths: ColumnWidthsDefinition | None = None,
         row_totals: RowTotalsDefinition | None = None,
         row_heights: dict[int | tuple[int, ...], int] | int | None = None,
         sparklines: dict[str, Sequence[str] | dict[str, Any]] | None = None,
         formulas: dict[str, str | dict[str, str]] | None = None,
         float_precision: int = 3,
-        has_header: bool = True,
+        include_header: bool = True,
         autofilter: bool = True,
         autofit: bool = False,
-        hidden_columns: Sequence[str] | None = None,
+        hidden_columns: Sequence[str] | SelectorType | None = None,
         hide_gridlines: bool = False,
         sheet_zoom: int | None = None,
         freeze_panes: (
@@ -2599,8 +2698,8 @@ class DataFrame:
         ----------
         workbook : Workbook
             String name or path of the workbook to create, BytesIO object to write
-            into, or an open ``xlsxwriter.Workbook`` object that has not been closed.
-            If None, writes to a ``dataframe.xlsx`` workbook in the working directory.
+            into, or an open `xlsxwriter.Workbook` object that has not been closed.
+            If None, writes to a `dataframe.xlsx` workbook in the working directory.
         worksheet : str
             Name of target worksheet; if None, writes to "Sheet1" when creating a new
             workbook (note that writing to an existing workbook requires a valid
@@ -2609,28 +2708,28 @@ class DataFrame:
             Table position in Excel notation (eg: "A1"), or a (row,col) integer tuple.
         table_style : {str, dict}
             A named Excel table style, such as "Table Style Medium 4", or a dictionary
-            of ``{"key":value,}`` options containing one or more of the following keys:
+            of `{"key":value,}` options containing one or more of the following keys:
             "style", "first_column", "last_column", "banded_columns, "banded_rows".
         table_name : str
             Name of the output table object in the worksheet; can then be referred to
-            in the sheet by formulae/charts, or by subsequent ``xlsxwriter`` operations.
+            in the sheet by formulae/charts, or by subsequent `xlsxwriter` operations.
         column_formats : dict
-            A ``{colname:str,}`` dictionary for applying an Excel format string to the
-            given columns. Formats defined here (such as "dd/mm/yyyy", "0.00%", etc)
-            will override any defined in ``dtype_formats`` (below).
+            A `{colname(s):str,}` or `{selector:str,}` dictionary for applying an
+            Excel format string to the given columns. Formats defined here (such as
+            "dd/mm/yyyy", "0.00%", etc) will override any defined in `dtype_formats`.
         dtype_formats : dict
-            A ``{dtype:str,}`` dictionary that sets the default Excel format for the
+            A `{dtype:str,}` dictionary that sets the default Excel format for the
             given dtype. (This can be overridden on a per-column basis by the
-            ``column_formats`` param). It is also valid to use dtype groups such as
-            ``pl.FLOAT_DTYPES`` as the dtype/format key, to simplify setting uniform
+            `column_formats` param). It is also valid to use dtype groups such as
+            `pl.FLOAT_DTYPES` as the dtype/format key, to simplify setting uniform
             integer and float formats.
         conditional_formats : dict
-            A ``{colname(s):str,}``, ``{colname(s):dict,}``, or ``{colname(s):list,}``
-            dictionary defining conditional format options for the specified columns.
+            A dictionary of colname (or selector) keys to a format str, dict, or list
+            that defines conditional formatting options for the specified columns.
 
-            * If supplying a string typename, should be one of the valid ``xlsxwriter``
+            * If supplying a string typename, should be one of the valid `xlsxwriter`
               types such as "3_color_scale", "data_bar", etc.
-            * If supplying a dictionary you can make use of any/all ``xlsxwriter``
+            * If supplying a dictionary you can make use of any/all `xlsxwriter`
               supported options, including icon sets, formulae, etc.
             * Supplying multiple columns as a tuple/key will apply a single format
               across all columns - this is effective in creating a heatmap, as the
@@ -2638,8 +2737,8 @@ class DataFrame:
             * Finally, you can also supply a list made up from the above options
               in order to apply *more* than one conditional format to the same range.
         header_format : dict
-            A ``{key:value,}`` dictionary of ``xlsxwriter`` format options to apply
-            to the table header row, such as ``{"bold":True, "font_color":"#702963"}``.
+            A `{key:value,}` dictionary of `xlsxwriter` format options to apply
+            to the table header row, such as `{"bold":True, "font_color":"#702963"}`.
         column_totals : {bool, list, dict}
             Add a column-total row to the exported table.
 
@@ -2647,14 +2746,14 @@ class DataFrame:
             * If passing a string, it must be one of the valid total function names
               and all numeric columns will have an associated total using that function.
             * If passing a list of colnames, only those given will have a total.
-            * For more control, pass a ``{colname:funcname,}`` dict.
+            * For more control, pass a `{colname:funcname,}` dict.
 
             Valid total function names are "average", "count_nums", "count", "max",
             "min", "std_dev", "sum", and "var".
         column_widths : {dict, int}
-            A ``{colname:int,}`` dict or single integer that sets (or overrides if
-            autofitting) table column widths in integer pixel units. If given as an
-            integer the same value is used for all table columns.
+            A `{colname:int,}` or `{selector:int,}` dict or a single integer that
+            sets (or overrides if autofitting) table column widths, in integer pixel
+            units. If given as an integer the same value is used for all table columns.
         row_totals : {dict, bool}
             Add a row-total column to the right-hand side of the exported table.
 
@@ -2662,28 +2761,28 @@ class DataFrame:
               that applies a "sum" function row-wise across all numeric columns.
             * If passing a list/sequence of column names, only the matching columns
               will participate in the sum.
-            * Can also pass a ``{colname:columns,}`` dictionary to create one or
+            * Can also pass a `{colname:columns,}` dictionary to create one or
               more total columns with distinct names, referencing different columns.
         row_heights : {dict, int}
-            An int or ``{row_index:int,}`` dictionary that sets the height of the given
+            An int or `{row_index:int,}` dictionary that sets the height of the given
             rows (if providing a dictionary) or all rows (if providing an integer) that
             intersect with the table body (including any header and total row) in
-            integer pixel units. Note that ``row_index`` starts at zero and will be
-            the header row (unless ``has_headers`` is False).
+            integer pixel units. Note that `row_index` starts at zero and will be
+            the header row (unless `include_header` is False).
         sparklines : dict
-            A ``{colname:list,}`` or ``{colname:dict,}`` dictionary defining one or more
+            A `{colname:list,}` or `{colname:dict,}` dictionary defining one or more
             sparklines to be written into a new column in the table.
 
             * If passing a list of colnames (used as the source of the sparkline data)
               the default sparkline settings are used (eg: line chart with no markers).
-            * For more control an ``xlsxwriter``-compliant options dict can be supplied,
+            * For more control an `xlsxwriter`-compliant options dict can be supplied,
               in which case three additional polars-specific keys are available:
               "columns", "insert_before", and "insert_after". These allow you to define
               the source columns and position the sparkline(s) with respect to other
               table columns. If no position directive is given, sparklines are added to
               the end of the table (eg: to the far right) in the order they are given.
         formulas : dict
-            A ``{colname:formula,}`` or ``{colname:dict,}`` dictionary defining one or
+            A `{colname:formula,}` or `{colname:dict,}` dictionary defining one or
             more formulas to be written into a new column in the table. Note that you
             are strongly advised to use structured references in your formulae wherever
             possible to make it simple to reference columns by name.
@@ -2695,17 +2794,17 @@ class DataFrame:
               "formula" (mandatory), one of "insert_before" or "insert_after", and
               optionally "return_dtype". The latter is used to appropriately format the
               output of the formula and allow it to participate in row/column totals.
-        float_precision : {dict, int}
+        float_precision : int
             Default number of decimals displayed for floating point columns (note that
             this is purely a formatting directive; the actual values are not rounded).
-        has_header : bool
+        include_header : bool
             Indicate if the table should be created with a header row.
         autofilter : bool
             If the table has headers, provide autofilter capability.
         autofit : bool
             Calculate individual column widths from the data.
         hidden_columns : list
-             A list of table columns to hide in the worksheet.
+             A list or selector representing table columns to hide in the worksheet.
         hide_gridlines : bool
             Do not display any gridlines on the output worksheet.
         sheet_zoom : int
@@ -2725,10 +2824,9 @@ class DataFrame:
               scrolling region begin at row 10, column D (5th col), supply (1, 0, 9, 4).
               Using cell notation for (row, col), supplying ("A2", 9, 4) is equivalent.
 
-
         Notes
         -----
-        * A list of compatible ``xlsxwriter`` format property names can be found here:
+        * A list of compatible `xlsxwriter` format property names can be found here:
           https://xlsxwriter.readthedocs.io/format.html#format-methods-and-format-properties
 
         * Conditional formatting dictionaries should provide xlsxwriter-compatible
@@ -2754,7 +2852,7 @@ class DataFrame:
 
         Examples
         --------
-        Instantiate a basic dataframe:
+        Instantiate a basic DataFrame:
 
         >>> from random import uniform
         >>> from datetime import date
@@ -2924,7 +3022,8 @@ class DataFrame:
             from xlsxwriter.utility import xl_cell_to_rowcol
         except ImportError:
             raise ImportError(
-                "Excel export requires xlsxwriter; please run `pip install XlsxWriter`"
+                "Excel export requires xlsxwriter"
+                "\n\nPlease run: pip install XlsxWriter"
             ) from None
 
         # setup workbook/worksheet
@@ -2958,20 +3057,20 @@ class DataFrame:
             table_start[0]
             + len(df)
             + int(is_empty)
-            - int(not has_header)
+            - int(not include_header)
             + int(bool(column_totals)),
             table_start[1] + len(df.columns) - 1,
         )
 
         # write table structure and formats into the target sheet
-        if not is_empty or has_header:
+        if not is_empty or include_header:
             ws.add_table(
                 *table_start,
                 *table_finish,
                 {
                     "style": table_style,
                     "columns": table_columns,
-                    "header_row": has_header,
+                    "header_row": include_header,
                     "autofilter": autofilter,
                     "total_row": bool(column_totals) and not is_empty,
                     "name": table_name,
@@ -2981,7 +3080,7 @@ class DataFrame:
 
             # write data into the table range, column-wise
             if not is_empty:
-                column_start = [table_start[0] + int(has_header), table_start[1]]
+                column_start = [table_start[0] + int(include_header), table_start[1]]
                 for c in df.columns:
                     if c in self.columns:
                         ws.write_column(
@@ -2998,14 +3097,19 @@ class DataFrame:
                     ws=ws,
                     conditional_formats=conditional_formats,
                     table_start=table_start,
-                    has_header=has_header,
+                    include_header=include_header,
                     format_cache=fmt_cache,
                 )
-
         # additional column-level properties
-        hidden_columns = hidden_columns or ()
+        if hidden_columns is None:
+            hidden_columns = ()
+        hidden_columns = _expand_selectors(df, hidden_columns)
         if isinstance(column_widths, int):
             column_widths = {column: column_widths for column in df.columns}
+        else:
+            column_widths = _expand_selector_dicts(  # type: ignore[assignment]
+                df, column_widths, expand_keys=True, expand_values=False
+            )
         column_widths = _unpack_multi_column_dict(column_widths or {})  # type: ignore[assignment]
 
         for column in df.columns:
@@ -3014,14 +3118,25 @@ class DataFrame:
                 options = {"hidden": True}
             if column in column_widths:  # type: ignore[operator]
                 ws.set_column_pixels(
-                    col_idx, col_idx, column_widths[column], None, options  # type: ignore[index]
+                    col_idx,
+                    col_idx,
+                    column_widths[column],  # type: ignore[index]
+                    None,
+                    options,
                 )
             elif options:
                 ws.set_column(col_idx, col_idx, None, None, options)
 
         # finally, inject any sparklines into the table
         for column, params in (sparklines or {}).items():
-            _xl_inject_sparklines(ws, df, table_start, column, has_header, params)
+            _xl_inject_sparklines(
+                ws,
+                df,
+                table_start,
+                column,
+                include_header=include_header,
+                params=params,
+            )
 
         # worksheet options
         if hide_gridlines:
@@ -3079,11 +3194,13 @@ class DataFrame:
         """
         Write to Arrow IPC binary stream or Feather file.
 
+        See "File or Random Access format" in https://arrow.apache.org/docs/python/ipc.html.
+
         Parameters
         ----------
         file
-            Path to which the IPC data should be written. If set to
-            ``None``, the output is returned as a BytesIO object.
+            Path or writeable file-like object to which the IPC data will be
+            written. If set to `None`, the output is returned as a BytesIO object.
         compression : {'uncompressed', 'lz4', 'zstd'}
             Compression method. Defaults to "uncompressed".
 
@@ -3106,12 +3223,73 @@ class DataFrame:
         if return_bytes:
             file = BytesIO()
         elif isinstance(file, (str, Path)):
-            file = normalise_filepath(file)
+            file = normalize_filepath(file)
 
         if compression is None:
             compression = "uncompressed"
 
         self._df.write_ipc(file, compression)
+        return file if return_bytes else None  # type: ignore[return-value]
+
+    @overload
+    def write_ipc_stream(
+        self,
+        file: None,
+        compression: IpcCompression = "uncompressed",
+    ) -> BytesIO:
+        ...
+
+    @overload
+    def write_ipc_stream(
+        self,
+        file: BinaryIO | BytesIO | str | Path,
+        compression: IpcCompression = "uncompressed",
+    ) -> None:
+        ...
+
+    def write_ipc_stream(
+        self,
+        file: BinaryIO | BytesIO | str | Path | None,
+        compression: IpcCompression = "uncompressed",
+    ) -> BytesIO | None:
+        """
+        Write to Arrow IPC record batch stream.
+
+        See "Streaming format" in https://arrow.apache.org/docs/python/ipc.html.
+
+        Parameters
+        ----------
+        file
+            Path or writeable file-like object to which the IPC record batch data will
+            be written. If set to `None`, the output is returned as a BytesIO object.
+        compression : {'uncompressed', 'lz4', 'zstd'}
+            Compression method. Defaults to "uncompressed".
+
+        Examples
+        --------
+        >>> import pathlib
+        >>>
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "foo": [1, 2, 3, 4, 5],
+        ...         "bar": [6, 7, 8, 9, 10],
+        ...         "ham": ["a", "b", "c", "d", "e"],
+        ...     }
+        ... )
+        >>> path: pathlib.Path = dirpath / "new_file.arrow"
+        >>> df.write_ipc_stream(path)
+
+        """
+        return_bytes = file is None
+        if return_bytes:
+            file = BytesIO()
+        elif isinstance(file, (str, Path)):
+            file = normalize_filepath(file)
+
+        if compression is None:
+            compression = "uncompressed"
+
+        self._df.write_ipc_stream(file, compression)
         return file if return_bytes else None  # type: ignore[return-value]
 
     def write_parquet(
@@ -3131,7 +3309,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path to which the file should be written.
+            File path or writeable file-like object to which the result will be written.
         compression : {'lz4', 'uncompressed', 'snappy', 'gzip', 'lzo', 'brotli', 'zstd'}
             Choose "zstd" for good compression performance.
             Choose "lz4" for fast compression/decompression.
@@ -3153,11 +3331,11 @@ class DataFrame:
             Use C++ parquet implementation vs Rust parquet implementation.
             At the moment C++ supports more features.
         pyarrow_options
-            Arguments passed to ``pyarrow.parquet.write_table``.
+            Arguments passed to `pyarrow.parquet.write_table`.
 
-            If you pass ``partition_cols`` here, the dataset will be written
-            using ``pyarrow.parquet.write_to_dataset``.
-            The ``partition_cols`` parameter leads to write the dataset to a directory.
+            If you pass `partition_cols` here, the dataset will be written
+            using `pyarrow.parquet.write_to_dataset`.
+            The `partition_cols` parameter leads to write the dataset to a directory.
             Similar to Spark's partitioned datasets.
 
         Examples
@@ -3192,9 +3370,9 @@ class DataFrame:
             compression = "uncompressed"
         if isinstance(file, (str, Path)):
             if pyarrow_options is not None and pyarrow_options.get("partition_cols"):
-                file = normalise_filepath(file, check_not_directory=False)
+                file = normalize_filepath(file, check_not_directory=False)
             else:
-                file = normalise_filepath(file)
+                file = normalize_filepath(file)
 
         if use_pyarrow:
             tbl = self.to_arrow()
@@ -3275,15 +3453,17 @@ class DataFrame:
 
         if engine == "adbc":
             if if_exists == "fail":
-                raise ValueError("'if_exists' not yet supported with engine ADBC")
+                raise NotImplementedError(
+                    "`if_exists = 'fail'` not supported for ADBC engine"
+                )
             elif if_exists == "replace":
                 mode = "create"
             elif if_exists == "append":
                 mode = "append"
             else:
                 raise ValueError(
-                    f"value for 'if_exists'={if_exists} was unexpected."
-                    f" Choose one of: {'fail', 'replace', 'append'}"
+                    f"unexpected value for `if_exists`: {if_exists!r}"
+                    f"\n\nChoose one of {{'fail', 'replace', 'append'}}"
                 )
             with _open_adbc_connection(connection) as conn, conn.cursor() as cursor:
                 cursor.adbc_ingest(table_name, self.to_arrow(), mode)
@@ -3292,14 +3472,15 @@ class DataFrame:
         elif engine == "sqlalchemy":
             if parse_version(pd.__version__) < parse_version("1.5"):
                 raise ModuleNotFoundError(
-                    f"writing with engine 'sqlalchemy' requires Pandas 1.5.x or higher, found Pandas {pd.__version__!r}"
+                    f"writing with engine 'sqlalchemy' requires pandas 1.5.x or higher, found pandas {pd.__version__!r}"
                 )
 
             try:
                 from sqlalchemy import create_engine
-            except ImportError as exc:
-                raise ImportError(
-                    "'sqlalchemy' not found. Install polars with 'pip install polars[sqlalchemy]'"
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "sqlalchemy not found"
+                    "\n\nInstall Polars with: pip install polars[sqlalchemy]"
                 ) from exc
             from csv import reader as delimited_read
 
@@ -3307,7 +3488,7 @@ class DataFrame:
             # both components and pass them through unquoted (sqlalachemy will quote)
             table_ident = next(delimited_read([table_name], delimiter="."))
             if len(table_ident) > 2:
-                raise ValueError(f"table_name appears to be invalid: {table_name!r}")
+                raise ValueError(f"`table_name` appears to be invalid: {table_name!r}")
             elif len(table_ident) > 1:
                 db_schema = table_ident[0]
                 table_name = table_ident[1]
@@ -3383,7 +3564,8 @@ class DataFrame:
         to which they can be cast. This affects the following data types:
 
         - Unsigned integers
-        - :class:`Datetime` types with millisecond or nanosecond precision
+        - :class:`Datetime` types with millisecond or nanosecond precision or with
+            time zone information
         - :class:`Utf8`, :class:`Binary`, and :class:`List` ('large' types)
 
         Polars columns are always nullable. To write data to a delta table with
@@ -3477,6 +3659,7 @@ class DataFrame:
             mode=mode,
             overwrite_schema=overwrite_schema,
             storage_options=storage_options,
+            large_dtypes=True,
             **delta_write_options,
         )
 
@@ -3695,7 +3878,7 @@ class DataFrame:
         └───────┴─────┴─────┘
 
         """
-        return self.lazy().rename(mapping).collect(no_optimization=True)
+        return self.lazy().rename(mapping).collect(_eager=True)
 
     def insert_at_idx(self, index: int, series: Series) -> Self:
         """
@@ -3753,15 +3936,26 @@ class DataFrame:
 
     def filter(
         self,
-        predicate: (Expr | str | Series | list[bool] | np.ndarray[Any, Any] | bool),
+        *predicates: (
+            IntoExprColumn
+            | Iterable[IntoExprColumn]
+            | bool
+            | list[bool]
+            | np.ndarray[Any, Any]
+        ),
+        **constraints: Any,
     ) -> DataFrame:
         """
         Filter the rows in the DataFrame based on a predicate expression.
 
+        The original order of the remaining rows is preserved.
+
         Parameters
         ----------
-        predicate
+        predicates
             Expression that evaluates to a boolean Series.
+        constraints
+            Column filters. Use name=value to filter column name by the supplied value.
 
         Examples
         --------
@@ -3775,18 +3969,18 @@ class DataFrame:
 
         Filter on one condition:
 
-        >>> df.filter(pl.col("foo") < 3)
+        >>> df.filter(pl.col("foo") > 1)
         shape: (2, 3)
         ┌─────┬─────┬─────┐
         │ foo ┆ bar ┆ ham │
         │ --- ┆ --- ┆ --- │
         │ i64 ┆ i64 ┆ str │
         ╞═════╪═════╪═════╡
-        │ 1   ┆ 6   ┆ a   │
         │ 2   ┆ 7   ┆ b   │
+        │ 3   ┆ 8   ┆ c   │
         └─────┴─────┴─────┘
 
-        Filter on multiple conditions:
+        Filter on multiple conditions, combined with and/or operators:
 
         >>> df.filter((pl.col("foo") < 3) & (pl.col("ham") == "a"))
         shape: (1, 3)
@@ -3797,8 +3991,6 @@ class DataFrame:
         ╞═════╪═════╪═════╡
         │ 1   ┆ 6   ┆ a   │
         └─────┴─────┴─────┘
-
-        Filter on an OR condition:
 
         >>> df.filter((pl.col("foo") == 1) | (pl.col("ham") == "c"))
         shape: (2, 3)
@@ -3811,35 +4003,79 @@ class DataFrame:
         │ 3   ┆ 8   ┆ c   │
         └─────┴─────┴─────┘
 
-        """
-        if _check_for_numpy(predicate) and isinstance(predicate, np.ndarray):
-            predicate = pl.Series(predicate)
+        Provide multiple filters using `*args` syntax:
 
-        return (
-            self.lazy()
-            .filter(predicate)  # type: ignore[arg-type]
-            .collect(no_optimization=True)
-        )
+        >>> df.filter(
+        ...     pl.col("foo") <= 2,
+        ...     ~pl.col("ham").is_in(["b", "c"]),
+        ... )
+        shape: (1, 3)
+        ┌─────┬─────┬─────┐
+        │ foo ┆ bar ┆ ham │
+        │ --- ┆ --- ┆ --- │
+        │ i64 ┆ i64 ┆ str │
+        ╞═════╪═════╪═════╡
+        │ 1   ┆ 6   ┆ a   │
+        └─────┴─────┴─────┘
+
+        Provide multiple filters using `**kwargs` syntax:
+
+        >>> df.filter(foo=2, ham="b")
+        shape: (1, 3)
+        ┌─────┬─────┬─────┐
+        │ foo ┆ bar ┆ ham │
+        │ --- ┆ --- ┆ --- │
+        │ i64 ┆ i64 ┆ str │
+        ╞═════╪═════╪═════╡
+        │ 2   ┆ 7   ┆ b   │
+        └─────┴─────┴─────┘
+
+        """
+        return self.lazy().filter(*predicates, **constraints).collect(_eager=True)
 
     @overload
-    def glimpse(self, *, return_as_string: Literal[False]) -> None:
+    def glimpse(
+        self,
+        *,
+        max_items_per_column: int = ...,
+        max_colname_length: int = ...,
+        return_as_string: Literal[False],
+    ) -> None:
         ...
 
     @overload
-    def glimpse(self, *, return_as_string: Literal[True]) -> str:
+    def glimpse(
+        self,
+        *,
+        max_items_per_column: int = ...,
+        max_colname_length: int = ...,
+        return_as_string: Literal[True],
+    ) -> str:
         ...
 
-    def glimpse(self, *, return_as_string: bool = False) -> str | None:
+    def glimpse(
+        self,
+        *,
+        max_items_per_column: int = 10,
+        max_colname_length: int = 50,
+        return_as_string: bool = False,
+    ) -> str | None:
         """
-        Return a dense preview of the dataframe.
+        Return a dense preview of the DataFrame.
 
-        The formatting is done one line per column, so wide dataframes show nicely.
-        Each line will show the column name, the data type and the first few values.
+        The formatting shows one line per column so that wide dataframes display
+        cleanly. Each line shows the column name, the data type, and the first
+        few values.
 
         Parameters
         ----------
+        max_items_per_column
+            Maximum number of items to show per column.
+        max_colname_length
+            Maximum length of the displayed column names; values that exceed this
+            value are truncated with a trailing ellipsis.
         return_as_string
-            If True, return as string rather than printing to stdout.
+            If True, return the preview as a string instead of printing to stdout.
 
         See Also
         --------
@@ -3864,42 +4100,33 @@ class DataFrame:
         $ a  <f64> 1.0, 2.8, 3.0
         $ b  <i64> 4, 5, None
         $ c <bool> True, False, True
-        $ d  <str> None, b, c
-        $ e  <str> usd, eur, None
+        $ d  <str> None, 'b', 'c'
+        $ e  <str> 'usd', 'eur', None
         $ f <date> 2020-01-01, 2021-01-02, 2022-01-01
 
         """
-        # always print at most this number of values, mainly used to ensure
-        # we do not cast long arrays to strings which would be very slow
-        max_num_values = min(10, self.height)
-        max_col_name_trunc = 50
+        # always print at most this number of values (mainly ensures that
+        # we do not cast long arrays to strings, which would be slow)
+        max_n_values = min(max_items_per_column, self.height)
+        schema = self.schema
 
         def _parse_column(col_name: str, dtype: PolarsDataType) -> tuple[str, str, str]:
-            dtype_str = (
-                f"<{DataTypeClass._string_repr(dtype)}>"
-                if isinstance(dtype, DataTypeClass)
-                else f"<{dtype._string_repr()}>"
-            )
-            val = self[:max_num_values][col_name].to_list()
-            val_str = ", ".join(map(str, val))
-            if len(col_name) > max_col_name_trunc:
-                col_name = col_name[: (max_col_name_trunc - 3)] + "..."
-            return col_name, dtype_str, val_str
+            fn = repr if schema[col_name] == Utf8 else str
+            values = self[:max_n_values][col_name].to_list()
+            val_str = ", ".join(fn(v) for v in values)  # type: ignore[operator]
+            if len(col_name) > max_colname_length:
+                col_name = col_name[: (max_colname_length - 1)] + "…"
+            return col_name, f"<{_dtype_str_repr(dtype)}>", val_str
 
         data = [_parse_column(s, dtype) for s, dtype in self.schema.items()]
 
-        # we make the first column as small as possible by taking the longest
-        # column name
+        # determine column layout widths
         max_col_name = max((len(col_name) for col_name, _, _ in data))
-
-        # dtype string
         max_col_dtype = max((len(dtype_str) for _, dtype_str, _ in data))
-
-        # limit the amount of data printed such that total width is fixed
         max_col_values = 100 - max_col_name - max_col_dtype
 
-        output = StringIO()
         # print header
+        output = StringIO()
         output.write(f"Rows: {self.height}\nColumns: {self.width}\n")
 
         # print individual columns: one row per column
@@ -3911,15 +4138,14 @@ class DataFrame:
             )
 
         s = output.getvalue()
-
-        if not return_as_string:
-            print(s, end=None)
-            return None
-        else:
+        if return_as_string:
             return s
 
+        print(s, end=None)
+        return None
+
     def describe(
-        self, percentiles: Sequence[float] | float | None = (0.25, 0.75)
+        self, percentiles: Sequence[float] | float | None = (0.25, 0.50, 0.75)
     ) -> Self:
         """
         Summary statistics for a DataFrame.
@@ -3929,6 +4155,10 @@ class DataFrame:
         percentiles
             One or more percentiles to include in the summary statistics.
             All values must be in the range `[0, 1]`.
+
+        Notes
+        -----
+        The median is included by default as the 50% percentile.
 
         See Also
         --------
@@ -3970,25 +4200,25 @@ class DataFrame:
         metrics = ["count", "null_count", "mean", "std", "min"]
         percentile_exprs = []
         for p in parse_percentiles(percentiles):
-            percentile_exprs.append(F.all().quantile(p).prefix(f"{p}:"))
+            percentile_exprs.append(F.all().quantile(p).name.prefix(f"{p}:"))
             metrics.append(f"{p:.0%}")
         metrics.append("max")
 
         # execute metrics in parallel
         df_metrics = self.select(
-            F.all().count().prefix("count:"),
-            F.all().null_count().prefix("null_count:"),
-            F.all().mean().prefix("mean:"),
-            F.all().std().prefix("std:"),
-            F.all().min().prefix("min:"),
+            F.all().count().name.prefix("count:"),
+            F.all().null_count().name.prefix("null_count:"),
+            F.all().mean().name.prefix("mean:"),
+            F.all().std().name.prefix("std:"),
+            F.all().min().name.prefix("min:"),
             *percentile_exprs,
-            F.all().max().prefix("max:"),
+            F.all().max().name.prefix("max:"),
         ).row(0)
 
         # reshape wide result
         n_cols = len(self.columns)
         described = [
-            df_metrics[(n * n_cols) : (n + 1) * n_cols] for n in range(0, len(metrics))
+            df_metrics[(n * n_cols) : (n + 1) * n_cols] for n in range(len(metrics))
         ]
 
         # cast by column type (numeric/bool -> float), (other -> string)
@@ -4158,7 +4388,7 @@ class DataFrame:
         return (
             self.lazy()
             .sort(by, *more_by, descending=descending, nulls_last=nulls_last)
-            .collect(no_optimization=True)
+            .collect(_eager=True)
         )
 
     def top_k(
@@ -4380,6 +4610,13 @@ class DataFrame:
         """
         return self._df.frame_equal(other._df, null_equal)
 
+    @deprecate_function(
+        "DataFrame.replace is deprecated and will be removed in a future version. "
+        "Please use\n"
+        "    df = df.with_columns(new_column.alias(column_name))\n"
+        "instead.",
+        version="0.19.0",
+    )
     def replace(self, column: str, new_column: Series) -> Self:
         """
         Replace a column by a new Series.
@@ -4395,7 +4632,7 @@ class DataFrame:
         --------
         >>> df = pl.DataFrame({"foo": [1, 2, 3], "bar": [4, 5, 6]})
         >>> s = pl.Series([10, 20, 30])
-        >>> df.replace("foo", s)  # works in-place!
+        >>> df.replace("foo", s)  # works in-place!  # doctest: +SKIP
         shape: (3, 2)
         ┌─────┬─────┐
         │ foo ┆ bar │
@@ -4408,8 +4645,7 @@ class DataFrame:
         └─────┴─────┘
 
         """
-        self._df.replace(column, new_column._s)
-        return self
+        return self._replace(column, new_column)
 
     def slice(self, offset: int, length: int | None = None) -> Self:
         """
@@ -4420,7 +4656,7 @@ class DataFrame:
         offset
             Start index. Negative indexing is supported.
         length
-            Length of the slice. If set to ``None``, all rows starting at the offset
+            Length of the slice. If set to `None`, all rows starting at the offset
             will be selected.
 
         Examples
@@ -4456,7 +4692,7 @@ class DataFrame:
         ----------
         n
             Number of rows to return. If a negative value is passed, return all rows
-            except the last ``abs(n)``.
+            except the last `abs(n)`.
 
         See Also
         --------
@@ -4483,7 +4719,7 @@ class DataFrame:
         │ 3   ┆ 8   ┆ c   │
         └─────┴─────┴─────┘
 
-        Pass a negative value to get all rows `except` the last ``abs(n)``.
+        Pass a negative value to get all rows `except` the last `abs(n)`.
 
         >>> df.head(-3)
         shape: (2, 3)
@@ -4509,7 +4745,7 @@ class DataFrame:
         ----------
         n
             Number of rows to return. If a negative value is passed, return all rows
-            except the first ``abs(n)``.
+            except the first `abs(n)`.
 
         See Also
         --------
@@ -4536,7 +4772,7 @@ class DataFrame:
         │ 5   ┆ 10  ┆ e   │
         └─────┴─────┴─────┘
 
-        Pass a negative value to get all rows `except` the first ``abs(n)``.
+        Pass a negative value to get all rows `except` the first `abs(n)`.
 
         >>> df.tail(-3)
         shape: (2, 3)
@@ -4564,7 +4800,7 @@ class DataFrame:
         ----------
         n
             Number of rows to return. If a negative value is passed, return all rows
-            except the last ``abs(n)``.
+            except the last `abs(n)`.
 
         See Also
         --------
@@ -4580,13 +4816,13 @@ class DataFrame:
         """
         Drop all rows that contain null values.
 
-        Returns a new DataFrame.
+        The original order of the remaining rows is preserved.
 
         Parameters
         ----------
         subset
             Column name(s) for which null values are considered.
-            If set to ``None`` (default), use all columns.
+            If set to `None` (default), use all columns.
 
         Examples
         --------
@@ -4680,7 +4916,7 @@ class DataFrame:
         └──────┴──────┘
 
         """
-        return self.lazy().drop_nulls(subset).collect(no_optimization=True)
+        return self.lazy().drop_nulls(subset).collect(_eager=True)
 
     def pipe(
         self,
@@ -4785,14 +5021,14 @@ class DataFrame:
         """
         return self._from_pydf(self._df.with_row_count(name, offset))
 
-    def groupby(
+    def group_by(
         self,
         by: IntoExpr | Iterable[IntoExpr],
         *more_by: IntoExpr,
         maintain_order: bool = False,
     ) -> GroupBy:
         """
-        Start a groupby operation.
+        Start a group by operation.
 
         Parameters
         ----------
@@ -4803,8 +5039,8 @@ class DataFrame:
             Additional columns to group by, specified as positional arguments.
         maintain_order
             Ensure that the order of the groups is consistent with the input data.
-            This is slower than a default groupby.
-            Settings this to ``True`` blocks the possibility
+            This is slower than a default group by.
+            Settings this to `True` blocks the possibility
             to run on the streaming engine.
 
             .. note::
@@ -4818,7 +5054,7 @@ class DataFrame:
 
         Examples
         --------
-        Group by one column and call ``agg`` to compute the grouped sum of another
+        Group by one column and call `agg` to compute the grouped sum of another
         column.
 
         >>> df = pl.DataFrame(
@@ -4828,7 +5064,7 @@ class DataFrame:
         ...         "c": [5, 4, 3, 2, 1],
         ...     }
         ... )
-        >>> df.groupby("a").agg(pl.col("b").sum())  # doctest: +IGNORE_RESULT
+        >>> df.group_by("a").agg(pl.col("b").sum())  # doctest: +IGNORE_RESULT
         shape: (3, 2)
         ┌─────┬─────┐
         │ a   ┆ b   │
@@ -4840,10 +5076,10 @@ class DataFrame:
         │ c   ┆ 3   │
         └─────┴─────┘
 
-        Set ``maintain_order=True`` to ensure the order of the groups is consistent with
+        Set `maintain_order=True` to ensure the order of the groups is consistent with
         the input.
 
-        >>> df.groupby("a", maintain_order=True).agg(pl.col("c"))
+        >>> df.group_by("a", maintain_order=True).agg(pl.col("c"))
         shape: (3, 2)
         ┌─────┬───────────┐
         │ a   ┆ c         │
@@ -4857,7 +5093,7 @@ class DataFrame:
 
         Group by multiple columns by passing a list of column names.
 
-        >>> df.groupby(["a", "b"]).agg(pl.max("c"))  # doctest: +IGNORE_RESULT
+        >>> df.group_by(["a", "b"]).agg(pl.max("c"))  # doctest: +IGNORE_RESULT
         shape: (4, 3)
         ┌─────┬─────┬─────┐
         │ a   ┆ b   ┆ c   │
@@ -4873,7 +5109,7 @@ class DataFrame:
         Or use positional arguments to group by multiple columns in the same way.
         Expressions are also accepted.
 
-        >>> df.groupby("a", pl.col("b") // 2).agg(pl.col("c").mean())  # doctest: +SKIP
+        >>> df.group_by("a", pl.col("b") // 2).agg(pl.col("c").mean())  # doctest: +SKIP
         shape: (3, 3)
         ┌─────┬─────┬─────┐
         │ a   ┆ b   ┆ c   │
@@ -4885,10 +5121,10 @@ class DataFrame:
         │ c   ┆ 1   ┆ 1.0 │
         └─────┴─────┴─────┘
 
-        The ``GroupBy`` object returned by this method is iterable, returning the name
+        The `GroupBy` object returned by this method is iterable, returning the name
         and data of each group.
 
-        >>> for name, data in df.groupby("a"):  # doctest: +SKIP
+        >>> for name, data in df.group_by("a"):  # doctest: +SKIP
         ...     print(name)
         ...     print(data)
         ...
@@ -4925,7 +5161,7 @@ class DataFrame:
         """
         return GroupBy(self, by, *more_by, maintain_order=maintain_order)
 
-    def groupby_rolling(
+    def rolling(
         self,
         index_column: IntoExpr,
         *,
@@ -4938,17 +5174,24 @@ class DataFrame:
         """
         Create rolling groups based on a time, Int32, or Int64 column.
 
-        Different from a ``dynamic_groupby`` the windows are now determined by the
+        Different from a `group_by_dynamic` the windows are now determined by the
         individual values and are not of constant intervals. For constant intervals use
-        *groupby_dynamic*.
+        :func:`DataFrame.group_by_dynamic`.
 
-        If you have a time series ``<t_0, t_1, ..., t_n>``, then by default the
+        If you have a time series `<t_0, t_1, ..., t_n>`, then by default the
         windows created will be
 
             * (t_0 - period, t_0]
             * (t_1 - period, t_1]
             * ...
             * (t_n - period, t_n]
+
+        whereas if you pass a non-default `offset`, then the windows will be
+
+            * (t_0 + offset, t_0 + offset + period]
+            * (t_1 + offset, t_1 + offset + period]
+            * ...
+            * (t_n + offset, t_n + offset + period]
 
         The `period` and `offset` arguments are created either from a timedelta, or
         by using the following string language:
@@ -4969,15 +5212,11 @@ class DataFrame:
         Or combine them:
         "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
 
-        Suffix with `"_saturating"` to indicate that dates too large for
-        their month should saturate at the largest date (e.g. 2022-02-29 -> 2022-02-28)
-        instead of erroring.
-
         By "calendar day", we mean the corresponding time on the next day (which may
         not be 24 hours, due to daylight savings). Similarly for "calendar week",
         "calendar month", "calendar quarter", and "calendar year".
 
-        In case of a groupby_rolling on an integer column, the windows are defined by:
+        In case of a rolling operation on an integer column, the windows are defined by:
 
         - **"1i"      # length 1**
         - **"10i"     # length 10**
@@ -4990,7 +5229,7 @@ class DataFrame:
             This column must be sorted in ascending order (or, if `by` is specified,
             then it must be sorted in ascending order within each group).
 
-            In case of a rolling groupby on indices, dtype needs to be one of
+            In case of a rolling operation on indices, dtype needs to be one of
             {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
             performance matters use an Int64 column.
         period
@@ -5002,22 +5241,22 @@ class DataFrame:
         by
             Also group by this column/these columns
         check_sorted
-            When the ``by`` argument is given, polars can not check sortedness
+            When the `by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to ``False``.
+            data within the by groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
 
         Returns
         -------
         RollingGroupBy
-            Object you can call ``.agg`` on to aggregate by groups, the result
+            Object you can call `.agg` on to aggregate by groups, the result
             of which will be sorted by `index_column` (but note that if `by` columns are
             passed, it will only be sorted within each `by` group).
 
         See Also
         --------
-        groupby_dynamic
+        group_by_dynamic
 
         Examples
         --------
@@ -5032,7 +5271,7 @@ class DataFrame:
         >>> df = pl.DataFrame({"dt": dates, "a": [3, 7, 5, 9, 2, 1]}).with_columns(
         ...     pl.col("dt").str.strptime(pl.Datetime).set_sorted()
         ... )
-        >>> out = df.groupby_rolling(index_column="dt", period="2d").agg(
+        >>> out = df.rolling(index_column="dt", period="2d").agg(
         ...     [
         ...         pl.sum("a").alias("sum_a"),
         ...         pl.min("a").alias("min_a"),
@@ -5058,20 +5297,29 @@ class DataFrame:
         └─────────────────────┴───────┴───────┴───────┘
 
         """
+        period = deprecate_saturating(period)
+        offset = deprecate_saturating(offset)
         return RollingGroupBy(
-            self, index_column, period, offset, closed, by, check_sorted
+            self,
+            index_column=index_column,
+            period=period,
+            offset=offset,
+            closed=closed,
+            by=by,
+            check_sorted=check_sorted,
         )
 
-    def groupby_dynamic(
+    def group_by_dynamic(
         self,
         index_column: IntoExpr,
         *,
         every: str | timedelta,
         period: str | timedelta | None = None,
         offset: str | timedelta | None = None,
-        truncate: bool = True,
+        truncate: bool | None = None,
         include_boundaries: bool = False,
         closed: ClosedInterval = "left",
+        label: Label = "left",
         by: IntoExpr | Iterable[IntoExpr] | None = None,
         start_by: StartBy = "window",
         check_sorted: bool = True,
@@ -5080,47 +5328,16 @@ class DataFrame:
         Group based on a time value (or index value of type Int32, Int64).
 
         Time windows are calculated and rows are assigned to windows. Different from a
-        normal groupby is that a row can be member of multiple groups. The time/index
-        window could be seen as a rolling window, with a window size determined by
-        dates/times/values instead of slots in the DataFrame.
+        normal group by is that a row can be member of multiple groups.
+        By default, the windows look like:
 
-        A window is defined by:
+        - [start, start + period)
+        - [start + every, start + every + period)
+        - [start + 2*every, start + 2*every + period)
+        - ...
 
-        - every: interval of the window
-        - period: length of the window
-        - offset: offset of the window
-
-        The `every`, `period` and `offset` arguments are created with
-        the following string language:
-
-        - 1ns   (1 nanosecond)
-        - 1us   (1 microsecond)
-        - 1ms   (1 millisecond)
-        - 1s    (1 second)
-        - 1m    (1 minute)
-        - 1h    (1 hour)
-        - 1d    (1 calendar day)
-        - 1w    (1 calendar week)
-        - 1mo   (1 calendar month)
-        - 1q    (1 calendar quarter)
-        - 1y    (1 calendar year)
-        - 1i    (1 index count)
-
-        Or combine them:
-        "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
-
-        Suffix with `"_saturating"` to indicate that dates too large for
-        their month should saturate at the largest date (e.g. 2022-02-29 -> 2022-02-28)
-        instead of erroring.
-
-        By "calendar day", we mean the corresponding time on the next day (which may
-        not be 24 hours, due to daylight savings). Similarly for "calendar week",
-        "calendar month", "calendar quarter", and "calendar year".
-
-        In case of a groupby_dynamic on an integer column, the windows are defined by:
-
-        - "1i"      # length 1
-        - "10i"     # length 10
+        where `start` is determined by `start_by`, `offset`, and `every` (see parameter
+        descriptions below).
 
         .. warning::
             The index column must be sorted in ascending order. If `by` is passed, then
@@ -5134,79 +5351,122 @@ class DataFrame:
             This column must be sorted in ascending order (or, if `by` is specified,
             then it must be sorted in ascending order within each group).
 
-            In case of a dynamic groupby on indices, dtype needs to be one of
+            In case of a dynamic group by on indices, dtype needs to be one of
             {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
             performance matters use an Int64 column.
         every
             interval of the window
         period
-            length of the window, if None it is equal to 'every'
+            length of the window, if None it will equal 'every'
         offset
-            offset of the window if None and period is None it will be equal to negative
-            `every`
+            offset of the window, only takes effect if `start_by` is `'window'`.
+            Defaults to negative `every`.
         truncate
             truncate the time value to the window lower bound
+
+            .. deprecated:: 0.19.4
+                Use `label` instead.
         include_boundaries
-            Add the lower and upper bound of the window to the "_lower_bound" and
-            "_upper_bound" columns. This will impact performance because it's harder to
+            Add the lower and upper bound of the window to the "_lower_boundary" and
+            "_upper_boundary" columns. This will impact performance because it's harder to
             parallelize
         closed : {'left', 'right', 'both', 'none'}
             Define which sides of the temporal interval are closed (inclusive).
+        label : {'left', 'right', 'datapoint'}
+            Define which label to use for the window:
+
+            - 'left': lower boundary of the window
+            - 'right': upper boundary of the window
+            - 'datapoint': the first value of the index column in the given window.
+              If you don't need the label to be at one of the boundaries, choose this
+              option for maximum performance
         by
             Also group by this column/these columns
         start_by : {'window', 'datapoint', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'}
             The strategy to determine the start of the first window by.
 
-            * 'window': Truncate the start of the window with the 'every' argument.
+            * 'window': Start by taking the earliest timestamp, truncating it with
+              `every`, and then adding `offset`.
               Note that weekly windows start on Monday.
             * 'datapoint': Start from the first encountered data point.
-            * a day of the week (only takes effect if `every` contains ``'w'``):
+            * a day of the week (only takes effect if `every` contains `'w'`):
 
               * 'monday': Start the window on the Monday before the first data point.
               * 'tuesday': Start the window on the Tuesday before the first data point.
               * ...
               * 'sunday': Start the window on the Sunday before the first data point.
         check_sorted
-            When the ``by`` argument is given, polars can not check sortedness
+            When the `by` argument is given, polars can not check sortedness
             by the metadata and has to do a full scan on the index column to
             verify data is sorted. This is expensive. If you are sure the
-            data within the by groups is sorted, you can set this to ``False``.
+            data within the by groups is sorted, you can set this to `False`.
             Doing so incorrectly will lead to incorrect output
 
         Returns
         -------
         DynamicGroupBy
-            Object you can call ``.agg`` on to aggregate by groups, the result
+            Object you can call `.agg` on to aggregate by groups, the result
             of which will be sorted by `index_column` (but note that if `by` columns are
             passed, it will only be sorted within each `by` group).
 
+        See Also
+        --------
+        rolling
+
         Notes
         -----
-        If you're coming from pandas, then
+        1) If you're coming from pandas, then
 
-        .. code-block:: python
+           .. code-block:: python
 
-            # polars
-            df.groupby_dynamic("ts", every="1d").agg(pl.col("value").sum())
+               # polars
+               df.group_by_dynamic("ts", every="1d").agg(pl.col("value").sum())
 
-        is equivalent to
+           is equivalent to
 
-        .. code-block:: python
+           .. code-block:: python
 
-            # pandas
-            df.set_index("ts").resample("D")["value"].sum().reset_index()
+               # pandas
+               df.set_index("ts").resample("D")["value"].sum().reset_index()
 
-        though note that, unlike pandas, polars doesn't add extra rows for empty
-        windows. If you need `index_column` to be evenly spaced, then please combine
-        with :func:`DataFrame.upsample`.
+           though note that, unlike pandas, polars doesn't add extra rows for empty
+           windows. If you need `index_column` to be evenly spaced, then please combine
+           with :func:`DataFrame.upsample`.
+
+        2) The `every`, `period` and `offset` arguments are created with
+           the following string language:
+
+           - 1ns   (1 nanosecond)
+           - 1us   (1 microsecond)
+           - 1ms   (1 millisecond)
+           - 1s    (1 second)
+           - 1m    (1 minute)
+           - 1h    (1 hour)
+           - 1d    (1 calendar day)
+           - 1w    (1 calendar week)
+           - 1mo   (1 calendar month)
+           - 1q    (1 calendar quarter)
+           - 1y    (1 calendar year)
+           - 1i    (1 index count)
+
+           Or combine them:
+           "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
+
+           By "calendar day", we mean the corresponding time on the next day (which may
+           not be 24 hours, due to daylight savings). Similarly for "calendar week",
+           "calendar month", "calendar quarter", and "calendar year".
+
+           In case of a group_by_dynamic on an integer column, the windows are defined by:
+
+           - "1i"      # length 1
+           - "10i"     # length 10
 
         Examples
         --------
         >>> from datetime import datetime
-        >>> # create an example dataframe
         >>> df = pl.DataFrame(
         ...     {
-        ...         "time": pl.date_range(
+        ...         "time": pl.datetime_range(
         ...             start=datetime(2021, 12, 16),
         ...             end=datetime(2021, 12, 16, 3),
         ...             interval="30m",
@@ -5233,131 +5493,109 @@ class DataFrame:
 
         Group by windows of 1 hour starting at 2021-12-16 00:00:00.
 
-        >>> df.groupby_dynamic("time", every="1h", closed="right").agg(
-        ...     [
-        ...         pl.col("time").min().alias("time_min"),
-        ...         pl.col("time").max().alias("time_max"),
-        ...     ]
-        ... )
-        shape: (4, 3)
-        ┌─────────────────────┬─────────────────────┬─────────────────────┐
-        │ time                ┆ time_min            ┆ time_max            │
-        │ ---                 ┆ ---                 ┆ ---                 │
-        │ datetime[μs]        ┆ datetime[μs]        ┆ datetime[μs]        │
-        ╞═════════════════════╪═════════════════════╪═════════════════════╡
-        │ 2021-12-15 23:00:00 ┆ 2021-12-16 00:00:00 ┆ 2021-12-16 00:00:00 │
-        │ 2021-12-16 00:00:00 ┆ 2021-12-16 00:30:00 ┆ 2021-12-16 01:00:00 │
-        │ 2021-12-16 01:00:00 ┆ 2021-12-16 01:30:00 ┆ 2021-12-16 02:00:00 │
-        │ 2021-12-16 02:00:00 ┆ 2021-12-16 02:30:00 ┆ 2021-12-16 03:00:00 │
-        └─────────────────────┴─────────────────────┴─────────────────────┘
+        >>> df.group_by_dynamic("time", every="1h", closed="right").agg(pl.col("n"))
+        shape: (4, 2)
+        ┌─────────────────────┬───────────┐
+        │ time                ┆ n         │
+        │ ---                 ┆ ---       │
+        │ datetime[μs]        ┆ list[i64] │
+        ╞═════════════════════╪═══════════╡
+        │ 2021-12-15 23:00:00 ┆ [0]       │
+        │ 2021-12-16 00:00:00 ┆ [1, 2]    │
+        │ 2021-12-16 01:00:00 ┆ [3, 4]    │
+        │ 2021-12-16 02:00:00 ┆ [5, 6]    │
+        └─────────────────────┴───────────┘
 
         The window boundaries can also be added to the aggregation result
 
-        >>> df.groupby_dynamic(
+        >>> df.group_by_dynamic(
         ...     "time", every="1h", include_boundaries=True, closed="right"
-        ... ).agg([pl.col("time").count().alias("time_count")])
+        ... ).agg(pl.col("n").mean())
         shape: (4, 4)
-        ┌─────────────────────┬─────────────────────┬─────────────────────┬────────────┐
-        │ _lower_boundary     ┆ _upper_boundary     ┆ time                ┆ time_count │
-        │ ---                 ┆ ---                 ┆ ---                 ┆ ---        │
-        │ datetime[μs]        ┆ datetime[μs]        ┆ datetime[μs]        ┆ u32        │
-        ╞═════════════════════╪═════════════════════╪═════════════════════╪════════════╡
-        │ 2021-12-15 23:00:00 ┆ 2021-12-16 00:00:00 ┆ 2021-12-15 23:00:00 ┆ 1          │
-        │ 2021-12-16 00:00:00 ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 00:00:00 ┆ 2          │
-        │ 2021-12-16 01:00:00 ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 01:00:00 ┆ 2          │
-        │ 2021-12-16 02:00:00 ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 02:00:00 ┆ 2          │
-        └─────────────────────┴─────────────────────┴─────────────────────┴────────────┘
+        ┌─────────────────────┬─────────────────────┬─────────────────────┬─────┐
+        │ _lower_boundary     ┆ _upper_boundary     ┆ time                ┆ n   │
+        │ ---                 ┆ ---                 ┆ ---                 ┆ --- │
+        │ datetime[μs]        ┆ datetime[μs]        ┆ datetime[μs]        ┆ f64 │
+        ╞═════════════════════╪═════════════════════╪═════════════════════╪═════╡
+        │ 2021-12-15 23:00:00 ┆ 2021-12-16 00:00:00 ┆ 2021-12-15 23:00:00 ┆ 0.0 │
+        │ 2021-12-16 00:00:00 ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 00:00:00 ┆ 1.5 │
+        │ 2021-12-16 01:00:00 ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 01:00:00 ┆ 3.5 │
+        │ 2021-12-16 02:00:00 ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 02:00:00 ┆ 5.5 │
+        └─────────────────────┴─────────────────────┴─────────────────────┴─────┘
 
-        When closed="left", should not include right end of interval
+        When closed="left", the window excludes the right end of interval:
         [lower_bound, upper_bound)
 
-        >>> df.groupby_dynamic("time", every="1h", closed="left").agg(
-        ...     [
-        ...         pl.col("time").count().alias("time_count"),
-        ...         pl.col("time").alias("time_agg_list"),
-        ...     ]
-        ... )
-        shape: (4, 3)
-        ┌─────────────────────┬────────────┬───────────────────────────────────┐
-        │ time                ┆ time_count ┆ time_agg_list                     │
-        │ ---                 ┆ ---        ┆ ---                               │
-        │ datetime[μs]        ┆ u32        ┆ list[datetime[μs]]                │
-        ╞═════════════════════╪════════════╪═══════════════════════════════════╡
-        │ 2021-12-16 00:00:00 ┆ 2          ┆ [2021-12-16 00:00:00, 2021-12-16… │
-        │ 2021-12-16 01:00:00 ┆ 2          ┆ [2021-12-16 01:00:00, 2021-12-16… │
-        │ 2021-12-16 02:00:00 ┆ 2          ┆ [2021-12-16 02:00:00, 2021-12-16… │
-        │ 2021-12-16 03:00:00 ┆ 1          ┆ [2021-12-16 03:00:00]             │
-        └─────────────────────┴────────────┴───────────────────────────────────┘
+        >>> df.group_by_dynamic("time", every="1h", closed="left").agg(pl.col("n"))
+        shape: (4, 2)
+        ┌─────────────────────┬───────────┐
+        │ time                ┆ n         │
+        │ ---                 ┆ ---       │
+        │ datetime[μs]        ┆ list[i64] │
+        ╞═════════════════════╪═══════════╡
+        │ 2021-12-16 00:00:00 ┆ [0, 1]    │
+        │ 2021-12-16 01:00:00 ┆ [2, 3]    │
+        │ 2021-12-16 02:00:00 ┆ [4, 5]    │
+        │ 2021-12-16 03:00:00 ┆ [6]       │
+        └─────────────────────┴───────────┘
 
         When closed="both" the time values at the window boundaries belong to 2 groups.
 
-        >>> df.groupby_dynamic("time", every="1h", closed="both").agg(
-        ...     [pl.col("time").count().alias("time_count")]
-        ... )
+        >>> df.group_by_dynamic("time", every="1h", closed="both").agg(pl.col("n"))
         shape: (5, 2)
-        ┌─────────────────────┬────────────┐
-        │ time                ┆ time_count │
-        │ ---                 ┆ ---        │
-        │ datetime[μs]        ┆ u32        │
-        ╞═════════════════════╪════════════╡
-        │ 2021-12-15 23:00:00 ┆ 1          │
-        │ 2021-12-16 00:00:00 ┆ 3          │
-        │ 2021-12-16 01:00:00 ┆ 3          │
-        │ 2021-12-16 02:00:00 ┆ 3          │
-        │ 2021-12-16 03:00:00 ┆ 1          │
-        └─────────────────────┴────────────┘
+        ┌─────────────────────┬───────────┐
+        │ time                ┆ n         │
+        │ ---                 ┆ ---       │
+        │ datetime[μs]        ┆ list[i64] │
+        ╞═════════════════════╪═══════════╡
+        │ 2021-12-15 23:00:00 ┆ [0]       │
+        │ 2021-12-16 00:00:00 ┆ [0, 1, 2] │
+        │ 2021-12-16 01:00:00 ┆ [2, 3, 4] │
+        │ 2021-12-16 02:00:00 ┆ [4, 5, 6] │
+        │ 2021-12-16 03:00:00 ┆ [6]       │
+        └─────────────────────┴───────────┘
 
-        Dynamic groupbys can also be combined with grouping on normal keys
+        Dynamic group bys can also be combined with grouping on normal keys
 
-        >>> df = pl.DataFrame(
-        ...     {
-        ...         "time": pl.date_range(
-        ...             start=datetime(2021, 12, 16),
-        ...             end=datetime(2021, 12, 16, 3),
-        ...             interval="30m",
-        ...             eager=True,
-        ...         ),
-        ...         "groups": ["a", "a", "a", "b", "b", "a", "a"],
-        ...     }
-        ... )
+        >>> df = df.with_columns(groups=pl.Series(["a", "a", "a", "b", "b", "a", "a"]))
         >>> df
-        shape: (7, 2)
-        ┌─────────────────────┬────────┐
-        │ time                ┆ groups │
-        │ ---                 ┆ ---    │
-        │ datetime[μs]        ┆ str    │
-        ╞═════════════════════╪════════╡
-        │ 2021-12-16 00:00:00 ┆ a      │
-        │ 2021-12-16 00:30:00 ┆ a      │
-        │ 2021-12-16 01:00:00 ┆ a      │
-        │ 2021-12-16 01:30:00 ┆ b      │
-        │ 2021-12-16 02:00:00 ┆ b      │
-        │ 2021-12-16 02:30:00 ┆ a      │
-        │ 2021-12-16 03:00:00 ┆ a      │
-        └─────────────────────┴────────┘
-        >>> df.groupby_dynamic(
+        shape: (7, 3)
+        ┌─────────────────────┬─────┬────────┐
+        │ time                ┆ n   ┆ groups │
+        │ ---                 ┆ --- ┆ ---    │
+        │ datetime[μs]        ┆ i64 ┆ str    │
+        ╞═════════════════════╪═════╪════════╡
+        │ 2021-12-16 00:00:00 ┆ 0   ┆ a      │
+        │ 2021-12-16 00:30:00 ┆ 1   ┆ a      │
+        │ 2021-12-16 01:00:00 ┆ 2   ┆ a      │
+        │ 2021-12-16 01:30:00 ┆ 3   ┆ b      │
+        │ 2021-12-16 02:00:00 ┆ 4   ┆ b      │
+        │ 2021-12-16 02:30:00 ┆ 5   ┆ a      │
+        │ 2021-12-16 03:00:00 ┆ 6   ┆ a      │
+        └─────────────────────┴─────┴────────┘
+        >>> df.group_by_dynamic(
         ...     "time",
         ...     every="1h",
         ...     closed="both",
         ...     by="groups",
         ...     include_boundaries=True,
-        ... ).agg([pl.col("time").count().alias("time_count")])
+        ... ).agg(pl.col("n"))
         shape: (7, 5)
-        ┌────────┬─────────────────────┬─────────────────────┬─────────────────────┬────────────┐
-        │ groups ┆ _lower_boundary     ┆ _upper_boundary     ┆ time                ┆ time_count │
-        │ ---    ┆ ---                 ┆ ---                 ┆ ---                 ┆ ---        │
-        │ str    ┆ datetime[μs]        ┆ datetime[μs]        ┆ datetime[μs]        ┆ u32        │
-        ╞════════╪═════════════════════╪═════════════════════╪═════════════════════╪════════════╡
-        │ a      ┆ 2021-12-15 23:00:00 ┆ 2021-12-16 00:00:00 ┆ 2021-12-15 23:00:00 ┆ 1          │
-        │ a      ┆ 2021-12-16 00:00:00 ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 00:00:00 ┆ 3          │
-        │ a      ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 01:00:00 ┆ 1          │
-        │ a      ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 02:00:00 ┆ 2          │
-        │ a      ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 04:00:00 ┆ 2021-12-16 03:00:00 ┆ 1          │
-        │ b      ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 01:00:00 ┆ 2          │
-        │ b      ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 02:00:00 ┆ 1          │
-        └────────┴─────────────────────┴─────────────────────┴─────────────────────┴────────────┘
+        ┌────────┬─────────────────────┬─────────────────────┬─────────────────────┬───────────┐
+        │ groups ┆ _lower_boundary     ┆ _upper_boundary     ┆ time                ┆ n         │
+        │ ---    ┆ ---                 ┆ ---                 ┆ ---                 ┆ ---       │
+        │ str    ┆ datetime[μs]        ┆ datetime[μs]        ┆ datetime[μs]        ┆ list[i64] │
+        ╞════════╪═════════════════════╪═════════════════════╪═════════════════════╪═══════════╡
+        │ a      ┆ 2021-12-15 23:00:00 ┆ 2021-12-16 00:00:00 ┆ 2021-12-15 23:00:00 ┆ [0]       │
+        │ a      ┆ 2021-12-16 00:00:00 ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 00:00:00 ┆ [0, 1, 2] │
+        │ a      ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 01:00:00 ┆ [2]       │
+        │ a      ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 02:00:00 ┆ [5, 6]    │
+        │ a      ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 04:00:00 ┆ 2021-12-16 03:00:00 ┆ [6]       │
+        │ b      ┆ 2021-12-16 01:00:00 ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 01:00:00 ┆ [3, 4]    │
+        │ b      ┆ 2021-12-16 02:00:00 ┆ 2021-12-16 03:00:00 ┆ 2021-12-16 02:00:00 ┆ [4]       │
+        └────────┴─────────────────────┴─────────────────────┴─────────────────────┴───────────┘
 
-        Dynamic groupby on an index column
+        Dynamic group by on an index column
 
         >>> df = pl.DataFrame(
         ...     {
@@ -5366,7 +5604,7 @@ class DataFrame:
         ...     }
         ... )
         >>> (
-        ...     df.groupby_dynamic(
+        ...     df.group_by_dynamic(
         ...         "idx",
         ...         every="2i",
         ...         period="3i",
@@ -5374,30 +5612,35 @@ class DataFrame:
         ...         closed="right",
         ...     ).agg(pl.col("A").alias("A_agg_list"))
         ... )
-        shape: (3, 4)
+        shape: (4, 4)
         ┌─────────────────┬─────────────────┬─────┬─────────────────┐
         │ _lower_boundary ┆ _upper_boundary ┆ idx ┆ A_agg_list      │
         │ ---             ┆ ---             ┆ --- ┆ ---             │
         │ i64             ┆ i64             ┆ i64 ┆ list[str]       │
         ╞═════════════════╪═════════════════╪═════╪═════════════════╡
+        │ -2              ┆ 1               ┆ -2  ┆ ["A", "A"]      │
         │ 0               ┆ 3               ┆ 0   ┆ ["A", "B", "B"] │
         │ 2               ┆ 5               ┆ 2   ┆ ["B", "B", "C"] │
         │ 4               ┆ 7               ┆ 4   ┆ ["C"]           │
         └─────────────────┴─────────────────┴─────┴─────────────────┘
 
         """  # noqa: W505
+        every = deprecate_saturating(every)
+        period = deprecate_saturating(period)
+        offset = deprecate_saturating(offset)
         return DynamicGroupBy(
             self,
-            index_column,
-            every,
-            period,
-            offset,
-            truncate,
-            include_boundaries,
-            closed,
-            by,
-            start_by,
-            check_sorted,
+            index_column=index_column,
+            every=every,
+            period=period,
+            offset=offset,
+            truncate=truncate,
+            label=label,
+            include_boundaries=include_boundaries,
+            closed=closed,
+            by=by,
+            start_by=start_by,
+            check_sorted=check_sorted,
         )
 
     def upsample(
@@ -5432,9 +5675,6 @@ class DataFrame:
 
         - "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
 
-        Suffix with `"_saturating"` to indicate that dates too large for
-        their month should saturate at the largest date (e.g. 2022-02-29 -> 2022-02-28)
-        instead of erroring.
 
         By "calendar day", we mean the corresponding time on the next day (which may
         not be 24 hours, due to daylight savings). Similarly for "calendar week",
@@ -5496,6 +5736,8 @@ class DataFrame:
         └─────────────────────┴────────┴────────┘
 
         """
+        every = deprecate_saturating(every)
+        offset = deprecate_saturating(offset)
         if by is None:
             by = []
         if isinstance(by, str):
@@ -5522,7 +5764,7 @@ class DataFrame:
         by: str | Sequence[str] | None = None,
         strategy: AsofJoinStrategy = "backward",
         suffix: str = "_right",
-        tolerance: str | int | float | None = None,
+        tolerance: str | int | float | timedelta | None = None,
         allow_parallel: bool = True,
         force_parallel: bool = False,
     ) -> DataFrame:
@@ -5543,7 +5785,8 @@ class DataFrame:
             'on' key is greater than or equal to the left's key.
 
           - A "nearest" search selects the last row in the right DataFrame whose value
-            is nearest to the left's key.
+            is nearest to the left's key. String keys are not currently supported for a
+            nearest search.
 
         The default is "backward".
 
@@ -5571,8 +5814,8 @@ class DataFrame:
         tolerance
             Numeric tolerance. By setting this the join will only be done if the near
             keys are within this distance. If an asof join is done on columns of dtype
-            "Date", "Datetime", "Duration" or "Time", use the following string
-            language:
+            "Date", "Datetime", "Duration" or "Time", use either a datetime.timedelta
+            object or the following string language:
 
                 - 1ns   (1 nanosecond)
                 - 1us   (1 microsecond)
@@ -5589,10 +5832,6 @@ class DataFrame:
 
                 Or combine them:
                 "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
-
-                Suffix with `"_saturating"` to indicate that dates too large for
-                their month should saturate at the largest date
-                (e.g. 2022-02-29 -> 2022-02-28) instead of erroring.
 
                 By "calendar day", we mean the corresponding time on the next day
                 (which may not be 24 hours, due to daylight savings). Similarly for
@@ -5645,10 +5884,26 @@ class DataFrame:
         └─────────────────────┴────────────┴──────┘
 
         """
+        tolerance = deprecate_saturating(tolerance)
         if not isinstance(other, DataFrame):
             raise TypeError(
-                f"expected 'other' join table to be a DataFrame, not a {type(other).__name__!r}"
+                f"expected `other` join table to be a DataFrame, got {type(other).__name__!r}"
             )
+
+        if on is not None:
+            if not isinstance(on, (str, pl.Expr)):
+                raise TypeError(
+                    f"expected `on` to be str or Expr, got {type(on).__name__!r}"
+                )
+        else:
+            if not isinstance(left_on, (str, pl.Expr)):
+                raise TypeError(
+                    f"expected `left_on` to be str or Expr, got {type(left_on).__name__!r}"
+                )
+            elif not isinstance(right_on, (str, pl.Expr)):
+                raise TypeError(
+                    f"expected `right_on` to be str or Expr, got {type(right_on).__name__!r}"
+                )
 
         return (
             self.lazy()
@@ -5666,7 +5921,7 @@ class DataFrame:
                 allow_parallel=allow_parallel,
                 force_parallel=force_parallel,
             )
-            .collect(no_optimization=True)
+            .collect(_eager=True)
         )
 
     def join(
@@ -5691,6 +5946,9 @@ class DataFrame:
             Name(s) of the join columns in both DataFrames.
         how : {'inner', 'left', 'outer', 'semi', 'anti', 'cross'}
             Join strategy.
+
+            .. note::
+                A left join preserves the row order of the left DataFrame.
         left_on
             Name(s) of the left join column(s).
         right_on
@@ -5796,12 +6054,12 @@ class DataFrame:
 
         Notes
         -----
-        For joining on columns with categorical data, see ``pl.StringCache()``.
+        For joining on columns with categorical data, see `pl.StringCache()`.
 
         """
         if not isinstance(other, DataFrame):
             raise TypeError(
-                f"expected 'other' join table to be a DataFrame, not a {type(other).__name__!r}"
+                f"expected `other` join table to be a DataFrame, got {type(other).__name__!r}"
             )
 
         return (
@@ -5815,10 +6073,10 @@ class DataFrame:
                 suffix=suffix,
                 validate=validate,
             )
-            .collect(no_optimization=True)
+            .collect(_eager=True)
         )
 
-    def apply(
+    def map_rows(
         self,
         function: Callable[[tuple[Any, ...]], Any],
         return_dtype: PolarsDataType | None = None,
@@ -5832,9 +6090,9 @@ class DataFrame:
             This method is much slower than the native expressions API.
             Only use it if you cannot implement your logic otherwise.
 
-        The UDF will receive each row as a tuple of values: ``udf(row)``.
+        The UDF will receive each row as a tuple of values: `udf(row)`.
 
-        Implementing logic using a Python function is almost always _significantly_
+        Implementing logic using a Python function is almost always *significantly*
         slower and more memory intensive than implementing the same logic using
         the native expression API because:
 
@@ -5854,18 +6112,18 @@ class DataFrame:
             Output type of the operation. If none given, Polars tries to infer the type.
         inference_size
             Only used in the case when the custom function returns rows.
-            This uses the first `n` rows to determine the output schema
+            This uses the first `n` rows to determine the output schema.
 
         Notes
         -----
-        * The frame-level ``apply`` cannot track column names (as the UDF is a black-box
+        * The frame-level `apply` cannot track column names (as the UDF is a black-box
           that may arbitrarily drop, rearrange, transform, or add new columns); if you
           want to apply a UDF such that column names are preserved, you should use the
-          expression-level ``apply`` syntax instead.
+          expression-level `apply` syntax instead.
 
         * If your function is expensive and you don't want it to be called more than
-          once for a given input, consider applying an ``@lru_cache`` decorator to it.
-          With suitable data you may achieve order-of-magnitude speedups (or more).
+          once for a given input, consider applying an `@lru_cache` decorator to it.
+          If your data is suitable you may achieve *significant* speedups.
 
         Examples
         --------
@@ -5873,7 +6131,7 @@ class DataFrame:
 
         Return a DataFrame by mapping each row to a tuple:
 
-        >>> df.apply(lambda t: (t[0] * 2, t[1] * 3))
+        >>> df.map_rows(lambda t: (t[0] * 2, t[1] * 3))
         shape: (3, 2)
         ┌──────────┬──────────┐
         │ column_0 ┆ column_1 │
@@ -5894,7 +6152,7 @@ class DataFrame:
 
         Return a DataFrame with a single column by mapping each row to a scalar:
 
-        >>> df.apply(lambda t: (t[0] * 2 + t[1]))  # doctest: +SKIP
+        >>> df.map_rows(lambda t: (t[0] * 2 + t[1]))  # doctest: +SKIP
         shape: (3, 1)
         ┌───────┐
         │ apply │
@@ -5911,11 +6169,11 @@ class DataFrame:
         >>> df.select(pl.col("foo") * 2 + pl.col("bar"))  # doctest: +IGNORE_RESULT
 
         """
-        # TODO:
-        # from polars.utils.udfs import warn_on_inefficient_apply
-        # warn_on_inefficient_apply(function, columns=self.columns, apply_target="frame)
+        # TODO: Enable warning for inefficient map
+        # from polars.utils.udfs import warn_on_inefficient_map
+        # warn_on_inefficient_map(function, columns=self.columns, map_target="frame)
 
-        out, is_df = self._df.apply(function, return_dtype, inference_size)
+        out, is_df = self._df.map_rows(function, return_dtype, inference_size)
         if is_df:
             return self._from_pydf(out)
         else:
@@ -6014,13 +6272,14 @@ class DataFrame:
         if in_place:
             try:
                 self._df.vstack_mut(other._df)
-                return self
             except RuntimeError as exc:
                 if str(exc) == "Already mutably borrowed":
                     self._df.vstack_mut(other._df.clone())
                     return self
                 else:
-                    raise exc
+                    raise
+            else:
+                return self
 
         return self._from_pydf(self._df.vstack(other._df))
 
@@ -6028,21 +6287,21 @@ class DataFrame:
         """
         Extend the memory backed by this `DataFrame` with the values from `other`.
 
-        Different from ``vstack`` which adds the chunks from ``other`` to the chunks of
-        this ``DataFrame``, ``extend`` appends the data from `other` to the underlying
+        Different from `vstack` which adds the chunks from `other` to the chunks of
+        this `DataFrame`, `extend` appends the data from `other` to the underlying
         memory locations and thus may cause a reallocation.
 
         If this does not cause a reallocation, the resulting data structure will not
         have any extra chunks and thus will yield faster queries.
 
-        Prefer ``extend`` over ``vstack`` when you want to do a query after a single
+        Prefer `extend` over `vstack` when you want to do a query after a single
         append. For instance, during online operations where you add `n` rows and rerun
         a query.
 
-        Prefer ``vstack`` over ``extend`` when you want to append many times before
+        Prefer `vstack` over `extend` when you want to append many times before
         doing a query. For instance, when you read in multiple files and want to store
-        them in a single ``DataFrame``. In the latter case, finish the sequence of
-        ``vstack`` operations with a ``rechunk``.
+        them in a single `DataFrame`. In the latter case, finish the sequence of
+        `vstack` operations with a `rechunk`.
 
         Parameters
         ----------
@@ -6084,7 +6343,7 @@ class DataFrame:
             if str(exc) == "Already mutably borrowed":
                 self._df.extend(other._df.clone())
             else:
-                raise exc
+                raise
         return self
 
     def drop(
@@ -6170,7 +6429,7 @@ class DataFrame:
         └─────┘
 
         """
-        return self.lazy().drop(columns, *more_columns).collect(no_optimization=True)
+        return self.lazy().drop(columns, *more_columns).collect(_eager=True)
 
     def drop_in_place(self, name: str) -> Series:
         """
@@ -6206,6 +6465,74 @@ class DataFrame:
 
         """
         return wrap_s(self._df.drop_in_place(name))
+
+    def cast(
+        self,
+        dtypes: Mapping[ColumnNameOrSelector, PolarsDataType] | PolarsDataType,
+        *,
+        strict: bool = True,
+    ) -> DataFrame:
+        """
+        Cast DataFrame column(s) to the specified dtype(s).
+
+        Parameters
+        ----------
+        dtypes
+            Mapping of column names (or selector) to dtypes, or a single dtype
+            to which all columns will be cast.
+        strict
+            Throw an error if a cast could not be done (for instance, due to an
+            overflow).
+
+        Examples
+        --------
+        >>> from datetime import date
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "foo": [1, 2, 3],
+        ...         "bar": [6.0, 7.0, 8.0],
+        ...         "ham": [date(2020, 1, 2), date(2021, 3, 4), date(2022, 5, 6)],
+        ...     }
+        ... )
+
+        Cast specific frame columns to the specified dtypes:
+
+        >>> df.cast({"foo": pl.Float32, "bar": pl.UInt8})
+        shape: (3, 3)
+        ┌─────┬─────┬────────────┐
+        │ foo ┆ bar ┆ ham        │
+        │ --- ┆ --- ┆ ---        │
+        │ f32 ┆ u8  ┆ date       │
+        ╞═════╪═════╪════════════╡
+        │ 1.0 ┆ 6   ┆ 2020-01-02 │
+        │ 2.0 ┆ 7   ┆ 2021-03-04 │
+        │ 3.0 ┆ 8   ┆ 2022-05-06 │
+        └─────┴─────┴────────────┘
+
+        Cast all frame columns to the specified dtype:
+
+        >>> df.cast(pl.Utf8).to_dict(as_series=False)
+        {'foo': ['1', '2', '3'],
+         'bar': ['6.0', '7.0', '8.0'],
+         'ham': ['2020-01-02', '2021-03-04', '2022-05-06']}
+
+        Use selectors to define the columns being cast:
+
+        >>> import polars.selectors as cs
+        >>> df.cast({cs.numeric(): pl.UInt32, cs.temporal(): pl.Utf8})
+        shape: (3, 3)
+        ┌─────┬─────┬────────────┐
+        │ foo ┆ bar ┆ ham        │
+        │ --- ┆ --- ┆ ---        │
+        │ u32 ┆ u32 ┆ str        │
+        ╞═════╪═════╪════════════╡
+        │ 1   ┆ 6   ┆ 2020-01-02 │
+        │ 2   ┆ 7   ┆ 2021-03-04 │
+        │ 3   ┆ 8   ┆ 2022-05-06 │
+        └─────┴─────┴────────────┘
+
+        """
+        return self.lazy().cast(dtypes, strict=strict).collect(_eager=True)
 
     def clear(self, n: int = 0) -> Self:
         """
@@ -6267,7 +6594,9 @@ class DataFrame:
 
     def clone(self) -> Self:
         """
-        Cheap deepcopy/clone.
+        Create a copy of this DataFrame.
+
+        This is a cheap operation that does not copy data.
 
         See Also
         --------
@@ -6357,12 +6686,16 @@ class DataFrame:
 
     def get_column(self, name: str) -> Series:
         """
-        Get a single column as Series by name.
+        Get a single column by name.
 
         Parameters
         ----------
         name : str
             Name of the column to retrieve.
+
+        Returns
+        -------
+        Series
 
         See Also
         --------
@@ -6381,11 +6714,7 @@ class DataFrame:
         ]
 
         """
-        if not isinstance(name, str):
-            raise ValueError(
-                f'column name "{name!r}" should be be a string, but is {type(name).__name__!r}'
-            )
-        return self[name]
+        return wrap_s(self._df.get_column(name))
 
     def fill_null(
         self,
@@ -6408,7 +6737,7 @@ class DataFrame:
             Number of consecutive null values to fill when using the 'forward' or
             'backward' strategy.
         matches_supertype
-            Fill all matching supertype of the fill ``value``.
+            Fill all matching supertype of the fill `value`.
 
         Returns
         -------
@@ -6482,7 +6811,7 @@ class DataFrame:
         return (
             self.lazy()
             .fill_null(value, strategy, limit, matches_supertype=matches_supertype)
-            .collect(no_optimization=True)
+            .collect(_eager=True)
         )
 
     def fill_nan(self, value: Expr | int | float | None) -> DataFrame:
@@ -6530,7 +6859,7 @@ class DataFrame:
         └──────┴──────┘
 
         """
-        return self.lazy().fill_nan(value).collect(no_optimization=True)
+        return self.lazy().fill_nan(value).collect(_eager=True)
 
     def explode(
         self,
@@ -6590,7 +6919,7 @@ class DataFrame:
         └─────────┴─────────┘
 
         """
-        return self.lazy().explode(columns, *more_columns).collect(no_optimization=True)
+        return self.lazy().explode(columns, *more_columns).collect(_eager=True)
 
     def pivot(
         self,
@@ -6605,6 +6934,9 @@ class DataFrame:
     ) -> Self:
         """
         Create a spreadsheet-style pivot table as a DataFrame.
+
+        Only available in eager mode. See "Examples" section below for how to do a
+        "lazy pivot" if you know the unique column values in advance.
 
         Parameters
         ----------
@@ -6704,6 +7036,36 @@ class DataFrame:
         │ b    ┆ 0.964028 ┆ 0.999954 │
         └──────┴──────────┴──────────┘
 
+        Note that `pivot` is only available in eager mode. If you know the unique
+        column values in advance, you can use :meth:`polars.LazyFrame.groupby` to
+        get the same result as above in lazy mode:
+
+        >>> index = pl.col("col1")
+        >>> columns = pl.col("col2")
+        >>> values = pl.col("col3")
+        >>> unique_column_values = ["x", "y"]
+        >>> aggregate_function = lambda col: col.tanh().mean()
+        >>> (
+        ...     df.lazy()
+        ...     .group_by(index)
+        ...     .agg(
+        ...         *[
+        ...             aggregate_function(values.filter(columns == value)).alias(value)
+        ...             for value in unique_column_values
+        ...         ]
+        ...     )
+        ...     .collect()
+        ... )  # doctest: +IGNORE_RESULT
+        shape: (2, 3)
+        ┌──────┬──────────┬──────────┐
+        │ col1 ┆ x        ┆ y        │
+        │ ---  ┆ ---      ┆ ---      │
+        │ str  ┆ f64      ┆ f64      │
+        ╞══════╪══════════╪══════════╡
+        │ a    ┆ 0.998347 ┆ null     │
+        │ b    ┆ 0.964028 ┆ 0.999954 │
+        └──────┴──────────┴──────────┘
+
         """  # noqa: W505
         values = _expand_selectors(self, values)
         index = _expand_selectors(self, index)
@@ -6749,8 +7111,8 @@ class DataFrame:
 
     def melt(
         self,
-        id_vars: Sequence[str] | str | None = None,
-        value_vars: Sequence[str] | str | None = None,
+        id_vars: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
+        value_vars: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
         variable_name: str | None = None,
         value_name: str | None = None,
     ) -> Self:
@@ -6760,17 +7122,17 @@ class DataFrame:
         Optionally leaves identifiers set.
 
         This function is useful to massage a DataFrame into a format where one or more
-        columns are identifier variables (id_vars), while all other columns, considered
-        measured variables (value_vars), are "unpivoted" to the row axis, leaving just
+        columns are identifier variables (id_vars) while all other columns, considered
+        measured variables (value_vars), are "unpivoted" to the row axis leaving just
         two non-identifier columns, 'variable' and 'value'.
 
         Parameters
         ----------
         id_vars
-            Columns to use as identifier variables.
+            Column(s) or selector(s) to use as identifier variables.
         value_vars
-            Values to use as identifier variables.
-            If `value_vars` is empty all columns that are not in `id_vars` will be used.
+            Column(s) or selector(s) to use as values variables; if `value_vars`
+            is empty all columns that are not in `id_vars` will be used.
         variable_name
             Name to give to the `variable` column. Defaults to "variable"
         value_name
@@ -6785,7 +7147,8 @@ class DataFrame:
         ...         "c": [2, 4, 6],
         ...     }
         ... )
-        >>> df.melt(id_vars="a", value_vars=["b", "c"])
+        >>> import polars.selectors as cs
+        >>> df.melt(id_vars="a", value_vars=cs.numeric())
         shape: (6, 3)
         ┌─────┬──────────┬───────┐
         │ a   ┆ variable ┆ value │
@@ -6801,14 +7164,9 @@ class DataFrame:
         └─────┴──────────┴───────┘
 
         """
-        if isinstance(value_vars, str):
-            value_vars = [value_vars]
-        if isinstance(id_vars, str):
-            id_vars = [id_vars]
-        if value_vars is None:
-            value_vars = []
-        if id_vars is None:
-            id_vars = []
+        value_vars = [] if value_vars is None else _expand_selectors(self, value_vars)
+        id_vars = [] if id_vars is None else _expand_selectors(self, id_vars)
+
         return self._from_pydf(
             self._df.melt(id_vars, value_vars, value_name, variable_name)
         )
@@ -6838,7 +7196,7 @@ class DataFrame:
             Direction of the unstack.
         columns
             Column name(s) or selector(s) to include in the operation.
-            If set to ``None`` (default), use all columns.
+            If set to `None` (default), use all columns.
         fill_values
             Fill values that don't fit the new size with this value.
 
@@ -6925,7 +7283,7 @@ class DataFrame:
 
         if n_fill:
             if not isinstance(fill_values, list):
-                fill_values = [fill_values for _ in range(0, df.width)]
+                fill_values = [fill_values for _ in range(df.width)]
 
             df = df.select(
                 [
@@ -6951,7 +7309,7 @@ class DataFrame:
                 s.name + "_" + str(slice_nbr).zfill(zfill_val)
             )
             for s in df
-            for slice_nbr in range(0, n_cols)
+            for slice_nbr in range(n_cols)
         ]
 
         return DataFrame(slices)
@@ -7081,7 +7439,7 @@ class DataFrame:
         │ c   ┆ 3   ┆ 1   │
         └─────┴─────┴─────┘]
 
-        Return the partitions as a dictionary by specifying ``as_dict=True``.
+        Return the partitions as a dictionary by specifying `as_dict=True`.
 
         >>> import polars.selectors as cs
         >>> df.partition_by(cs.string(), as_dict=True)  # doctest: +IGNORE_RESULT
@@ -7120,104 +7478,96 @@ class DataFrame:
         ]
 
         if as_dict:
-            if len(by) == 1:
-                return {df[by][0, 0]: df for df in partitions}
+            df = self._from_pydf(self._df)
+            if include_key:
+                if len(by) == 1:
+                    names = [p[by[0]][0] for p in partitions]
+                else:
+                    names = [p.select(by).row(0) for p in partitions]
             else:
-                return {df[by].row(0): df for df in partitions}
+                if len(by) == 1:
+                    names = df[by[0]].unique(maintain_order=True).to_list()
+                else:
+                    names = df.select(by).unique(maintain_order=True).rows()
+
+            return dict(zip(names, partitions))
 
         return partitions
 
-    def shift(self, periods: int) -> Self:
+    @deprecate_renamed_parameter("periods", "n", version="0.19.11")
+    def shift(self, n: int = 1, *, fill_value: IntoExpr | None = None) -> DataFrame:
         """
-        Shift values by the given period.
+        Shift values by the given number of indices.
 
         Parameters
         ----------
-        periods
-            Number of places to shift (may be negative).
-
-        See Also
-        --------
-        shift_and_fill
-
-        Examples
-        --------
-        >>> df = pl.DataFrame(
-        ...     {
-        ...         "foo": [1, 2, 3],
-        ...         "bar": [6, 7, 8],
-        ...         "ham": ["a", "b", "c"],
-        ...     }
-        ... )
-        >>> df.shift(periods=1)
-        shape: (3, 3)
-        ┌──────┬──────┬──────┐
-        │ foo  ┆ bar  ┆ ham  │
-        │ ---  ┆ ---  ┆ ---  │
-        │ i64  ┆ i64  ┆ str  │
-        ╞══════╪══════╪══════╡
-        │ null ┆ null ┆ null │
-        │ 1    ┆ 6    ┆ a    │
-        │ 2    ┆ 7    ┆ b    │
-        └──────┴──────┴──────┘
-        >>> df.shift(periods=-1)
-        shape: (3, 3)
-        ┌──────┬──────┬──────┐
-        │ foo  ┆ bar  ┆ ham  │
-        │ ---  ┆ ---  ┆ ---  │
-        │ i64  ┆ i64  ┆ str  │
-        ╞══════╪══════╪══════╡
-        │ 2    ┆ 7    ┆ b    │
-        │ 3    ┆ 8    ┆ c    │
-        │ null ┆ null ┆ null │
-        └──────┴──────┴──────┘
-
-        """
-        return self._from_pydf(self._df.shift(periods))
-
-    def shift_and_fill(
-        self,
-        fill_value: int | str | float,
-        *,
-        periods: int = 1,
-    ) -> DataFrame:
-        """
-        Shift the values by a given period and fill the resulting null values.
-
-        Parameters
-        ----------
+        n
+            Number of indices to shift forward. If a negative value is passed, values
+            are shifted in the opposite direction instead.
         fill_value
-            fill None values with this value.
-        periods
-            Number of places to shift (may be negative).
+            Fill the resulting null values with this value. Accepts expression input.
+            Non-expression inputs are parsed as literals.
+
+        Notes
+        -----
+        This method is similar to the `LAG` operation in SQL when the value for `n`
+        is positive. With a negative value for `n`, it is similar to `LEAD`.
 
         Examples
         --------
+        By default, values are shifted forward by one index.
+
         >>> df = pl.DataFrame(
         ...     {
-        ...         "foo": [1, 2, 3],
-        ...         "bar": [6, 7, 8],
-        ...         "ham": ["a", "b", "c"],
+        ...         "a": [1, 2, 3, 4],
+        ...         "b": [5, 6, 7, 8],
         ...     }
         ... )
-        >>> df.shift_and_fill(periods=1, fill_value=0)
-        shape: (3, 3)
-        ┌─────┬─────┬─────┐
-        │ foo ┆ bar ┆ ham │
-        │ --- ┆ --- ┆ --- │
-        │ i64 ┆ i64 ┆ str │
-        ╞═════╪═════╪═════╡
-        │ 0   ┆ 0   ┆ 0   │
-        │ 1   ┆ 6   ┆ a   │
-        │ 2   ┆ 7   ┆ b   │
-        └─────┴─────┴─────┘
+        >>> df.shift()
+        shape: (4, 2)
+        ┌──────┬──────┐
+        │ a    ┆ b    │
+        │ ---  ┆ ---  │
+        │ i64  ┆ i64  │
+        ╞══════╪══════╡
+        │ null ┆ null │
+        │ 1    ┆ 5    │
+        │ 2    ┆ 6    │
+        │ 3    ┆ 7    │
+        └──────┴──────┘
+
+        Pass a negative value to shift in the opposite direction instead.
+
+        >>> df.shift(-2)
+        shape: (4, 2)
+        ┌──────┬──────┐
+        │ a    ┆ b    │
+        │ ---  ┆ ---  │
+        │ i64  ┆ i64  │
+        ╞══════╪══════╡
+        │ 3    ┆ 7    │
+        │ 4    ┆ 8    │
+        │ null ┆ null │
+        │ null ┆ null │
+        └──────┴──────┘
+
+        Specify `fill_value` to fill the resulting null values.
+
+        >>> df.shift(-2, fill_value=100)
+        shape: (4, 2)
+        ┌─────┬─────┐
+        │ a   ┆ b   │
+        │ --- ┆ --- │
+        │ i64 ┆ i64 │
+        ╞═════╪═════╡
+        │ 3   ┆ 7   │
+        │ 4   ┆ 8   │
+        │ 100 ┆ 100 │
+        │ 100 ┆ 100 │
+        └─────┴─────┘
 
         """
-        return (
-            self.lazy()
-            .shift_and_fill(fill_value=fill_value, periods=periods)
-            .collect(no_optimization=True)
-        )
+        return self.lazy().shift(n, fill_value=fill_value).collect(_eager=True)
 
     def is_duplicated(self) -> Series:
         """
@@ -7416,11 +7766,11 @@ class DataFrame:
         └───────────┘
 
         Expressions with multiple outputs can be automatically instantiated as Structs
-        by enabling the experimental setting ``Config.set_auto_structify(True)``:
+        by enabling the setting `Config.set_auto_structify(True)`:
 
         >>> with pl.Config(auto_structify=True):
         ...     df.select(
-        ...         is_odd=(pl.col(pl.INTEGER_DTYPES) % 2).suffix("_is_odd"),
+        ...         is_odd=(pl.col(pl.INTEGER_DTYPES) % 2).name.suffix("_is_odd"),
         ...     )
         ...
         shape: (3, 1)
@@ -7435,7 +7785,7 @@ class DataFrame:
         └───────────┘
 
         """
-        return self.lazy().select(*exprs, **named_exprs).collect(no_optimization=True)
+        return self.lazy().select(*exprs, **named_exprs).collect(_eager=True)
 
     def select_seq(
         self, *exprs: IntoExpr | Iterable[IntoExpr], **named_exprs: IntoExpr
@@ -7461,9 +7811,7 @@ class DataFrame:
         select
 
         """
-        return (
-            self.lazy().select_seq(*exprs, **named_exprs).collect(no_optimization=True)
-        )
+        return self.lazy().select_seq(*exprs, **named_exprs).collect(_eager=True)
 
     def with_columns(
         self,
@@ -7540,7 +7888,7 @@ class DataFrame:
         ...     [
         ...         (pl.col("a") ** 2).alias("a^2"),
         ...         (pl.col("b") / 2).alias("b/2"),
-        ...         (pl.col("c").is_not()).alias("not c"),
+        ...         (pl.col("c").not_()).alias("not c"),
         ...     ]
         ... )
         shape: (4, 6)
@@ -7560,7 +7908,7 @@ class DataFrame:
         >>> df.with_columns(
         ...     (pl.col("a") ** 2).alias("a^2"),
         ...     (pl.col("b") / 2).alias("b/2"),
-        ...     (pl.col("c").is_not()).alias("not c"),
+        ...     (pl.col("c").not_()).alias("not c"),
         ... )
         shape: (4, 6)
         ┌─────┬──────┬───────┬──────┬──────┬───────┐
@@ -7578,7 +7926,7 @@ class DataFrame:
 
         >>> df.with_columns(
         ...     ab=pl.col("a") * pl.col("b"),
-        ...     not_c=pl.col("c").is_not(),
+        ...     not_c=pl.col("c").not_(),
         ... )
         shape: (4, 5)
         ┌─────┬──────┬───────┬──────┬───────┐
@@ -7593,11 +7941,11 @@ class DataFrame:
         └─────┴──────┴───────┴──────┴───────┘
 
         Expressions with multiple outputs can be automatically instantiated as Structs
-        by enabling the experimental setting ``Config.set_auto_structify(True)``:
+        by enabling the setting `Config.set_auto_structify(True)`:
 
         >>> with pl.Config(auto_structify=True):
         ...     df.drop("c").with_columns(
-        ...         diffs=pl.col(["a", "b"]).diff().suffix("_diff"),
+        ...         diffs=pl.col(["a", "b"]).diff().name.suffix("_diff"),
         ...     )
         ...
         shape: (4, 3)
@@ -7613,11 +7961,7 @@ class DataFrame:
         └─────┴──────┴─────────────┘
 
         """
-        return (
-            self.lazy()
-            .with_columns(*exprs, **named_exprs)
-            .collect(no_optimization=True)
-        )
+        return self.lazy().with_columns(*exprs, **named_exprs).collect(_eager=True)
 
     def with_columns_seq(
         self,
@@ -7652,11 +7996,7 @@ class DataFrame:
         with_columns
 
         """
-        return (
-            self.lazy()
-            .with_columns_seq(*exprs, **named_exprs)
-            .collect(no_optimization=True)
-        )
+        return self.lazy().with_columns_seq(*exprs, **named_exprs).collect(_eager=True)
 
     @overload
     def n_chunks(self, strategy: Literal["first"] = ...) -> int:
@@ -7698,8 +8038,8 @@ class DataFrame:
             return [s.n_chunks() for s in self.__iter__()]
         else:
             raise ValueError(
-                f"strategy: '{strategy}' not understood."
-                f" Choose one of {{'first',  'all'}}"
+                f"unexpected input for `strategy`: {strategy!r}"
+                f"\n\nChoose one of {{'first', 'all'}}"
             )
 
     @overload
@@ -7714,9 +8054,19 @@ class DataFrame:
     def max(self, axis: int = 0) -> Self | Series:
         ...
 
-    def max(self, axis: int = 0) -> Self | Series:
+    def max(self, axis: int | None = None) -> Self | Series:
         """
         Aggregate the columns of this DataFrame to their maximum value.
+
+        Parameters
+        ----------
+        axis
+            Either 0 (vertical) or 1 (horizontal).
+
+            .. deprecated:: 0.19.14
+                This argument will be removed in a future version. This method will only
+                support vertical aggregation, as if `axis` were set to `0`.
+                To perform horizontal aggregation, use :meth:`max_horizontal`.
 
         Examples
         --------
@@ -7738,14 +8088,51 @@ class DataFrame:
         └─────┴─────┴─────┘
 
         """
+        if axis is not None:
+            issue_deprecation_warning(
+                "The `axis` parameter for `DataFrame.max` is deprecated."
+                " Use `DataFrame.max_horizontal()` to perform horizontal aggregation.",
+                version="0.19.14",
+            )
+        else:
+            axis = 0
+
         if axis == 0:
             return self._from_pydf(self._df.max())
         if axis == 1:
-            return wrap_s(self._df.hmax())
-        raise ValueError("axis should be 0 or 1")  # pragma: no cover
+            return wrap_s(self._df.max_horizontal())
+        raise ValueError("axis should be 0 or 1")
+
+    def max_horizontal(self) -> Series:
+        """
+        Get the maximum value horizontally across columns.
+
+        Returns
+        -------
+        Series
+            A Series named `"max"`.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "foo": [1, 2, 3],
+        ...         "bar": [4.0, 5.0, 6.0],
+        ...     }
+        ... )
+        >>> df.max_horizontal()
+        shape: (3,)
+        Series: 'max' [f64]
+        [
+                4.0
+                5.0
+                6.0
+        ]
+        """
+        return self.select(F.max_horizontal(F.all())).to_series()
 
     @overload
-    def min(self, axis: Literal[0] = ...) -> Self:
+    def min(self, axis: Literal[0] | None = ...) -> Self:
         ...
 
     @overload
@@ -7753,12 +8140,22 @@ class DataFrame:
         ...
 
     @overload
-    def min(self, axis: int = 0) -> Self | Series:
+    def min(self, axis: int) -> Self | Series:
         ...
 
-    def min(self, axis: int = 0) -> Self | Series:
+    def min(self, axis: int | None = None) -> Self | Series:
         """
         Aggregate the columns of this DataFrame to their minimum value.
+
+        Parameters
+        ----------
+        axis
+            Either 0 (vertical) or 1 (horizontal).
+
+            .. deprecated:: 0.19.14
+                This argument will be removed in a future version. This method will only
+                support vertical aggregation, as if `axis` were set to `0`.
+                To perform horizontal aggregation, use :meth:`min_horizontal`.
 
         Examples
         --------
@@ -7780,11 +8177,48 @@ class DataFrame:
         └─────┴─────┴─────┘
 
         """
+        if axis is not None:
+            issue_deprecation_warning(
+                "The `axis` parameter for `DataFrame.min` is deprecated."
+                " Use `DataFrame.min_horizontal()` to perform horizontal aggregation.",
+                version="0.19.14",
+            )
+        else:
+            axis = 0
+
         if axis == 0:
             return self._from_pydf(self._df.min())
         if axis == 1:
-            return wrap_s(self._df.hmin())
-        raise ValueError("axis should be 0 or 1")  # pragma: no cover
+            return wrap_s(self._df.min_horizontal())
+        raise ValueError("axis should be 0 or 1")
+
+    def min_horizontal(self) -> Series:
+        """
+        Get the minimum value horizontally across columns.
+
+        Returns
+        -------
+        Series
+            A Series named `"min"`.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "foo": [1, 2, 3],
+        ...         "bar": [4.0, 5.0, 6.0],
+        ...     }
+        ... )
+        >>> df.min_horizontal()
+        shape: (3,)
+        Series: 'min' [f64]
+        [
+                1.0
+                2.0
+                3.0
+        ]
+        """
+        return self.select(F.min_horizontal(F.all())).to_series()
 
     @overload
     def sum(
@@ -7808,7 +8242,7 @@ class DataFrame:
     def sum(
         self,
         *,
-        axis: int = 0,
+        axis: int,
         null_strategy: NullStrategy = "ignore",
     ) -> Self | Series:
         ...
@@ -7816,7 +8250,7 @@ class DataFrame:
     def sum(
         self,
         *,
-        axis: int = 0,
+        axis: int | None = None,
         null_strategy: NullStrategy = "ignore",
     ) -> Self | Series:
         """
@@ -7825,9 +8259,17 @@ class DataFrame:
         Parameters
         ----------
         axis
-            Either 0 or 1.
+            Either 0 (vertical) or 1 (horizontal).
+
+            .. deprecated:: 0.19.14
+                This argument will be removed in a future version. This method will only
+                support vertical aggregation, as if `axis` were set to `0`.
+                To perform horizontal aggregation, use :meth:`sum_horizontal`.
         null_strategy : {'ignore', 'propagate'}
-            This argument is only used if axis == 1.
+            This argument is only used if `axis == 1`.
+
+            .. deprecated:: 0.19.14
+                This argument will be removed in a future version.
 
         Examples
         --------
@@ -7847,21 +8289,63 @@ class DataFrame:
         ╞═════╪═════╪══════╡
         │ 6   ┆ 21  ┆ null │
         └─────┴─────┴──────┘
-        >>> df.sum(axis=1)
-        shape: (3,)
-        Series: 'foo' [str]
-        [
-                "16a"
-                "27b"
-                "38c"
-        ]
-
         """
+        if axis is not None:
+            issue_deprecation_warning(
+                "The `axis` parameter for `DataFrame.sum` is deprecated."
+                " Use `DataFrame.min_horizontal()` to perform horizontal aggregation.",
+                version="0.19.14",
+            )
+        else:
+            axis = 0
+
         if axis == 0:
             return self._from_pydf(self._df.sum())
         if axis == 1:
-            return wrap_s(self._df.hsum(null_strategy))
-        raise ValueError("axis should be 0 or 1")  # pragma: no cover
+            if null_strategy == "ignore":
+                ignore_nulls = True
+            elif null_strategy == "propagate":
+                ignore_nulls = False
+            else:
+                raise ValueError(
+                    f"`null_strategy` must be one of {{'ignore', 'propagate'}}, got {null_strategy}"
+                )
+            return self.sum_horizontal(ignore_nulls=ignore_nulls)
+        raise ValueError("axis should be 0 or 1")
+
+    def sum_horizontal(self, *, ignore_nulls: bool = True) -> Series:
+        """
+        Sum all values horizontally across columns.
+
+        Parameters
+        ----------
+        ignore_nulls
+            Ignore null values (default).
+            If set to `False`, any null value in the input will lead to a null output.
+
+        Returns
+        -------
+        Series
+            A Series named `"sum"`.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "foo": [1, 2, 3],
+        ...         "bar": [4.0, 5.0, 6.0],
+        ...     }
+        ... )
+        >>> df.sum_horizontal()
+        shape: (3,)
+        Series: 'sum' [f64]
+        [
+                5.0
+                7.0
+                9.0
+        ]
+        """
+        return wrap_s(self._df.sum_horizontal(ignore_nulls)).alias("sum")
 
     @overload
     def mean(
@@ -7885,7 +8369,7 @@ class DataFrame:
     def mean(
         self,
         *,
-        axis: int = 0,
+        axis: int,
         null_strategy: NullStrategy = "ignore",
     ) -> Self | Series:
         ...
@@ -7893,7 +8377,7 @@ class DataFrame:
     def mean(
         self,
         *,
-        axis: int = 0,
+        axis: int | None = None,
         null_strategy: NullStrategy = "ignore",
     ) -> Self | Series:
         """
@@ -7902,9 +8386,17 @@ class DataFrame:
         Parameters
         ----------
         axis
-            Either 0 or 1.
+            Either 0 (vertical) or 1 (horizontal).
+
+            .. deprecated:: 0.19.14
+                This argument will be removed in a future version. This method will only
+                support vertical aggregation, as if `axis` were set to `0`.
+                To perform horizontal aggregation, use :meth:`mean_horizontal`.
         null_strategy : {'ignore', 'propagate'}
-            This argument is only used if axis == 1.
+            This argument is only used if `axis == 1`.
+
+            .. deprecated:: 0.19.14
+                This argument will be removed in a future version.
 
         Examples
         --------
@@ -7925,21 +8417,63 @@ class DataFrame:
         ╞═════╪═════╪══════╪══════╡
         │ 2.0 ┆ 7.0 ┆ null ┆ 0.5  │
         └─────┴─────┴──────┴──────┘
-        >>> df.mean(axis=1)
-        shape: (3,)
-        Series: 'foo' [f64]
-        [
-            2.666667
-            3.0
-            5.5
-        ]
-
         """
+        if axis is not None:
+            issue_deprecation_warning(
+                "The `axis` parameter for `DataFrame.mean` is deprecated."
+                " Use `DataFrame.mean_horizontal()` to perform horizontal aggregation.",
+                version="0.19.14",
+            )
+        else:
+            axis = 0
+
         if axis == 0:
             return self._from_pydf(self._df.mean())
         if axis == 1:
-            return wrap_s(self._df.hmean(null_strategy))
-        raise ValueError("axis should be 0 or 1")  # pragma: no cover
+            if null_strategy == "ignore":
+                ignore_nulls = True
+            elif null_strategy == "propagate":
+                ignore_nulls = False
+            else:
+                raise ValueError(
+                    f"`null_strategy` must be one of {{'ignore', 'propagate'}}, got {null_strategy}"
+                )
+            return self.mean_horizontal(ignore_nulls=ignore_nulls)
+        raise ValueError("axis should be 0 or 1")
+
+    def mean_horizontal(self, *, ignore_nulls: bool = True) -> Series:
+        """
+        Take the mean of all values horizontally across columns.
+
+        Parameters
+        ----------
+        ignore_nulls
+            Ignore null values (default).
+            If set to `False`, any null value in the input will lead to a null output.
+
+        Returns
+        -------
+        Series
+            A Series named `"mean"`.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "foo": [1, 2, 3],
+        ...         "bar": [4.0, 5.0, 6.0],
+        ...     }
+        ... )
+        >>> df.mean_horizontal()
+        shape: (3,)
+        Series: 'mean' [f64]
+        [
+                2.5
+                3.5
+                4.5
+        ]
+        """
+        return wrap_s(self._df.mean_horizontal(ignore_nulls)).alias("mean")
 
     def std(self, ddof: int = 1) -> Self:
         """
@@ -8127,7 +8661,7 @@ class DataFrame:
         ----------
         columns
             Column name(s) or selector(s) that should be converted to dummy
-            variables. If set to ``None`` (default), convert all columns.
+            variables. If set to `None` (default), convert all columns.
         separator
             Separator/delimiter used when generating column names.
         drop_first
@@ -8206,7 +8740,7 @@ class DataFrame:
         ----------
         subset
             Column name(s) or selector(s), to consider when identifying
-            duplicate rows. If set to ``None`` (default), use all columns.
+            duplicate rows. If set to `None` (default), use all columns.
         keep : {'first', 'last', 'any', 'none'}
             Which of the duplicate rows to keep.
 
@@ -8218,7 +8752,7 @@ class DataFrame:
         maintain_order
             Keep the same order as the original DataFrame. This is more expensive to
             compute.
-            Settings this to ``True`` blocks the possibility
+            Settings this to `True` blocks the possibility
             to run on the streaming engine.
 
         Returns
@@ -8276,7 +8810,7 @@ class DataFrame:
         return (
             self.lazy()
             .unique(subset=subset, keep=keep, maintain_order=maintain_order)
-            .collect(no_optimization=True)
+            .collect(_eager=True)
         )
 
     def n_unique(self, subset: str | Expr | Sequence[str | Expr] | None = None) -> int:
@@ -8291,7 +8825,7 @@ class DataFrame:
 
         Notes
         -----
-        This method operates at the ``DataFrame`` level; to operate on subsets at the
+        This method operates at the `DataFrame` level; to operate on subsets at the
         expression level you can make use of struct-packing instead, for example:
 
         >>> expr_unique_subset = pl.struct(["a", "b"]).n_unique()
@@ -8305,7 +8839,7 @@ class DataFrame:
         In aggregate context there is also an equivalent method for returning the
         unique values per-group:
 
-        >>> df_agg_nunique = df.groupby(by=["a"]).n_unique()
+        >>> df_agg_nunique = df.group_by(by=["a"]).n_unique()
 
         Examples
         --------
@@ -8345,8 +8879,46 @@ class DataFrame:
             struct_fields = F.all() if (subset is None) else subset
             expr = F.struct(struct_fields)  # type: ignore[call-overload]
 
-        df = self.lazy().select(expr.n_unique()).collect()
+        df = self.lazy().select(expr.n_unique()).collect(_eager=True)
         return 0 if df.is_empty() else df.row(0)[0]
+
+    def approx_n_unique(self) -> DataFrame:
+        """
+        Approximate count of unique values.
+
+        This is done using the HyperLogLog++ algorithm for cardinality estimation.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [1, 2, 3, 4],
+        ...         "b": [1, 2, 1, 1],
+        ...     }
+        ... )
+        >>> df.approx_n_unique()
+        shape: (1, 2)
+        ┌─────┬─────┐
+        │ a   ┆ b   │
+        │ --- ┆ --- │
+        │ u32 ┆ u32 │
+        ╞═════╪═════╡
+        │ 4   ┆ 2   │
+        └─────┴─────┘
+
+        """
+        return self.lazy().approx_n_unique().collect(_eager=True)
+
+    @deprecate_renamed_function("approx_n_unique", version="0.18.12")
+    def approx_unique(self) -> DataFrame:
+        """
+        Approximate count of unique values.
+
+        .. deprecated:: 0.18.12
+            This method has been renamed to :func:`DataFrame.approx_n_unique`.
+
+        """
+        return self.approx_n_unique()
 
     def rechunk(self) -> Self:
         """
@@ -8385,9 +8957,9 @@ class DataFrame:
 
     def sample(
         self,
-        n: int | None = None,
+        n: int | Series | None = None,
         *,
-        fraction: float | None = None,
+        fraction: float | Series | None = None,
         with_replacement: bool = False,
         shuffle: bool = False,
         seed: int | None = None,
@@ -8409,8 +8981,8 @@ class DataFrame:
             set to False (default), the order of the returned rows will be
             neither stable nor fully random.
         seed
-            Seed for the random number generator. If set to None (default), a random
-            seed is generated using the ``random`` module.
+            Seed for the random number generator. If set to None (default), a
+            random seed is generated for each sample operation.
 
         Examples
         --------
@@ -8440,13 +9012,20 @@ class DataFrame:
             seed = random.randint(0, 10000)
 
         if n is None and fraction is not None:
+            if not isinstance(fraction, pl.Series):
+                fraction = pl.Series("frac", [fraction])
+
             return self._from_pydf(
-                self._df.sample_frac(fraction, with_replacement, shuffle, seed)
+                self._df.sample_frac(fraction._s, with_replacement, shuffle, seed)
             )
 
         if n is None:
             n = 1
-        return self._from_pydf(self._df.sample_n(n, with_replacement, shuffle, seed))
+
+        if not isinstance(n, pl.Series):
+            n = pl.Series("", [n])
+
+        return self._from_pydf(self._df.sample_n(n._s, with_replacement, shuffle, seed))
 
     def fold(self, operation: Callable[[Series, Series], Series]) -> Series:
         """
@@ -8459,9 +9038,9 @@ class DataFrame:
         An example of the supercast rules when applying an arithmetic operation on two
         DataTypes are for instance:
 
-        Int8 + Utf8 = Utf8
-        Float32 + Int64 = Float32
-        Float32 + Float64 = Float64
+        - Int8 + Utf8 = Utf8
+        - Float32 + Int64 = Float32
+        - Float32 + Float64 = Float64
 
         Examples
         --------
@@ -8589,17 +9168,23 @@ class DataFrame:
 
         Notes
         -----
-        The ``index`` and ``by_predicate`` params are mutually exclusive. Additionally,
+        The `index` and `by_predicate` params are mutually exclusive. Additionally,
         to ensure clarity, the `by_predicate` parameter must be supplied by keyword.
 
-        When using ``by_predicate`` it is an error condition if anything other than
-        one row is returned; more than one row raises ``TooManyRowsReturnedError``, and
-        zero rows will raise ``NoRowsReturnedError`` (both inherit from ``RowsError``).
+        When using `by_predicate` it is an error condition if anything other than
+        one row is returned; more than one row raises `TooManyRowsReturnedError`, and
+        zero rows will raise `NoRowsReturnedError` (both inherit from `RowsError`).
 
         Warnings
         --------
         You should NEVER use this method to iterate over a DataFrame; if you require
-        row-iteration you should strongly prefer use of ``iter_rows()`` instead.
+        row-iteration you should strongly prefer use of `iter_rows()` instead.
+
+        See Also
+        --------
+        iter_rows : Row iterator over frame data (does not materialise all rows).
+        rows : Materialise all frame data as a list of rows (potentially expensive).
+        item: Return dataframe element as a scalar.
 
         Examples
         --------
@@ -8615,22 +9200,16 @@ class DataFrame:
         >>> df.row(2)
         (3, 8, 'c')
 
-        Specify ``named=True`` to get a dictionary instead with a mapping of column
+        Specify `named=True` to get a dictionary instead with a mapping of column
         names to row values.
 
         >>> df.row(2, named=True)
         {'foo': 3, 'bar': 8, 'ham': 'c'}
 
-        Use ``by_predicate`` to return the row that matches the given predicate.
+        Use `by_predicate` to return the row that matches the given predicate.
 
         >>> df.row(by_predicate=(pl.col("ham") == "b"))
         (2, 7, 'b')
-
-        See Also
-        --------
-        iter_rows : Row iterator over frame data (does not materialise all rows).
-        rows : Materialise all frame data as a list of rows (potentially expensive).
-        item: Return dataframe element as a scalar.
 
         """
         if index is not None and by_predicate is not None:
@@ -8638,7 +9217,9 @@ class DataFrame:
                 "cannot set both 'index' and 'by_predicate'; mutually exclusive"
             )
         elif isinstance(index, pl.Expr):
-            raise TypeError("expressions should be passed to the 'by_predicate' param")
+            raise TypeError(
+                "expressions should be passed to the `by_predicate` parameter"
+            )
 
         if index is not None:
             row = self._df.row_tuple(index)
@@ -8650,8 +9231,7 @@ class DataFrame:
         elif by_predicate is not None:
             if not isinstance(by_predicate, pl.Expr):
                 raise TypeError(
-                    f"expected 'by_predicate to be an expression;"
-                    f" found {type(by_predicate).__name__!r}"
+                    f"expected `by_predicate` to be an expression, got {type(by_predicate).__name__!r}"
                 )
             rows = self.filter(by_predicate).rows()
             n_rows = len(rows)
@@ -8670,7 +9250,7 @@ class DataFrame:
             else:
                 return row
         else:
-            raise ValueError("one of 'index' or 'by_predicate' must be set")
+            raise ValueError("one of `index` or `by_predicate` must be set")
 
     @overload
     def rows(self, *, named: Literal[False] = ...) -> list[tuple[Any, ...]]:
@@ -8695,8 +9275,8 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that Python
-        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        If you have `ns`-precision temporal values you should be aware that Python
+        natively only supports up to `μs`-precision; `ns`-precision values will be
         truncated to microseconds on conversion to Python. If this matters to your
         use-case you should export to a different format (such as Arrow or NumPy).
 
@@ -8704,12 +9284,17 @@ class DataFrame:
         --------
         Row-iteration is not optimal as the underlying data is stored in columnar form;
         where possible, prefer export via one of the dedicated export/output methods.
-        Where possible you should also consider using ``iter_rows`` instead to avoid
+        Where possible you should also consider using `iter_rows` instead to avoid
         materialising all the data at once.
 
         Returns
         -------
         list of tuples (default) or dictionaries of row values
+
+        See Also
+        --------
+        iter_rows : Row iterator over frame data (does not materialise all rows).
+        rows_by_key : Materialises frame data as a key-indexed dictionary.
 
         Examples
         --------
@@ -8727,11 +9312,6 @@ class DataFrame:
          {'x': 'b', 'y': 2, 'z': 3},
          {'x': 'b', 'y': 3, 'z': 6},
          {'x': 'a', 'y': 4, 'z': 9}]
-
-        See Also
-        --------
-        iter_rows : Row iterator over frame data (does not materialise all rows).
-        rows_by_key : Materialises frame data as a key-indexed dictionary.
 
         """
         if named:
@@ -8776,10 +9356,15 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that Python
-        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        If you have `ns`-precision temporal values you should be aware that Python
+        natively only supports up to `μs`-precision; `ns`-precision values will be
         truncated to microseconds on conversion to Python. If this matters to your
         use-case you should export to a different format (such as Arrow or NumPy).
+
+        See Also
+        --------
+        rows : Materialise all frame data as a list of rows (potentially expensive).
+        iter_rows : Row iterator over frame data (does not materialise all rows).
 
         Examples
         --------
@@ -8833,16 +9418,11 @@ class DataFrame:
                           {'w': 'b', 'x': 'q', 'y': 3.0, 'z': 7}],
              ('a', 'k'): [{'w': 'a', 'x': 'k', 'y': 4.5, 'z': 6}]})
 
-        See Also
-        --------
-        rows : Materialise all frame data as a list of rows (potentially expensive).
-        iter_rows : Row iterator over frame data (does not materialise all rows).
-
         """
         from polars.selectors import expand_selector, is_selector
 
         if is_selector(key):
-            key_tuple = expand_selector(target=self, selector=key)  # type: ignore[type-var]
+            key_tuple = expand_selector(target=self, selector=key)
         elif not isinstance(key, str):
             key_tuple = tuple(key)  # type: ignore[arg-type]
         else:
@@ -8880,7 +9460,7 @@ class DataFrame:
                     k = get_key(d)
                     if not include_key:
                         for ix in key_tuple:
-                            del d[ix]
+                            del d[ix]  # type: ignore[arg-type]
                     if unique:
                         rows[k] = d
                     else:
@@ -8937,8 +9517,8 @@ class DataFrame:
 
         Notes
         -----
-        If you have ``ns``-precision temporal values you should be aware that Python
-        natively only supports up to ``μs``-precision; `ns`-precision values will be
+        If you have `ns`-precision temporal values you should be aware that Python
+        natively only supports up to `μs`-precision; `ns`-precision values will be
         truncated to microseconds on conversion to Python. If this matters to your
         use-case you should export to a different format (such as Arrow or NumPy).
 
@@ -8952,6 +9532,11 @@ class DataFrame:
         -------
         iterator of tuples (default) or dictionaries (if named) of python row values
 
+        See Also
+        --------
+        rows : Materialises all frame data as a list of rows (potentially expensive).
+        rows_by_key : Materialises frame data as a key-indexed dictionary.
+
         Examples
         --------
         >>> df = pl.DataFrame(
@@ -8964,11 +9549,6 @@ class DataFrame:
         [1, 3, 5]
         >>> [row["b"] for row in df.iter_rows(named=True)]
         [2, 4, 6]
-
-        See Also
-        --------
-        rows : Materialises all frame data as a list of rows (potentially expensive).
-        rows_by_key : Materialises frame data as a key-indexed dictionary.
 
         """
         # load into the local namespace for a (minor) performance boost in the hot loops
@@ -9022,19 +9602,17 @@ class DataFrame:
         DataFrame:[0]:10000
         DataFrame:[1]:7500
 
-        Using ``iter_slices`` is an efficient way to chunk-iterate over DataFrames and
+        Using `iter_slices` is an efficient way to chunk-iterate over DataFrames and
         any supported frame export/conversion types; for example, as RecordBatches:
 
         >>> for frame in df.iter_slices(n_rows=15_000):
         ...     record_batch = frame.to_arrow().to_batches()[0]
-        ...     print(record_batch, "\n<< ", len(record_batch))
+        ...     print(f"{record_batch.schema}\n<< {len(record_batch)}")
         ...
-        pyarrow.RecordBatch
         a: int32
         b: date32[day]
         c: large_string
         << 15000
-        pyarrow.RecordBatch
         a: int32
         b: date32[day]
         c: large_string
@@ -9064,14 +9642,19 @@ class DataFrame:
             df._df.shrink_to_fit()
             return df
 
-    def take_every(self, n: int) -> DataFrame:
+    def gather_every(self, n: int) -> DataFrame:
         """
         Take every nth row in the DataFrame and return as a new DataFrame.
+
+        Parameters
+        ----------
+        n
+            Gather every *n*-th row.
 
         Examples
         --------
         >>> s = pl.DataFrame({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
-        >>> s.take_every(2)
+        >>> s.gather_every(2)
         shape: (2, 2)
         ┌─────┬─────┐
         │ a   ┆ b   │
@@ -9083,7 +9666,7 @@ class DataFrame:
         └─────┴─────┘
 
         """
-        return self.select(F.col("*").take_every(n))
+        return self.select(F.col("*").gather_every(n))
 
     def hash_rows(
         self,
@@ -9107,6 +9690,12 @@ class DataFrame:
             Random seed parameter. Defaults to `seed` if not set.
         seed_3
             Random seed parameter. Defaults to `seed` if not set.
+
+        Notes
+        -----
+        This implementation of :func:`hash_rows` does not guarantee stable results
+        across different Polars versions. Its stability is only guaranteed within a
+        single version.
 
         Examples
         --------
@@ -9148,16 +9737,16 @@ class DataFrame:
         ... )
         >>> df.interpolate()
         shape: (4, 3)
-        ┌─────┬──────┬─────┐
-        │ foo ┆ bar  ┆ baz │
-        │ --- ┆ ---  ┆ --- │
-        │ i64 ┆ i64  ┆ i64 │
-        ╞═════╪══════╪═════╡
-        │ 1   ┆ 6    ┆ 1   │
-        │ 5   ┆ 7    ┆ 3   │
-        │ 9   ┆ 9    ┆ 6   │
-        │ 10  ┆ null ┆ 9   │
-        └─────┴──────┴─────┘
+        ┌──────┬──────┬──────────┐
+        │ foo  ┆ bar  ┆ baz      │
+        │ ---  ┆ ---  ┆ ---      │
+        │ f64  ┆ f64  ┆ f64      │
+        ╞══════╪══════╪══════════╡
+        │ 1.0  ┆ 6.0  ┆ 1.0      │
+        │ 5.0  ┆ 7.0  ┆ 3.666667 │
+        │ 9.0  ┆ 9.0  ┆ 6.333333 │
+        │ 10.0 ┆ null ┆ 9.0      │
+        └──────┴──────┴──────────┘
 
         """
         return self.select(F.col("*").interpolate())
@@ -9179,7 +9768,7 @@ class DataFrame:
 
     def to_struct(self, name: str) -> Series:
         """
-        Convert a ``DataFrame`` to a ``Series`` of type ``Struct``.
+        Convert a `DataFrame` to a `Series` of type `Struct`.
 
         Parameters
         ----------
@@ -9267,7 +9856,7 @@ class DataFrame:
         """
         Return pairwise Pearson product-moment correlation coefficients between columns.
 
-        See numpy ``corrcoef`` for more information:
+        See numpy `corrcoef` for more information:
         https://numpy.org/doc/stable/reference/generated/numpy.corrcoef.html
 
         Notes
@@ -9277,7 +9866,7 @@ class DataFrame:
         Parameters
         ----------
         **kwargs
-            Keyword arguments are passed to numpy ``corrcoef``.
+            Keyword arguments are passed to numpy `corrcoef`.
 
         Examples
         --------
@@ -9361,7 +9950,7 @@ class DataFrame:
         │ elise  ┆ 44  │
         └────────┴─────┘
         """
-        return self.lazy().merge_sorted(other.lazy(), key).collect(no_optimization=True)
+        return self.lazy().merge_sorted(other.lazy(), key).collect(_eager=True)
 
     def set_sorted(
         self,
@@ -9384,21 +9973,29 @@ class DataFrame:
         return (
             self.lazy()
             .set_sorted(column, *more_columns, descending=descending)
-            .collect(no_optimization=True)
+            .collect(_eager=True)
         )
 
     def update(
         self,
         other: DataFrame,
         on: str | Sequence[str] | None = None,
-        how: Literal["left", "inner"] = "left",
+        left_on: str | Sequence[str] | None = None,
+        right_on: str | Sequence[str] | None = None,
+        how: Literal["left", "inner", "outer"] = "left",
+        include_nulls: bool | None = False,
     ) -> DataFrame:
         """
-        Update the values in this `DataFrame` with the non-null values in `other`.
+        Update the values in this `DataFrame` with the values in `other`.
+
+        By default, null values in the right dataframe are ignored. Use
+        `ignore_nulls=False` to overwrite values in this frame with null values in other
+        frame.
 
         Notes
         -----
-        This is syntactic sugar for a left/inner join + coalesce
+        This is syntactic sugar for a left/inner join, with an optional coalesce when
+        `include_nulls = False`.
 
         Warnings
         --------
@@ -9412,9 +10009,19 @@ class DataFrame:
         on
             Column names that will be joined on.
             If none given the row count is used.
-        how : {'left', 'inner'}
-            'left' will keep the left table rows as is.
-            'inner' will remove rows that are not found in other
+        left_on
+           Join column(s) of the left DataFrame.
+        right_on
+           Join column(s) of the right DataFrame.
+        how : {'left', 'inner', 'outer'}
+            * 'left' will keep all rows from the left table; rows may be duplicated
+              if multiple rows in the right frame match the left row's key.
+            * 'inner' keeps only those rows where the key exists in both frames.
+            * 'outer' will update existing rows where the key matches while also
+              adding any new rows contained in the given frame.
+        include_nulls
+            If True, null values from the right dataframe will be used to update the
+            left dataframe.
 
         Examples
         --------
@@ -9438,21 +10045,13 @@ class DataFrame:
         └─────┴─────┘
         >>> new_df = pl.DataFrame(
         ...     {
-        ...         "B": [4, None, 6],
-        ...         "C": [7, 8, 9],
+        ...         "B": [-66, None, -99],
+        ...         "C": [5, 3, 1],
         ...     }
         ... )
-        >>> new_df
-        shape: (3, 2)
-        ┌──────┬─────┐
-        │ B    ┆ C   │
-        │ ---  ┆ --- │
-        │ i64  ┆ i64 │
-        ╞══════╪═════╡
-        │ 4    ┆ 7   │
-        │ null ┆ 8   │
-        │ 6    ┆ 9   │
-        └──────┴─────┘
+
+        Update `df` values with the non-null values in `new_df`, by row index:
+
         >>> df.update(new_df)
         shape: (4, 2)
         ┌─────┬─────┐
@@ -9460,14 +10059,369 @@ class DataFrame:
         │ --- ┆ --- │
         │ i64 ┆ i64 │
         ╞═════╪═════╡
-        │ 1   ┆ 4   │
+        │ 1   ┆ -66 │
         │ 2   ┆ 500 │
-        │ 3   ┆ 6   │
+        │ 3   ┆ -99 │
         │ 4   ┆ 700 │
         └─────┴─────┘
 
+        Update `df` values with the non-null values in `new_df`, by row index,
+        but only keeping those rows that are common to both frames:
+
+        >>> df.update(new_df, how="inner")
+        shape: (3, 2)
+        ┌─────┬─────┐
+        │ A   ┆ B   │
+        │ --- ┆ --- │
+        │ i64 ┆ i64 │
+        ╞═════╪═════╡
+        │ 1   ┆ -66 │
+        │ 2   ┆ 500 │
+        │ 3   ┆ -99 │
+        └─────┴─────┘
+
+        Update `df` values with the non-null values in `new_df`, using an outer join
+        strategy that defines explicit join columns in each frame:
+
+        >>> df.update(new_df, left_on=["A"], right_on=["C"], how="outer")
+        shape: (5, 2)
+        ┌─────┬─────┐
+        │ A   ┆ B   │
+        │ --- ┆ --- │
+        │ i64 ┆ i64 │
+        ╞═════╪═════╡
+        │ 1   ┆ -99 │
+        │ 2   ┆ 500 │
+        │ 3   ┆ 600 │
+        │ 4   ┆ 700 │
+        │ 5   ┆ -66 │
+        └─────┴─────┘
+
+        Update `df` values including null values in `new_df`, using an outer join
+        strategy that defines explicit join columns in each frame:
+
+        >>> df.update(
+        ...     new_df, left_on="A", right_on="C", how="outer", include_nulls=True
+        ... )
+        shape: (5, 2)
+        ┌─────┬──────┐
+        │ A   ┆ B    │
+        │ --- ┆ ---  │
+        │ i64 ┆ i64  │
+        ╞═════╪══════╡
+        │ 1   ┆ -99  │
+        │ 2   ┆ 500  │
+        │ 3   ┆ null │
+        │ 4   ┆ 700  │
+        │ 5   ┆ -66  │
+        └─────┴──────┘
+
         """
-        return self.lazy().update(other.lazy(), on, how).collect(no_optimization=True)
+        return (
+            self.lazy()
+            .update(other.lazy(), on, left_on, right_on, how, include_nulls)
+            .collect(_eager=True)
+        )
+
+    @deprecate_renamed_function("group_by", version="0.19.0")
+    def groupby(
+        self,
+        by: IntoExpr | Iterable[IntoExpr],
+        *more_by: IntoExpr,
+        maintain_order: bool = False,
+    ) -> GroupBy:
+        """
+        Start a group by operation.
+
+        .. deprecated:: 0.19.0
+            This method has been renamed to :func:`DataFrame.group_by`.
+
+        Parameters
+        ----------
+        by
+            Column(s) to group by. Accepts expression input. Strings are parsed as
+            column names.
+        *more_by
+            Additional columns to group by, specified as positional arguments.
+        maintain_order
+            Ensure that the order of the groups is consistent with the input data.
+            This is slower than a default group by.
+            Settings this to `True` blocks the possibility
+            to run on the streaming engine.
+
+            .. note::
+                Within each group, the order of rows is always preserved, regardless
+                of this argument.
+
+        Returns
+        -------
+        GroupBy
+            Object which can be used to perform aggregations.
+
+        """
+        return self.group_by(by, *more_by, maintain_order=maintain_order)
+
+    @deprecate_renamed_function("rolling", version="0.19.0")
+    def groupby_rolling(
+        self,
+        index_column: IntoExpr,
+        *,
+        period: str | timedelta,
+        offset: str | timedelta | None = None,
+        closed: ClosedInterval = "right",
+        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        check_sorted: bool = True,
+    ) -> RollingGroupBy:
+        """
+        Create rolling groups based on a time, Int32, or Int64 column.
+
+        .. deprecated:: 0.19.0
+            This method has been renamed to :func:`DataFrame.rolling`.
+
+        Parameters
+        ----------
+        index_column
+            Column used to group based on the time window.
+            Often of type Date/Datetime.
+            This column must be sorted in ascending order (or, if `by` is specified,
+            then it must be sorted in ascending order within each group).
+
+            In case of a rolling group by on indices, dtype needs to be one of
+            {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
+            performance matters use an Int64 column.
+        period
+            length of the window - must be non-negative
+        offset
+            offset of the window. Default is -period
+        closed : {'right', 'left', 'both', 'none'}
+            Define which sides of the temporal interval are closed (inclusive).
+        by
+            Also group by this column/these columns
+        check_sorted
+            When the `by` argument is given, polars can not check sortedness
+            by the metadata and has to do a full scan on the index column to
+            verify data is sorted. This is expensive. If you are sure the
+            data within the by groups is sorted, you can set this to `False`.
+            Doing so incorrectly will lead to incorrect output
+
+        """
+        return self.rolling(
+            index_column,
+            period=period,
+            offset=offset,
+            closed=closed,
+            by=by,
+            check_sorted=check_sorted,
+        )
+
+    @deprecate_renamed_function("rolling", version="0.19.9")
+    def group_by_rolling(
+        self,
+        index_column: IntoExpr,
+        *,
+        period: str | timedelta,
+        offset: str | timedelta | None = None,
+        closed: ClosedInterval = "right",
+        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        check_sorted: bool = True,
+    ) -> RollingGroupBy:
+        """
+        Create rolling groups based on a time, Int32, or Int64 column.
+
+        .. deprecated:: 0.19.9
+            This method has been renamed to :func:`DataFrame.rolling`.
+
+        Parameters
+        ----------
+        index_column
+            Column used to group based on the time window.
+            Often of type Date/Datetime.
+            This column must be sorted in ascending order (or, if `by` is specified,
+            then it must be sorted in ascending order within each group).
+
+            In case of a rolling group by on indices, dtype needs to be one of
+            {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
+            performance matters use an Int64 column.
+        period
+            length of the window - must be non-negative
+        offset
+            offset of the window. Default is -period
+        closed : {'right', 'left', 'both', 'none'}
+            Define which sides of the temporal interval are closed (inclusive).
+        by
+            Also group by this column/these columns
+        check_sorted
+            When the `by` argument is given, polars can not check sortedness
+            by the metadata and has to do a full scan on the index column to
+            verify data is sorted. This is expensive. If you are sure the
+            data within the by groups is sorted, you can set this to `False`.
+            Doing so incorrectly will lead to incorrect output
+
+        """
+        return self.rolling(
+            index_column,
+            period=period,
+            offset=offset,
+            closed=closed,
+            by=by,
+            check_sorted=check_sorted,
+        )
+
+    @deprecate_renamed_function("group_by_dynamic", version="0.19.0")
+    def groupby_dynamic(
+        self,
+        index_column: IntoExpr,
+        *,
+        every: str | timedelta,
+        period: str | timedelta | None = None,
+        offset: str | timedelta | None = None,
+        truncate: bool = True,
+        include_boundaries: bool = False,
+        closed: ClosedInterval = "left",
+        by: IntoExpr | Iterable[IntoExpr] | None = None,
+        start_by: StartBy = "window",
+        check_sorted: bool = True,
+    ) -> DynamicGroupBy:
+        """
+        Group based on a time value (or index value of type Int32, Int64).
+
+        .. deprecated:: 0.19.0
+            This method has been renamed to :func:`DataFrame.group_by_dynamic`.
+
+        Parameters
+        ----------
+        index_column
+            Column used to group based on the time window.
+            Often of type Date/Datetime.
+            This column must be sorted in ascending order (or, if `by` is specified,
+            then it must be sorted in ascending order within each group).
+
+            In case of a dynamic group by on indices, dtype needs to be one of
+            {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
+            performance matters use an Int64 column.
+        every
+            interval of the window
+        period
+            length of the window, if None it will equal 'every'
+        offset
+            offset of the window, only takes effect if `start_by` is `'window'`.
+            Defaults to negative `every`.
+        truncate
+            truncate the time value to the window lower bound
+        include_boundaries
+            Add the lower and upper bound of the window to the "_lower_bound" and
+            "_upper_bound" columns. This will impact performance because it's harder to
+            parallelize
+        closed : {'left', 'right', 'both', 'none'}
+            Define which sides of the temporal interval are closed (inclusive).
+        by
+            Also group by this column/these columns
+        start_by : {'window', 'datapoint', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'}
+            The strategy to determine the start of the first window by.
+
+            * 'window': Start by taking the earliest timestamp, truncating it with
+              `every`, and then adding `offset`.
+              Note that weekly windows start on Monday.
+            * 'datapoint': Start from the first encountered data point.
+            * a day of the week (only takes effect if `every` contains `'w'`):
+
+              * 'monday': Start the window on the Monday before the first data point.
+              * 'tuesday': Start the window on the Tuesday before the first data point.
+              * ...
+              * 'sunday': Start the window on the Sunday before the first data point.
+        check_sorted
+            When the `by` argument is given, polars can not check sortedness
+            by the metadata and has to do a full scan on the index column to
+            verify data is sorted. This is expensive. If you are sure the
+            data within the by groups is sorted, you can set this to `False`.
+            Doing so incorrectly will lead to incorrect output
+
+        Returns
+        -------
+        DynamicGroupBy
+            Object you can call `.agg` on to aggregate by groups, the result
+            of which will be sorted by `index_column` (but note that if `by` columns are
+            passed, it will only be sorted within each `by` group).
+
+        """  # noqa: W505
+        return self.group_by_dynamic(
+            index_column,
+            every=every,
+            period=period,
+            offset=offset,
+            truncate=truncate,
+            include_boundaries=include_boundaries,
+            closed=closed,
+            by=by,
+            start_by=start_by,
+            check_sorted=check_sorted,
+        )
+
+    @deprecate_renamed_function("map_rows", version="0.19.0")
+    def apply(
+        self,
+        function: Callable[[tuple[Any, ...]], Any],
+        return_dtype: PolarsDataType | None = None,
+        *,
+        inference_size: int = 256,
+    ) -> DataFrame:
+        """
+        Apply a custom/user-defined function (UDF) over the rows of the DataFrame.
+
+        .. deprecated:: 0.19.0
+            This method has been renamed to :func:`DataFrame.map_rows`.
+
+        Parameters
+        ----------
+        function
+            Custom function or lambda.
+        return_dtype
+            Output type of the operation. If none given, Polars tries to infer the type.
+        inference_size
+            Only used in the case when the custom function returns rows.
+            This uses the first `n` rows to determine the output schema
+
+        """
+        return self.map_rows(function, return_dtype, inference_size=inference_size)
+
+    @deprecate_function("Use `shift` instead.", version="0.19.12")
+    @deprecate_renamed_parameter("periods", "n", version="0.19.11")
+    def shift_and_fill(
+        self,
+        fill_value: int | str | float,
+        *,
+        n: int = 1,
+    ) -> DataFrame:
+        """
+        Shift values by the given number of places and fill the resulting null values.
+
+        .. deprecated:: 0.19.12
+            Use :func:`shift` instead.
+
+        Parameters
+        ----------
+        fill_value
+            fill None values with this value.
+        n
+            Number of places to shift (may be negative).
+
+        """
+        return self.shift(n, fill_value=fill_value)
+
+    @deprecate_renamed_function("gather_every", version="0.19.12")
+    def take_every(self, n: int) -> DataFrame:
+        """
+        Take every nth row in the DataFrame and return as a new DataFrame.
+
+        .. deprecated:: 0.19.14
+            This method has been renamed to :func:`gather_every`.
+
+        Parameters
+        ----------
+        n
+            Gather every *n*-th row.
+        """
+        return self.gather_every(n)
 
 
 def _prepare_other_arg(other: Any, length: int | None = None) -> Series:
@@ -9477,7 +10431,7 @@ def _prepare_other_arg(other: Any, length: int | None = None) -> Series:
         if isinstance(other, str):
             pass
         elif isinstance(other, Sequence):
-            raise ValueError("operation not supported")
+            raise TypeError("operation not supported")
         other = pl.Series("", [other])
 
     if length and length > 1:

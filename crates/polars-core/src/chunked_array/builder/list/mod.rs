@@ -4,17 +4,19 @@ mod boolean;
 #[cfg(feature = "dtype-categorical")]
 mod categorical;
 mod dtypes;
+mod null;
 mod primitive;
 
 pub use anonymous::*;
+use arrow::legacy::array::list::AnonymousBuilder;
+use arrow::legacy::array::null::MutableNullArray;
+use arrow::legacy::prelude::*;
 pub use binary::*;
 pub use boolean::*;
 #[cfg(feature = "dtype-categorical")]
 use categorical::*;
 use dtypes::*;
-use polars_arrow::array::list::AnonymousBuilder;
-use polars_arrow::array::null::MutableNullArray;
-use polars_arrow::prelude::*;
+use null::*;
 pub use primitive::*;
 
 use super::*;
@@ -94,13 +96,13 @@ pub fn get_list_builder(
 ) -> PolarsResult<Box<dyn ListBuilderTrait>> {
     match inner_type_logical {
         #[cfg(feature = "dtype-categorical")]
-        DataType::Categorical(_) => {
-            return Ok(Box::new(ListCategoricalChunkedBuilder::new(
+        DataType::Categorical(Some(rev_map)) => {
+            return Ok(create_categorical_chunked_listbuilder(
                 name,
                 list_capacity,
                 value_capacity,
-                inner_type_logical.clone(),
-            )))
+                rev_map.clone(),
+            ))
         },
         _ => {},
     }
@@ -116,8 +118,14 @@ pub fn get_list_builder(
             list_capacity,
             Some(inner_type_logical.clone()),
         ))),
-        DataType::Null => Ok(Box::new(LargeListNullBuilder::with_capacity(list_capacity))),
+        DataType::Null => Ok(Box::new(ListNullChunkedBuilder::new(name, list_capacity))),
         DataType::List(_) => Ok(Box::new(AnonymousOwnedListBuilder::new(
+            name,
+            list_capacity,
+            Some(inner_type_logical.clone()),
+        ))),
+        #[cfg(feature = "dtype-array")]
+        DataType::Array(..) => Ok(Box::new(AnonymousOwnedListBuilder::new(
             name,
             list_capacity,
             Some(inner_type_logical.clone()),

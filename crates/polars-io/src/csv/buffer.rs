@@ -1,6 +1,6 @@
 use arrow::array::Utf8Array;
 use arrow::bitmap::MutableBitmap;
-use polars_arrow::prelude::FromDataUtf8;
+use arrow::legacy::prelude::FromDataUtf8;
 use polars_core::prelude::*;
 #[cfg(any(feature = "dtype-datetime", feature = "dtype-date"))]
 use polars_time::chunkedarray::utf8::Pattern;
@@ -34,25 +34,25 @@ impl PrimitiveParser for Float64Type {
 impl PrimitiveParser for UInt32Type {
     #[inline]
     fn parse(bytes: &[u8]) -> Option<u32> {
-        lexical::parse(bytes).ok()
+        atoi_simd::parse(bytes).ok()
     }
 }
 impl PrimitiveParser for UInt64Type {
     #[inline]
     fn parse(bytes: &[u8]) -> Option<u64> {
-        lexical::parse(bytes).ok()
+        atoi_simd::parse(bytes).ok()
     }
 }
 impl PrimitiveParser for Int32Type {
     #[inline]
     fn parse(bytes: &[u8]) -> Option<i32> {
-        lexical::parse(bytes).ok()
+        atoi_simd::parse(bytes).ok()
     }
 }
 impl PrimitiveParser for Int64Type {
     #[inline]
     fn parse(bytes: &[u8]) -> Option<i64> {
-        lexical::parse(bytes).ok()
+        atoi_simd::parse(bytes).ok()
     }
 }
 
@@ -422,14 +422,18 @@ where
         // Safety:
         // we just checked it is ascii
         unsafe { std::str::from_utf8_unchecked(bytes) }
-    } else if ignore_errors {
-        buf.builder.append_null();
-        return Ok(());
-    } else if !ignore_errors && std::str::from_utf8(bytes).is_err() {
-        polars_bail!(ComputeError: "invalid utf-8 sequence");
     } else {
-        buf.builder.append_null();
-        return Ok(());
+        match std::str::from_utf8(bytes) {
+            Ok(val) => val,
+            Err(_) => {
+                if ignore_errors {
+                    buf.builder.append_null();
+                    return Ok(());
+                } else {
+                    polars_bail!(ComputeError: "invalid utf-8 sequence");
+                }
+            },
+        }
     };
 
     let pattern = match &buf.compiled {
@@ -437,8 +441,12 @@ where
         None => match infer_pattern_single(val) {
             Some(pattern) => pattern,
             None => {
-                buf.builder.append_null();
-                return Ok(());
+                if ignore_errors {
+                    buf.builder.append_null();
+                    return Ok(());
+                } else {
+                    polars_bail!(ComputeError: "could not find a 'date/datetime' pattern for {}", val)
+                }
             },
         },
     };
@@ -449,9 +457,13 @@ where
             buf.builder.append_option(parsed);
             Ok(())
         },
-        Err(_) => {
-            buf.builder.append_null();
-            Ok(())
+        Err(err) => {
+            if ignore_errors {
+                buf.builder.append_null();
+                Ok(())
+            } else {
+                Err(err)
+            }
         },
     }
 }

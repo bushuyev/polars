@@ -5,7 +5,10 @@ use polars_core::series::unstable::UnstableSeries;
 use super::*;
 
 impl<'a> AggregationContext<'a> {
-    pub(super) fn iter_groups(
+    /// # Safety
+    /// The lifetime of [UnstableSeries] is bound to the iterator. Keeping it alive
+    /// longer than the iterator is UB.
+    pub(super) unsafe fn iter_groups(
         &mut self,
         keep_names: bool,
     ) -> Box<dyn Iterator<Item = Option<UnstableSeries<'_>>> + '_> {
@@ -24,7 +27,7 @@ impl<'a> AggregationContext<'a> {
                     ))
                 }
             },
-            AggState::AggregatedFlat(_) => {
+            AggState::AggregatedScalar(_) => {
                 self.groups();
                 let s = self.series();
                 let name = if keep_names { s.name() } else { "" };

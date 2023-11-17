@@ -10,6 +10,7 @@ from polars.utils._parse_expr_input import (
     parse_as_list_of_expressions,
 )
 from polars.utils._wrap import wrap_expr
+from polars.utils.deprecation import rename_use_earliest_to_ambiguous
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     import polars.polars as plr
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from typing import Literal
 
     from polars import Expr, Series
-    from polars.type_aliases import IntoExpr, SchemaDict, TimeUnit
+    from polars.type_aliases import Ambiguous, IntoExpr, SchemaDict, TimeUnit
 
 
 def datetime_(
@@ -34,6 +35,7 @@ def datetime_(
     time_unit: TimeUnit = "us",
     time_zone: str | None = None,
     use_earliest: bool | None = None,
+    ambiguous: Ambiguous | Expr = "raise",
 ) -> Expr:
     """
     Create a Polars literal expression of type Datetime.
@@ -61,9 +63,18 @@ def datetime_(
     use_earliest
         Determine how to deal with ambiguous datetimes:
 
-        - ``None`` (default): raise
-        - ``True``: use the earliest datetime
-        - ``False``: use the latest datetime
+        - `None` (default): raise
+        - `True`: use the earliest datetime
+        - `False`: use the latest datetime
+
+        .. deprecated:: 0.19.0
+            Use `ambiguous` instead
+    ambiguous
+        Determine how to deal with ambiguous datetimes:
+
+        - `'raise'` (default): raise
+        - `'earliest'`: use the earliest datetime
+        - `'latest'`: use the latest datetime
 
 
     Returns
@@ -72,6 +83,9 @@ def datetime_(
         Expression of data type :class:`Datetime`.
 
     """
+    ambiguous = parse_as_expression(
+        rename_use_earliest_to_ambiguous(use_earliest, ambiguous), str_as_lit=True
+    )
     year_expr = parse_as_expression(year)
     month_expr = parse_as_expression(month)
     day_expr = parse_as_expression(day)
@@ -96,7 +110,7 @@ def datetime_(
             microsecond,
             time_unit,
             time_zone,
-            use_earliest,
+            ambiguous,
         )
     )
 
@@ -163,22 +177,53 @@ def time_(
 
 def duration(
     *,
-    days: Expr | str | int | None = None,
-    seconds: Expr | str | int | None = None,
-    nanoseconds: Expr | str | int | None = None,
-    microseconds: Expr | str | int | None = None,
-    milliseconds: Expr | str | int | None = None,
-    minutes: Expr | str | int | None = None,
-    hours: Expr | str | int | None = None,
     weeks: Expr | str | int | None = None,
+    days: Expr | str | int | None = None,
+    hours: Expr | str | int | None = None,
+    minutes: Expr | str | int | None = None,
+    seconds: Expr | str | int | None = None,
+    milliseconds: Expr | str | int | None = None,
+    microseconds: Expr | str | int | None = None,
+    nanoseconds: Expr | str | int | None = None,
+    time_unit: TimeUnit = "us",
 ) -> Expr:
     """
     Create polars `Duration` from distinct time components.
+
+    Parameters
+    ----------
+    weeks
+        Number of weeks.
+    days
+        Number of days.
+    hours
+        Number of hours.
+    minutes
+        Number of minutes.
+    seconds
+        Number of seconds.
+    milliseconds
+        Number of milliseconds.
+    microseconds
+        Number of microseconds.
+    nanoseconds
+        Number of nanoseconds.
+    time_unit : {'us', 'ms', 'ns'}
+        Time unit of the resulting expression.
 
     Returns
     -------
     Expr
         Expression of data type :class:`Duration`.
+
+    Notes
+    -----
+    A `duration` represents a fixed amount of time. For example,
+    `pl.duration(days=1)` means "exactly 24 hours". By contrast,
+    `Expr.dt.offset_by('1d')` means "1 calendar day", which could sometimes be
+    23 hours or 25 hours depending on Daylight Savings Time.
+    For non-fixed durations such as "calendar month" or "calendar day",
+    please use :meth:`polars.Expr.dt.offset_by` instead.
 
     Examples
     --------
@@ -189,7 +234,7 @@ def duration(
     ...         "add": [1, 2],
     ...     }
     ... )
-    >>> print(df)
+    >>> df
     shape: (2, 2)
     ┌─────────────────────┬─────┐
     │ dt                  ┆ add │
@@ -218,7 +263,36 @@ def duration(
     │ 2022-01-16 00:00:00 ┆ 2022-01-04 00:00:00 ┆ 2022-01-02 00:00:02 ┆ 2022-01-02 00:00:00.002 ┆ 2022-01-02 02:00:00 │
     └─────────────────────┴─────────────────────┴─────────────────────┴─────────────────────────┴─────────────────────┘
 
+    If you need to add non-fixed durations, you should use :meth:`polars.Expr.dt.offset_by` instead:
+
+    >>> with pl.Config(tbl_width_chars=120):
+    ...     df.select(
+    ...         add_calendar_days=pl.col("dt").dt.offset_by(
+    ...             pl.format("{}d", pl.col("add"))
+    ...         ),
+    ...         add_calendar_months=pl.col("dt").dt.offset_by(
+    ...             pl.format("{}mo", pl.col("add"))
+    ...         ),
+    ...         add_calendar_years=pl.col("dt").dt.offset_by(
+    ...             pl.format("{}y", pl.col("add"))
+    ...         ),
+    ...     )
+    ...
+    shape: (2, 3)
+    ┌─────────────────────┬─────────────────────┬─────────────────────┐
+    │ add_calendar_days   ┆ add_calendar_months ┆ add_calendar_years  │
+    │ ---                 ┆ ---                 ┆ ---                 │
+    │ datetime[μs]        ┆ datetime[μs]        ┆ datetime[μs]        │
+    ╞═════════════════════╪═════════════════════╪═════════════════════╡
+    │ 2022-01-02 00:00:00 ┆ 2022-02-01 00:00:00 ┆ 2023-01-01 00:00:00 │
+    │ 2022-01-04 00:00:00 ┆ 2022-03-02 00:00:00 ┆ 2024-01-02 00:00:00 │
+    └─────────────────────┴─────────────────────┴─────────────────────┘
+
     """  # noqa: W505
+    if weeks is not None:
+        weeks = parse_as_expression(weeks)
+    if days is not None:
+        days = parse_as_expression(days)
     if hours is not None:
         hours = parse_as_expression(hours)
     if minutes is not None:
@@ -231,21 +305,18 @@ def duration(
         microseconds = parse_as_expression(microseconds)
     if nanoseconds is not None:
         nanoseconds = parse_as_expression(nanoseconds)
-    if days is not None:
-        days = parse_as_expression(days)
-    if weeks is not None:
-        weeks = parse_as_expression(weeks)
 
     return wrap_expr(
         plr.duration(
-            days,
-            seconds,
-            nanoseconds,
-            microseconds,
-            milliseconds,
-            minutes,
-            hours,
             weeks,
+            days,
+            hours,
+            minutes,
+            seconds,
+            milliseconds,
+            microseconds,
+            nanoseconds,
+            time_unit,
         )
     )
 
@@ -342,7 +413,7 @@ def struct(
         Optional schema that explicitly defines the struct field dtypes. If no columns
         or expressions are provided, schema keys are used to define columns.
     eager
-        Evaluate immediately and return a ``Series``. If set to ``False`` (default),
+        Evaluate immediately and return a `Series`. If set to `False` (default),
         return an expression instead.
     **named_exprs
         Additional columns to collect into the struct column, specified as keyword
@@ -350,7 +421,7 @@ def struct(
 
     Examples
     --------
-    Collect all columns of a dataframe into a struct by passing ``pl.all()``.
+    Collect all columns of a dataframe into a struct by passing `pl.all()`.
 
     >>> df = pl.DataFrame(
     ...     {
@@ -388,7 +459,7 @@ def struct(
     Use keyword arguments to easily name each struct field.
 
     >>> df.select(pl.struct(p="int", q="bool").alias("my_struct")).schema
-    {'my_struct': Struct([Field('p', Int64), Field('q', Boolean)])}
+    OrderedDict({'my_struct': Struct([Field('p', Int64), Field('q', Boolean)])})
 
     """
     pyexprs = parse_as_list_of_expressions(*exprs, **named_exprs)
@@ -423,7 +494,7 @@ def concat_str(
     exprs
         Columns to concatenate into a single string column. Accepts expression input.
         Strings are parsed as column names, other non-expression inputs are parsed as
-        literals. Non-``Utf8`` columns are cast to ``Utf8``.
+        literals. Non-`Utf8` columns are cast to `Utf8`.
     *more_exprs
         Additional columns to concatenate into a single string column, specified as
         positional arguments.

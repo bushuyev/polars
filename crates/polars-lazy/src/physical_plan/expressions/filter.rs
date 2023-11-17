@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use polars_arrow::is_valid::IsValid;
-use polars_core::frame::groupby::GroupsProxy;
+use arrow::legacy::is_valid::IsValid;
+use polars_core::frame::group_by::GroupsProxy;
 use polars_core::prelude::*;
 use polars_core::POOL;
+use polars_utils::idx_vec::IdxVec;
 use rayon::prelude::*;
 
 use crate::physical_plan::state::ExecutionState;
@@ -49,18 +50,21 @@ impl PhysicalExpr for FilterExpr {
         let (mut ac_s, mut ac_predicate) = (ac_s?, ac_predicate?);
 
         if ac_predicate.is_aggregated() || ac_s.is_aggregated() {
-            let preds = ac_predicate.iter_groups(false);
+            // SAFETY: unstable series never lives longer than the iterator.
+            let preds = unsafe { ac_predicate.iter_groups(false) };
             let s = ac_s.aggregated();
             let ca = s.list()?;
-            let mut out = ca
-                .amortized_iter()
-                .zip(preds)
-                .map(|(opt_s, opt_pred)| match (opt_s, opt_pred) {
-                    (Some(s), Some(pred)) => s.as_ref().filter(pred.as_ref().bool()?).map(Some),
-                    _ => Ok(None),
-                })
-                .collect::<PolarsResult<ListChunked>>()?;
-            out.rename(s.name());
+            // SAFETY: unstable series never lives longer than the iterator.
+            let out = unsafe {
+                ca.amortized_iter()
+                    .zip(preds)
+                    .map(|(opt_s, opt_pred)| match (opt_s, opt_pred) {
+                        (Some(s), Some(pred)) => s.as_ref().filter(pred.as_ref().bool()?).map(Some),
+                        _ => Ok(None),
+                    })
+                    .collect::<PolarsResult<ListChunked>>()?
+                    .with_name(s.name())
+            };
             ac_s.with_series(out.into_series(), true, Some(&self.expr))?;
             ac_s.update_groups = WithSeriesLen;
             Ok(ac_s)
@@ -69,12 +73,11 @@ impl PhysicalExpr for FilterExpr {
             let predicate_s = ac_predicate.flat_naive();
             let predicate = predicate_s.bool()?;
 
-            // all values true don't do anything
-            if predicate.all() {
+            // All values true - don't do anything.
+            if let Some(true) = predicate.all_kleene() {
                 return Ok(ac_s);
             }
-            // all values false
-            // create empty groups
+            // All values false - create empty groups.
             let groups = if !predicate.any() {
                 let groups = groups.iter().map(|gi| [gi.first(), 0]).collect::<Vec<_>>();
                 GroupsProxy::Slice {
@@ -82,7 +85,7 @@ impl PhysicalExpr for FilterExpr {
                     rolling: false,
                 }
             }
-            // filter the indexes that are true
+            // Filter the indexes that are true.
             else {
                 let predicate = predicate.rechunk();
                 let predicate = predicate.downcast_iter().next().unwrap();
@@ -92,17 +95,13 @@ impl PhysicalExpr for FilterExpr {
                             let groups = groups
                                 .par_iter()
                                 .map(|(first, idx)| unsafe {
-                                    let idx: Vec<IdxSize> = idx
+                                    let idx: IdxVec = idx
                                         .iter()
-                                        // Safety:
-                                        // just checked bounds in short circuited lhs
-                                        .filter_map(|i| {
-                                            match predicate.value(*i as usize)
+                                        .copied()
+                                        .filter(|i| {
+                                            // SAFETY: just checked bounds in short circuited lhs.
+                                            predicate.value(*i as usize)
                                                 && predicate.is_valid_unchecked(*i as usize)
-                                            {
-                                                true => Some(*i),
-                                                _ => None,
-                                            }
                                         })
                                         .collect();
 
@@ -116,10 +115,9 @@ impl PhysicalExpr for FilterExpr {
                             let groups = groups
                                 .par_iter()
                                 .map(|&[first, len]| unsafe {
-                                    let idx: Vec<IdxSize> = (first..first + len)
-                                        // Safety:
-                                        // just checked bounds in short circuited lhs
+                                    let idx: IdxVec = (first..first + len)
                                         .filter(|&i| {
+                                            // SAFETY: just checked bounds in short circuited lhs
                                             predicate.value(i as usize)
                                                 && predicate.is_valid_unchecked(i as usize)
                                         })
@@ -141,9 +139,5 @@ impl PhysicalExpr for FilterExpr {
 
     fn to_field(&self, input_schema: &Schema) -> PolarsResult<Field> {
         self.input.to_field(input_schema)
-    }
-
-    fn is_valid_aggregation(&self) -> bool {
-        self.input.is_valid_aggregation()
     }
 }

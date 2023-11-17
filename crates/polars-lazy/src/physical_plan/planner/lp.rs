@@ -1,5 +1,6 @@
 use polars_core::prelude::*;
 use polars_core::POOL;
+use polars_plan::global::_set_n_rows_for_scan;
 
 use super::super::executors::{self, Executor};
 use super::*;
@@ -12,17 +13,17 @@ fn partitionable_gb(
     expr_arena: &Arena<AExpr>,
     apply: &Option<Arc<dyn DataFrameUdf>>,
 ) -> bool {
-    // We first check if we can partition the groupby on the latest moment.
+    // We first check if we can partition the group_by on the latest moment.
     let mut partitionable = true;
 
     // checks:
-    //      1. complex expressions in the groupby itself are also not partitionable
+    //      1. complex expressions in the group_by itself are also not partitionable
     //          in this case anything more than col("foo")
     //      2. a custom function cannot be partitioned
     //      3. we don't bother with more than 2 keys, as the cardinality likely explodes
     //         by the combinations
     if !keys.is_empty() && keys.len() < 3 && apply.is_none() {
-        // complex expressions in the groupby itself are also not partitionable
+        // complex expressions in the group_by itself are also not partitionable
         // in this case anything more than col("foo")
         for key in keys {
             if (expr_arena).iter(*key).count() > 1 {
@@ -93,7 +94,7 @@ fn partitionable_gb(
                                         )
                         },
                         Function {input, options, ..} => {
-                            matches!(options.collect_groups, ApplyOptions::ApplyFlat) && input.len() == 1 &&
+                            matches!(options.collect_groups, ApplyOptions::ElementWise) && input.len() == 1 &&
                                 !has_aggregation(input[0])
                         }
                         BinaryExpr {left, right, ..} => {
@@ -150,9 +151,20 @@ pub fn create_physical_plan(
     match logical_plan {
         #[cfg(feature = "python")]
         PythonScan { options, .. } => Ok(Box::new(executors::PythonScanExec { options })),
-        FileSink { .. } => panic!(
-            "sink_parquet not yet supported in standard engine. Use 'collect().write_parquet()'"
-        ),
+        Sink { payload, .. } => match payload {
+            SinkType::Memory => {
+                polars_bail!(InvalidOperation: "memory sink not supported in the standard engine")
+            },
+            SinkType::File { file_type, .. } => {
+                polars_bail!(InvalidOperation:
+                    "sink_{file_type:?} not yet supported in standard engine. Use 'collect().write_parquet()'"
+                )
+            },
+            #[cfg(feature = "cloud")]
+            SinkType::Cloud { .. } => {
+                polars_bail!(InvalidOperation: "cloud sink not supported in standard engine.")
+            },
+        },
         Union { inputs, options } => {
             let inputs = inputs
                 .into_iter()
@@ -165,24 +177,33 @@ pub fn create_physical_plan(
             Ok(Box::new(executors::SliceExec { input, offset, len }))
         },
         Selection { input, predicate } => {
+            let input_schema = lp_arena.get(input).schema(lp_arena).into_owned();
             let input = create_physical_plan(input, lp_arena, expr_arena)?;
             let mut state = ExpressionConversionState::default();
-            let predicate =
-                create_physical_expr(predicate, Context::Default, expr_arena, None, &mut state)?;
+            let predicate = create_physical_expr(
+                predicate,
+                Context::Default,
+                expr_arena,
+                Some(&input_schema),
+                &mut state,
+            )?;
             Ok(Box::new(executors::FilterExec::new(
                 predicate,
                 input,
                 state.has_windows,
             )))
         },
+        #[allow(unused_variables)]
         Scan {
-            path,
+            paths,
             file_info,
             output_schema,
             scan_type,
             predicate,
-            file_options,
+            mut file_options,
         } => {
+            file_options.n_rows = _set_n_rows_for_scan(file_options.n_rows);
+            let mut state = ExpressionConversionState::default();
             let predicate = predicate
                 .map(|pred| {
                     create_physical_expr(
@@ -190,7 +211,7 @@ pub fn create_physical_plan(
                         Context::Default,
                         expr_arena,
                         output_schema.as_ref(),
-                        &mut Default::default(),
+                        &mut state,
                     )
                 })
                 .map_or(Ok(None), |v| v.map(Some))?;
@@ -199,33 +220,53 @@ pub fn create_physical_plan(
                 #[cfg(feature = "csv")]
                 FileScan::Csv {
                     options: csv_options,
-                } => Ok(Box::new(executors::CsvExec {
-                    path,
-                    schema: file_info.schema,
-                    options: csv_options,
-                    predicate,
-                    file_options,
-                })),
+                } => {
+                    assert_eq!(paths.len(), 1);
+                    let path = paths[0].clone();
+                    Ok(Box::new(executors::CsvExec {
+                        path,
+                        schema: file_info.schema,
+                        options: csv_options,
+                        predicate,
+                        file_options,
+                    }))
+                },
                 #[cfg(feature = "ipc")]
-                FileScan::Ipc { options } => Ok(Box::new(executors::IpcExec {
-                    path,
-                    schema: file_info.schema,
-                    predicate,
-                    options,
-                    file_options,
-                })),
+                FileScan::Ipc { options } => {
+                    assert_eq!(paths.len(), 1);
+                    let path = paths[0].clone();
+                    Ok(Box::new(executors::IpcExec {
+                        path,
+                        schema: file_info.schema,
+                        predicate,
+                        options,
+                        file_options,
+                    }))
+                },
                 #[cfg(feature = "parquet")]
                 FileScan::Parquet {
                     options,
                     cloud_options,
+                    metadata,
                 } => Ok(Box::new(executors::ParquetExec::new(
-                    path,
-                    file_info.schema,
+                    paths,
+                    file_info,
                     predicate,
                     options,
                     cloud_options,
                     file_options,
+                    metadata,
                 ))),
+                FileScan::Anonymous { function, .. } => {
+                    Ok(Box::new(executors::AnonymousScanExec {
+                        function,
+                        predicate,
+                        file_options,
+                        file_info,
+                        output_schema,
+                        predicate_has_windows: state.has_windows,
+                    }))
+                },
             }
         },
         Projection {
@@ -263,34 +304,6 @@ pub fn create_physical_plan(
                 options,
             }))
         },
-        LocalProjection {
-            expr,
-            input,
-            schema: _schema,
-            ..
-        } => {
-            let input_schema = lp_arena.get(input).schema(lp_arena).into_owned();
-
-            let input = create_physical_plan(input, lp_arena, expr_arena)?;
-            let mut state = ExpressionConversionState::new(POOL.current_num_threads() > expr.len());
-            let phys_expr = create_physical_expressions(
-                &expr,
-                Context::Default,
-                expr_arena,
-                Some(&input_schema),
-                &mut state,
-            )?;
-            Ok(Box::new(executors::ProjectionExec {
-                input,
-                cse_exprs: vec![],
-                expr: phys_expr,
-                has_windows: state.has_windows,
-                input_schema,
-                #[cfg(test)]
-                schema: _schema,
-                options: Default::default(),
-            }))
-        },
         DataFrameScan {
             df,
             projection,
@@ -314,33 +327,6 @@ pub fn create_physical_plan(
                 df,
                 projection,
                 selection,
-                predicate_has_windows: state.has_windows,
-            }))
-        },
-        AnonymousScan {
-            function,
-            predicate,
-            options,
-            output_schema,
-            ..
-        } => {
-            let mut state = ExpressionConversionState::default();
-            let options = Arc::try_unwrap(options).unwrap_or_else(|options| (*options).clone());
-            let predicate = predicate
-                .map(|pred| {
-                    create_physical_expr(
-                        pred,
-                        Context::Default,
-                        expr_arena,
-                        output_schema.as_ref(),
-                        &mut state,
-                    )
-                })
-                .map_or(Ok(None), |v| v.map(Some))?;
-            Ok(Box::new(executors::AnonymousScanExec {
-                function,
-                predicate,
-                options,
                 predicate_has_windows: state.has_windows,
             }))
         },
@@ -399,7 +385,7 @@ pub fn create_physical_plan(
             )?;
 
             let _slice = options.slice;
-            #[cfg(feature = "dynamic_groupby")]
+            #[cfg(feature = "dynamic_group_by")]
             if let Some(options) = options.dynamic {
                 let input = create_physical_plan(input, lp_arena, expr_arena)?;
                 return Ok(Box::new(executors::GroupByDynamicExec {
@@ -413,7 +399,7 @@ pub fn create_physical_plan(
                 }));
             }
 
-            #[cfg(feature = "dynamic_groupby")]
+            #[cfg(feature = "dynamic_group_by")]
             if let Some(options) = options.rolling {
                 let input = create_physical_plan(input, lp_arena, expr_arena)?;
                 return Ok(Box::new(executors::GroupByRollingExec {
@@ -427,7 +413,7 @@ pub fn create_physical_plan(
                 }));
             }
 
-            // We first check if we can partition the groupby on the latest moment.
+            // We first check if we can partition the group_by on the latest moment.
             let partitionable = partitionable_gb(&keys, &aggs, &input_schema, expr_arena, &apply);
             if partitionable {
                 let from_partitioned_ds = (&*lp_arena).iter(input).any(|(_, lp)| {

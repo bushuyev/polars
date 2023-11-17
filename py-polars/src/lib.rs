@@ -1,6 +1,7 @@
 #![feature(vec_into_raw_parts)]
-#![allow(clippy::nonstandard_macro_braces)] // needed because clippy does not understand proc macro of pyo3
+#![allow(clippy::nonstandard_macro_braces)] // Needed because clippy does not understand proc macro of PyO3
 #![allow(clippy::transmute_undefined_repr)]
+#![allow(clippy::too_many_arguments)] // Python functions can have many arguments due to default arguments
 extern crate polars as polars_rs;
 
 #[cfg(feature = "build_info")]
@@ -12,7 +13,6 @@ extern crate pyo3_built;
 mod build {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
-pub mod apply;
 pub mod arrow_interop;
 #[cfg(feature = "csv")]
 mod batched_csv;
@@ -26,6 +26,7 @@ pub mod functions;
 pub(crate) mod gil_once_cell;
 pub mod lazyframe;
 pub mod lazygroupby;
+pub mod map;
 #[cfg(feature = "object")]
 mod object;
 #[cfg(feature = "object")]
@@ -50,10 +51,11 @@ use pyo3::wrap_pyfunction;
 use crate::conversion::Wrap;
 use crate::dataframe::PyDataFrame;
 use crate::error::{
-    ArrowErrorException, ColumnNotFoundError, ComputeError, DuplicateError, InvalidOperationError,
-    NoDataError, PyPolarsErr, SchemaError, SchemaFieldNotFoundError, StructFieldNotFoundError,
+    ColumnNotFoundError, ComputeError, DuplicateError, InvalidOperationError, NoDataError,
+    OutOfBoundsError, PyPolarsErr, SchemaError, SchemaFieldNotFoundError, StructFieldNotFoundError,
 };
 use crate::expr::PyExpr;
+use crate::functions::string_cache::PyStringCacheHolder;
 use crate::lazyframe::PyLazyFrame;
 use crate::lazygroupby::PyLazyGroupBy;
 use crate::series::PySeries;
@@ -74,6 +76,7 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyLazyFrame>().unwrap();
     m.add_class::<PyLazyGroupBy>().unwrap();
     m.add_class::<PyExpr>().unwrap();
+    m.add_class::<PyStringCacheHolder>().unwrap();
     #[cfg(feature = "csv")]
     m.add_class::<batched_csv::PyBatchedCsv>().unwrap();
     #[cfg(feature = "sql")]
@@ -84,9 +87,9 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::eager::concat_series))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::eager::diag_concat_df))
+    m.add_wrapped(wrap_pyfunction!(functions::eager::concat_df_diagonal))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::eager::hor_concat_df))
+    m.add_wrapped(wrap_pyfunction!(functions::eager::concat_df_horizontal))
         .unwrap();
 
     // Functions - range
@@ -97,6 +100,10 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(functions::range::date_range))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::range::date_ranges))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::range::datetime_range))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::range::datetime_ranges))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::range::time_range))
         .unwrap();
@@ -128,6 +135,8 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::collect_all))
         .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::lazy::collect_all_with_callback))
+        .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::cols))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::concat_lf))
@@ -140,19 +149,21 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::cov))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::lazy::cumfold))
+    m.add_wrapped(wrap_pyfunction!(functions::lazy::cum_fold))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::lazy::cumreduce))
+    m.add_wrapped(wrap_pyfunction!(functions::lazy::cum_reduce))
         .unwrap();
+    #[cfg(feature = "trigonometry")]
     m.add_wrapped(wrap_pyfunction!(functions::lazy::arctan2))
         .unwrap();
+    #[cfg(feature = "trigonometry")]
     m.add_wrapped(wrap_pyfunction!(functions::lazy::arctan2d))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::datetime))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::lazy::diag_concat_lf))
-        .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::concat_expr))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::lazy::concat_lf_diagonal))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::lazy::dtype_cols))
         .unwrap();
@@ -202,13 +213,39 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::meta::threadpool_size))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::meta::enable_string_cache))
+    m.add_wrapped(wrap_pyfunction!(
+        functions::string_cache::enable_string_cache
+    ))
+    .unwrap();
+    m.add_wrapped(wrap_pyfunction!(
+        functions::string_cache::disable_string_cache
+    ))
+    .unwrap();
+    m.add_wrapped(wrap_pyfunction!(
+        functions::string_cache::using_string_cache
+    ))
+    .unwrap();
+
+    // Numeric formatting
+    m.add_wrapped(wrap_pyfunction!(functions::meta::get_thousands_separator))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::meta::using_string_cache))
+    m.add_wrapped(wrap_pyfunction!(functions::meta::set_thousands_separator))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::meta::get_float_fmt))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::meta::get_float_precision))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::meta::get_decimal_separator))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::meta::get_trim_decimal_zeros))
         .unwrap();
     m.add_wrapped(wrap_pyfunction!(functions::meta::set_float_fmt))
         .unwrap();
-    m.add_wrapped(wrap_pyfunction!(functions::meta::get_float_fmt))
+    m.add_wrapped(wrap_pyfunction!(functions::meta::set_float_precision))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::meta::set_decimal_separator))
+        .unwrap();
+    m.add_wrapped(wrap_pyfunction!(functions::meta::set_trim_decimal_zeros))
         .unwrap();
 
     // Functions - misc
@@ -223,8 +260,6 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
         .unwrap();
 
     // Exceptions
-    m.add("ArrowError", py.get_type::<ArrowErrorException>())
-        .unwrap();
     m.add("ColumnNotFoundError", py.get_type::<ColumnNotFoundError>())
         .unwrap();
     m.add("ComputeError", py.get_type::<ComputeError>())
@@ -237,6 +272,8 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     )
     .unwrap();
     m.add("NoDataError", py.get_type::<NoDataError>()).unwrap();
+    m.add("OutOfBoundsError", py.get_type::<OutOfBoundsError>())
+        .unwrap();
     m.add("PolarsPanicError", py.get_type::<PanicException>())
         .unwrap();
     m.add("SchemaError", py.get_type::<SchemaError>()).unwrap();

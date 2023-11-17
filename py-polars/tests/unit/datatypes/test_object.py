@@ -29,7 +29,7 @@ def test_object_in_struct() -> None:
     np_b = np.array([4, 5, 6])
     df = pl.DataFrame({"A": [1, 2], "B": pl.Series([np_a, np_b], dtype=pl.Object)})
 
-    out = df.select([pl.struct(["B"]).alias("foo")]).to_dict(False)
+    out = df.select([pl.struct(["B"]).alias("foo")]).to_dict(as_series=False)
     arr = out["foo"][0]["B"]
     assert isinstance(arr, np.ndarray)
     assert (arr == np_a).sum() == 3
@@ -49,12 +49,14 @@ def test_empty_sort() -> None:
         orient="row",
     )
     df_filtered = df.filter(
-        pl.col("blob").apply(
+        pl.col("blob").map_elements(
             lambda blob: blob["name"] == "baz", return_dtype=pl.Boolean
         )
     )
     df_filtered.sort(
-        pl.col("blob").apply(lambda blob: blob["sort_key"], return_dtype=pl.Int64)
+        pl.col("blob").map_elements(
+            lambda blob: blob["sort_key"], return_dtype=pl.Int64
+        )
     )
 
 
@@ -77,7 +79,7 @@ def test_object_concat() -> None:
     catted = pl.concat([df1, df2])
     assert catted.shape == (6, 1)
     assert catted.dtypes == [pl.Object]
-    assert catted.to_dict(False) == {"a": [1, 2, 3, 1, 4, 3]}
+    assert catted.to_dict(as_series=False) == {"a": [1, 2, 3, 1, 4, 3]}
 
 
 def test_object_row_construction() -> None:
@@ -96,5 +98,5 @@ def test_object_row_construction() -> None:
 
 def test_object_apply_to_struct() -> None:
     s = pl.Series([0, 1, 2], dtype=pl.Object)
-    out = s.apply(lambda x: {"a": str(x), "b": x})
+    out = s.map_elements(lambda x: {"a": str(x), "b": x})
     assert out.dtype == pl.Struct([pl.Field("a", pl.Utf8), pl.Field("b", pl.Int64)])

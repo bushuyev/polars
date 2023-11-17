@@ -1,6 +1,7 @@
 use polars_core::prelude::*;
 #[cfg(feature = "moment")]
 use {
+    crate::series::ops::moment::MomentSeries,
     polars_core::export::num::{self, Float, FromPrimitive},
     polars_core::utils::with_unstable_series,
     std::ops::SubAssign,
@@ -20,7 +21,7 @@ where
     T::Native: Float + IsFloat + SubAssign + num::pow::Pow<T::Native, Output = T::Native>,
 {
     with_unstable_series(ca.dtype(), |us| {
-        ca.rolling_apply_float(window_size, |arr| {
+        ca.rolling_map_float(window_size, |arr| {
             let arr = unsafe { arr.chunks_mut().get_mut(0).unwrap() };
 
             us.with_array(arr, |us| {

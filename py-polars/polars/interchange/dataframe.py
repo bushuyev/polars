@@ -5,6 +5,8 @@ from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from polars.interchange.column import PolarsColumn
+from polars.interchange.protocol import CopyNotAllowedError
+from polars.interchange.protocol import DataFrame as InterchangeDataFrame
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -13,7 +15,7 @@ if TYPE_CHECKING:
     from polars import DataFrame
 
 
-class PolarsDataFrame:
+class PolarsDataFrame(InterchangeDataFrame):
     """
     A dataframe object backed by a Polars DataFrame.
 
@@ -22,17 +24,21 @@ class PolarsDataFrame:
     column
         The Polars DataFrame backing the dataframe object.
     allow_copy
-        Allow data to be copied during operations on this column. If set to ``False``,
+        Allow data to be copied during operations on this column. If set to `False`,
         a RuntimeError is raised if data would be copied.
 
     """
+
+    version = 0
 
     def __init__(self, df: DataFrame, *, allow_copy: bool = True):
         self._df = df
         self._allow_copy = allow_copy
 
     def __dataframe__(
-        self, nan_as_null: bool = False, allow_copy: bool = True
+        self,
+        nan_as_null: bool = False,  # noqa: FBT001
+        allow_copy: bool = True,  # noqa: FBT001
     ) -> PolarsDataFrame:
         """
         Construct a new dataframe object, potentially changing the parameters.
@@ -40,14 +46,14 @@ class PolarsDataFrame:
         Parameters
         ----------
         nan_as_null
-            Overwrite null values in the data with ``NaN``.
+            Overwrite null values in the data with `NaN`.
 
             .. warning::
                 This functionality has not been implemented and the parameter will be
                 removed in a future version.
-                Setting this to ``True`` will raise a ``NotImplementedError``.
+                Setting this to `True` will raise a `NotImplementedError`.
         allow_copy
-            Allow memory to be copied to perform the conversion. If set to ``False``,
+            Allow memory to be copied to perform the conversion. If set to `False`,
             causes conversions that are not zero-copy to fail.
 
         """
@@ -76,7 +82,7 @@ class PolarsDataFrame:
         """
         Return the number of chunks the dataframe consists of.
 
-        It is possible for a Polars dataframe to consist of columns with a varying
+        It is possible for a Polars DataFrame to consist of columns with a varying
         number of chunks. This method returns the number of chunks of the first
         column.
 
@@ -124,7 +130,7 @@ class PolarsDataFrame:
 
     def select_columns(self, indices: Sequence[int]) -> PolarsDataFrame:
         """
-        Create a new DataFrame by selecting a subset of columns by index.
+        Create a new dataframe by selecting a subset of columns by index.
 
         Parameters
         ----------
@@ -168,11 +174,11 @@ class PolarsDataFrame:
         ----------
         n_chunks
             The number of chunks to return. Must be a multiple of the number of chunks
-            in the dataframe. If set to ``None`` (default), returns all chunks.
+            in the dataframe. If set to `None` (default), returns all chunks.
 
         Notes
         -----
-        When the columns in the dataframe are chunked unevenly, or when ``n_chunks`` is
+        When the columns in the dataframe are chunked unevenly, or when `n_chunks` is
         higher than the number of chunks in the dataframe, a slice must be performed
         that is not on the chunk boundary. This will trigger some compute for columns
         that contain null values and boolean columns.
@@ -222,8 +228,8 @@ class PolarsDataFrame:
 
             if not all(x == 1 for x in chunk.n_chunks("all")):
                 if not self._allow_copy:
-                    raise RuntimeError(
-                        "unevenly chunked columns must be rechunked, which is not zero-copy"
+                    raise CopyNotAllowedError(
+                        "unevenly chunked columns must be rechunked"
                     )
                 chunk = chunk.rechunk()
 

@@ -4,7 +4,13 @@ from typing import TYPE_CHECKING
 
 from polars.datatypes import Categorical
 from polars.interchange.buffer import PolarsBuffer
-from polars.interchange.protocol import ColumnNullType, DtypeKind, Endianness
+from polars.interchange.protocol import (
+    Column,
+    ColumnNullType,
+    CopyNotAllowedError,
+    DtypeKind,
+    Endianness,
+)
 from polars.interchange.utils import polars_dtype_to_dtype
 from polars.utils._wrap import wrap_s
 
@@ -16,7 +22,7 @@ if TYPE_CHECKING:
     from polars.interchange.protocol import CategoricalDescription, ColumnBuffers, Dtype
 
 
-class PolarsColumn:
+class PolarsColumn(Column):
     """
     A column object backed by a Polars Series.
 
@@ -25,7 +31,7 @@ class PolarsColumn:
     column
         The Polars Series backing the column object.
     allow_copy
-        Allow data to be copied during operations on this column. If set to ``False``,
+        Allow data to be copied during operations on this column. If set to `False`,
         a RuntimeError will be raised if data would be copied.
 
     """
@@ -33,9 +39,8 @@ class PolarsColumn:
     def __init__(self, column: Series, *, allow_copy: bool = True):
         if column.dtype == Categorical and not column.cat.is_local():
             if not allow_copy:
-                raise RuntimeError(
-                    f"column {column.name!r} must be converted to a local categorical,"
-                    " which is not zero-copy"
+                raise CopyNotAllowedError(
+                    f"column {column.name!r} must be converted to a local categorical"
                 )
             column = column.cat.to_local()
 
@@ -113,7 +118,7 @@ class PolarsColumn:
 
         Notes
         -----
-        When ``n_chunks`` is higher than the number of chunks in the column, a slice
+        When `n_chunks` is higher than the number of chunks in the column, a slice
         must be performed that is not on the chunk boundary. This will trigger some
         compute if the column contains null values or if the column is of data type
         boolean.

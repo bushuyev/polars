@@ -25,17 +25,17 @@ def test_explode_multiple() -> None:
     assert_frame_equal(df.explode("a", "b"), expected)
 
 
-def test_groupby_flatten_list() -> None:
+def test_group_by_flatten_list() -> None:
     df = pl.DataFrame({"group": ["a", "b", "b"], "values": [[1, 2], [2, 3], [4]]})
-    result = df.groupby("group", maintain_order=True).agg(pl.col("values").flatten())
+    result = df.group_by("group", maintain_order=True).agg(pl.col("values").flatten())
 
     expected = pl.DataFrame({"group": ["a", "b"], "values": [[1, 2], [2, 3, 4]]})
     assert_frame_equal(result, expected)
 
 
-def test_groupby_flatten_string() -> None:
+def test_group_by_flatten_string() -> None:
     df = pl.DataFrame({"group": ["a", "b", "b"], "values": ["foo", "bar", "baz"]})
-    result = df.groupby("group", maintain_order=True).agg(
+    result = df.group_by("group", maintain_order=True).agg(
         pl.col("values").str.explode()
     )
 
@@ -82,7 +82,7 @@ def test_explode_empty_list_4003() -> None:
             {"id": 3, "nested": [2]},
         ]
     )
-    assert df.explode("nested").to_dict(False) == {
+    assert df.explode("nested").to_dict(as_series=False) == {
         "id": [1, 2, 3],
         "nested": [None, 1, 2],
     }
@@ -217,9 +217,9 @@ def test_explode_in_agg_context() -> None:
     assert (
         df.with_row_count("row_nr")
         .explode("idxs")
-        .groupby("row_nr")
+        .group_by("row_nr")
         .agg(pl.col("array").flatten())
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "row_nr": [0, 1, 2],
         "array": [[0.0, 3.5], [4.6, 0.0], [0.0, 7.8, 0.0, 0.0, 7.8, 0.0]],
     }
@@ -231,10 +231,13 @@ def test_explode_inner_lists_3985() -> None:
     ).lazy()
 
     assert (
-        df.groupby("id")
+        df.group_by("id")
         .agg(pl.col("categories"))
         .with_columns(pl.col("categories").list.eval(pl.element().list.explode()))
-    ).collect().to_dict(False) == {"id": [1], "categories": [["a", "b", "a", "c"]]}
+    ).collect().to_dict(as_series=False) == {
+        "id": [1],
+        "categories": [["a", "b", "a", "c"]],
+    }
 
 
 def test_list_struct_explode_6905() -> None:
@@ -291,7 +294,7 @@ def test_logical_explode() -> None:
             {"cats": ["Value1", "Value2", "Value1"]},
             schema_overrides={"cats": pl.Categorical},
         )
-        .groupby(1)
+        .group_by(1)
         .agg(pl.struct("cats"))
         .explode("cats")
         .unnest("cats")
@@ -309,9 +312,43 @@ def test_explode_inner_null() -> None:
 def test_explode_array() -> None:
     df = pl.LazyFrame(
         {"a": [[1, 2], [2, 3]], "b": [1, 2]},
-        schema_overrides={"a": pl.Array(2, inner=pl.Int64)},
+        schema_overrides={"a": pl.Array(inner=pl.Int64, width=2)},
     )
     expected = pl.DataFrame({"a": [1, 2, 2, 3], "b": [1, 1, 2, 2]})
     for ex in ("a", ~cs.integer()):
         out = df.explode(ex).collect()  # type: ignore[arg-type]
         assert_frame_equal(out, expected)
+
+
+def test_utf8_list_agg_explode() -> None:
+    df = pl.DataFrame({"a": [[None], ["b"]]})
+
+    df = df.select(
+        pl.col("a").list.eval(pl.element().filter(pl.element().is_not_null()))
+    )
+    assert not df["a"].flags["FAST_EXPLODE"]
+
+    df2 = pl.DataFrame({"a": [[], ["b"]]})
+
+    assert_frame_equal(df, df2)
+    assert_frame_equal(df.explode("a"), df2.explode("a"))
+
+
+def test_explode_null_struct() -> None:
+    df = [
+        {"col1": None},
+        {
+            "col1": [
+                {"field1": None, "field2": None, "field3": None},
+                {"field1": None, "field2": "some", "field3": "value"},
+            ]
+        },
+    ]
+
+    assert pl.DataFrame(df).explode("col1").to_dict(as_series=False) == {
+        "col1": [
+            {"field1": None, "field2": None, "field3": None},
+            {"field1": None, "field2": None, "field3": None},
+            {"field1": None, "field2": "some", "field3": "value"},
+        ]
+    }

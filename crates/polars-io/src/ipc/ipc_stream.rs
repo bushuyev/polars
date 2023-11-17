@@ -42,7 +42,7 @@ use arrow::io::ipc::{read, write};
 use polars_core::prelude::*;
 
 use crate::prelude::*;
-use crate::{finish_reader, ArrowReader, ArrowResult, WriterFactory};
+use crate::{finish_reader, ArrowReader, WriterFactory};
 
 /// Read Arrows Stream IPC format into a DataFrame
 ///
@@ -124,7 +124,7 @@ impl<R> ArrowReader for read::StreamReader<R>
 where
     R: Read,
 {
-    fn next_record_batch(&mut self) -> ArrowResult<Option<ArrowChunk>> {
+    fn next_record_batch(&mut self) -> PolarsResult<Option<ArrowChunk>> {
         self.next().map_or(Ok(None), |v| match v {
             Ok(stream_state) => match stream_state {
                 StreamState::Waiting => Ok(None),
@@ -237,17 +237,16 @@ fn fix_column_order(df: DataFrame, projection: Option<Vec<usize>>, row_count: bo
 #[must_use]
 pub struct IpcStreamWriter<W> {
     writer: W,
-    compression: Option<write::Compression>,
+    compression: Option<IpcCompression>,
 }
 
 use polars_core::frame::ArrowChunk;
-pub use write::Compression as IpcCompression;
 
 use crate::RowCount;
 
 impl<W> IpcStreamWriter<W> {
     /// Set the compression used. Defaults to None.
-    pub fn with_compression(mut self, compression: Option<write::Compression>) -> Self {
+    pub fn with_compression(mut self, compression: Option<IpcCompression>) -> Self {
         self.compression = compression;
         self
     }
@@ -268,7 +267,7 @@ where
         let mut ipc_stream_writer = write::StreamWriter::new(
             &mut self.writer,
             WriteOptions {
-                compression: self.compression,
+                compression: self.compression.map(|c| c.into()),
             },
         );
 
@@ -286,7 +285,7 @@ where
 }
 
 pub struct IpcStreamWriterOption {
-    compression: Option<write::Compression>,
+    compression: Option<IpcCompression>,
     extension: PathBuf,
 }
 
@@ -299,7 +298,7 @@ impl IpcStreamWriterOption {
     }
 
     /// Set the compression used. Defaults to None.
-    pub fn with_compression(mut self, compression: Option<write::Compression>) -> Self {
+    pub fn with_compression(mut self, compression: Option<IpcCompression>) -> Self {
         self.compression = compression;
         self
     }

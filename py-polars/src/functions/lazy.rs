@@ -5,11 +5,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyString};
 
-use crate::apply::lazy::binary_lambda;
 use crate::conversion::{get_lf, Wrap};
 use crate::expr::ToExprs;
+use crate::map::lazy::binary_lambda;
 use crate::prelude::{vec_extract_wrapped, DataType, DatetimeArgs, DurationArgs, ObjectValue};
-use crate::{apply, PyDataFrame, PyExpr, PyLazyFrame, PyPolarsErr, PySeries};
+use crate::{map, PyDataFrame, PyExpr, PyLazyFrame, PyPolarsErr, PySeries};
 
 macro_rules! set_unwrapped_or_0 {
     ($($var:ident),+ $(,)?) => {
@@ -71,7 +71,7 @@ pub fn arg_where(condition: PyExpr) -> PyExpr {
 #[pyfunction]
 pub fn as_struct(exprs: Vec<PyExpr>) -> PyExpr {
     let exprs = exprs.to_exprs();
-    dsl::as_struct(&exprs).into()
+    dsl::as_struct(exprs).into()
 }
 
 #[pyfunction]
@@ -102,6 +102,38 @@ pub fn collect_all(lfs: Vec<PyLazyFrame>, py: Python) -> PyResult<Vec<PyDataFram
     });
 
     Ok(out?)
+}
+
+#[pyfunction]
+pub fn collect_all_with_callback(lfs: Vec<PyLazyFrame>, lambda: PyObject, py: Python) {
+    use polars_core::utils::rayon::prelude::*;
+
+    py.allow_threads(|| {
+        polars_core::POOL.install(move || {
+            polars_core::POOL.spawn(move || {
+                let result = lfs
+                    .par_iter()
+                    .map(|lf| {
+                        let df = lf.ldf.clone().collect()?;
+                        Ok(PyDataFrame::new(df))
+                    })
+                    .collect::<polars_core::error::PolarsResult<Vec<_>>>()
+                    .map_err(PyPolarsErr::from);
+
+                Python::with_gil(|py| match result {
+                    Ok(dfs) => {
+                        lambda.call1(py, (dfs,)).map_err(|err| err.restore(py)).ok();
+                    },
+                    Err(err) => {
+                        lambda
+                            .call1(py, (PyErr::from(err).to_object(py),))
+                            .map_err(|err| err.restore(py))
+                            .ok();
+                    },
+                })
+            })
+        });
+    });
 }
 
 #[pyfunction]
@@ -156,39 +188,40 @@ pub fn count() -> PyExpr {
 }
 
 #[pyfunction]
-pub fn cov(a: PyExpr, b: PyExpr) -> PyExpr {
-    dsl::cov(a.inner, b.inner).into()
+pub fn cov(a: PyExpr, b: PyExpr, ddof: u8) -> PyExpr {
+    dsl::cov(a.inner, b.inner, ddof).into()
 }
 
 #[pyfunction]
+#[cfg(feature = "trigonometry")]
 pub fn arctan2(y: PyExpr, x: PyExpr) -> PyExpr {
     y.inner.arctan2(x.inner).into()
 }
 
 #[pyfunction]
+#[cfg(feature = "trigonometry")]
 pub fn arctan2d(y: PyExpr, x: PyExpr) -> PyExpr {
     y.inner.arctan2(x.inner).degrees().into()
 }
 
 #[pyfunction]
-pub fn cumfold(acc: PyExpr, lambda: PyObject, exprs: Vec<PyExpr>, include_init: bool) -> PyExpr {
+pub fn cum_fold(acc: PyExpr, lambda: PyObject, exprs: Vec<PyExpr>, include_init: bool) -> PyExpr {
     let exprs = exprs.to_exprs();
 
     let func = move |a: Series, b: Series| binary_lambda(&lambda, a, b);
-    dsl::cumfold_exprs(acc.inner, func, exprs, include_init).into()
+    dsl::cum_fold_exprs(acc.inner, func, exprs, include_init).into()
 }
 
 #[pyfunction]
-pub fn cumreduce(lambda: PyObject, exprs: Vec<PyExpr>) -> PyExpr {
+pub fn cum_reduce(lambda: PyObject, exprs: Vec<PyExpr>) -> PyExpr {
     let exprs = exprs.to_exprs();
 
     let func = move |a: Series, b: Series| binary_lambda(&lambda, a, b);
-    dsl::cumreduce_exprs(func, exprs).into()
+    dsl::cum_reduce_exprs(func, exprs).into()
 }
 
-#[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (year, month, day, hour=None, minute=None, second=None, microsecond=None, time_unit=Wrap(TimeUnit::Microseconds), time_zone=None, use_earliest=None))]
+#[pyo3(signature = (year, month, day, hour=None, minute=None, second=None, microsecond=None, time_unit=Wrap(TimeUnit::Microseconds), time_zone=None, ambiguous=None))]
 pub fn datetime(
     year: PyExpr,
     month: PyExpr,
@@ -199,14 +232,16 @@ pub fn datetime(
     microsecond: Option<PyExpr>,
     time_unit: Wrap<TimeUnit>,
     time_zone: Option<TimeZone>,
-    use_earliest: Option<bool>,
+    ambiguous: Option<PyExpr>,
 ) -> PyExpr {
     let year = year.inner;
     let month = month.inner;
     let day = day.inner;
     set_unwrapped_or_0!(hour, minute, second, microsecond);
+    let ambiguous = ambiguous
+        .map(|e| e.inner)
+        .unwrap_or(dsl::lit(String::from("raise")));
     let time_unit = time_unit.0;
-
     let args = DatetimeArgs {
         year,
         month,
@@ -217,13 +252,18 @@ pub fn datetime(
         microsecond,
         time_unit,
         time_zone,
-        use_earliest,
+        ambiguous,
     };
     dsl::datetime(args).into()
 }
 
 #[pyfunction]
-pub fn diag_concat_lf(lfs: &PyAny, rechunk: bool, parallel: bool) -> PyResult<PyLazyFrame> {
+pub fn concat_lf_diagonal(
+    lfs: &PyAny,
+    rechunk: bool,
+    parallel: bool,
+    to_supertypes: bool,
+) -> PyResult<PyLazyFrame> {
     let iter = lfs.iter()?;
 
     let lfs = iter
@@ -233,7 +273,15 @@ pub fn diag_concat_lf(lfs: &PyAny, rechunk: bool, parallel: bool) -> PyResult<Py
         })
         .collect::<PyResult<Vec<_>>>()?;
 
-    let lf = dsl::functions::diag_concat_lf(lfs, rechunk, parallel).map_err(PyPolarsErr::from)?;
+    let lf = dsl::functions::concat_lf_diagonal(
+        lfs,
+        UnionArgs {
+            rechunk,
+            parallel,
+            to_supertypes,
+        },
+    )
+    .map_err(PyPolarsErr::from)?;
     Ok(lf.into())
 }
 
@@ -250,37 +298,39 @@ pub fn dtype_cols(dtypes: Vec<Wrap<DataType>>) -> PyResult<PyExpr> {
     Ok(dsl::dtype_cols(dtypes).into())
 }
 
-#[allow(clippy::too_many_arguments)]
 #[pyfunction]
+#[pyo3(signature = (weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds, time_unit))]
 pub fn duration(
-    days: Option<PyExpr>,
-    seconds: Option<PyExpr>,
-    nanoseconds: Option<PyExpr>,
-    microseconds: Option<PyExpr>,
-    milliseconds: Option<PyExpr>,
-    minutes: Option<PyExpr>,
-    hours: Option<PyExpr>,
     weeks: Option<PyExpr>,
+    days: Option<PyExpr>,
+    hours: Option<PyExpr>,
+    minutes: Option<PyExpr>,
+    seconds: Option<PyExpr>,
+    milliseconds: Option<PyExpr>,
+    microseconds: Option<PyExpr>,
+    nanoseconds: Option<PyExpr>,
+    time_unit: Wrap<TimeUnit>,
 ) -> PyExpr {
     set_unwrapped_or_0!(
-        days,
-        seconds,
-        nanoseconds,
-        microseconds,
-        milliseconds,
-        minutes,
-        hours,
         weeks,
+        days,
+        hours,
+        minutes,
+        seconds,
+        milliseconds,
+        microseconds,
+        nanoseconds,
     );
     let args = DurationArgs {
-        days,
-        seconds,
-        nanoseconds,
-        microseconds,
-        milliseconds,
-        minutes,
-        hours,
         weeks,
+        days,
+        hours,
+        minutes,
+        seconds,
+        milliseconds,
+        microseconds,
+        nanoseconds,
+        time_unit: time_unit.0,
     };
     dsl::duration(args).into()
 }
@@ -352,23 +402,16 @@ pub fn lit(value: &PyAny, allow_object: bool) -> PyResult<PyExpr> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (pyexpr, lambda, output_type, apply_groups, returns_scalar))]
+#[pyo3(signature = (pyexpr, lambda, output_type, map_groups, returns_scalar))]
 pub fn map_mul(
     py: Python,
     pyexpr: Vec<PyExpr>,
     lambda: PyObject,
     output_type: Option<Wrap<DataType>>,
-    apply_groups: bool,
+    map_groups: bool,
     returns_scalar: bool,
 ) -> PyExpr {
-    apply::lazy::map_mul(
-        &pyexpr,
-        py,
-        lambda,
-        output_type,
-        apply_groups,
-        returns_scalar,
-    )
+    map::lazy::map_mul(&pyexpr, py, lambda, output_type, map_groups, returns_scalar)
 }
 
 #[pyfunction]

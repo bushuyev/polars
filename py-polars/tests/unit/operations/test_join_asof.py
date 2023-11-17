@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -6,6 +6,16 @@ import pytest
 
 import polars as pl
 from polars.testing import assert_frame_equal
+
+
+def test_asof_join_singular_right_11966() -> None:
+    df = pl.DataFrame({"id": [1, 2, 3], "time": [0.9, 2.1, 2.8]}).sort("time")
+    lookup = pl.DataFrame({"time": [2.0], "value": [100]}).sort("time")
+    joined = df.join_asof(lookup, on="time", strategy="nearest")
+    expected = pl.DataFrame(
+        {"id": [1, 2, 3], "time": [0.9, 2.1, 2.8], "value": [100, 100, 100]}
+    )
+    assert_frame_equal(joined, expected)
 
 
 def test_asof_join_inline_cast_6438() -> None:
@@ -37,7 +47,7 @@ def test_asof_join_inline_cast_6438() -> None:
 
     assert df_trades.join_asof(
         df_quotes, on=pl.col("time").cast(pl.Datetime("ns")).set_sorted(), by="stock"
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "time": [
             datetime(2020, 1, 1, 9, 1),
             datetime(2020, 1, 1, 9, 1),
@@ -54,7 +64,7 @@ def test_asof_join_projection_resolution_4606() -> None:
     a = pl.DataFrame({"a": [1], "b": [2], "c": [3]}).lazy()
     b = pl.DataFrame({"a": [1], "b": [2], "d": [4]}).lazy()
     joined_tbl = a.join_asof(b, on=pl.col("a").set_sorted(), by="b")
-    assert joined_tbl.groupby("a").agg(
+    assert joined_tbl.group_by("a").agg(
         [pl.col("c").sum().alias("c")]
     ).collect().columns == ["a", "c"]
 
@@ -154,13 +164,14 @@ def test_join_asof_mismatched_dtypes() -> None:
 def test_join_asof_floats() -> None:
     df1 = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": ["lrow1", "lrow2", "lrow3"]})
     df2 = pl.DataFrame({"a": [0.59, 1.49, 2.89], "b": ["rrow1", "rrow2", "rrow3"]})
-    assert df1.join_asof(df2, on=pl.col("a").set_sorted(), strategy="backward").to_dict(
-        False
-    ) == {
+
+    result = df1.join_asof(df2, on=pl.col("a").set_sorted(), strategy="backward")
+    expected = {
         "a": [1.0, 2.0, 3.0],
         "b": ["lrow1", "lrow2", "lrow3"],
         "b_right": ["rrow1", "rrow2", "rrow3"],
     }
+    assert result.to_dict(as_series=False) == expected
 
     # with by argument
     # 5740
@@ -173,7 +184,9 @@ def test_join_asof_floats() -> None:
             "c": ["x", "x", "x", "y", "y", "y", "y"],
         }
     ).with_columns(pl.col("val").alias("b"))
-    assert df1.join_asof(df2, on=pl.col("b").set_sorted(), by="c").to_dict(False) == {
+    assert df1.join_asof(df2, on=pl.col("b").set_sorted(), by="c").to_dict(
+        as_series=False
+    ) == {
         "b": [
             0.0,
             0.8333333333333334,
@@ -217,7 +230,7 @@ def test_join_asof_tolerance() -> None:
 
     assert df_trades.join_asof(
         df_quotes, on="time", by="stock", tolerance="2s"
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "time": [
             datetime(2020, 1, 1, 9, 0, 1),
             datetime(2020, 1, 1, 9, 0, 1),
@@ -231,7 +244,7 @@ def test_join_asof_tolerance() -> None:
 
     assert df_trades.join_asof(
         df_quotes, on="time", by="stock", tolerance="1s"
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "time": [
             datetime(2020, 1, 1, 9, 0, 1),
             datetime(2020, 1, 1, 9, 0, 1),
@@ -275,7 +288,7 @@ def test_join_asof_tolerance_forward() -> None:
 
     assert df_quotes.join_asof(
         df_trades, on="time", by="stock", tolerance="2s", strategy="forward"
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "time": [
             datetime(2020, 1, 1, 9, 0, 0),
             datetime(2020, 1, 1, 9, 0, 2),
@@ -290,7 +303,7 @@ def test_join_asof_tolerance_forward() -> None:
 
     assert df_quotes.join_asof(
         df_trades, on="time", by="stock", tolerance="1s", strategy="forward"
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "time": [
             datetime(2020, 1, 1, 9, 0, 0),
             datetime(2020, 1, 1, 9, 0, 2),
@@ -306,7 +319,7 @@ def test_join_asof_tolerance_forward() -> None:
     # Sanity check that this gives us equi-join
     assert df_quotes.join_asof(
         df_trades, on="time", by="stock", tolerance="0s", strategy="forward"
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "time": [
             datetime(2020, 1, 1, 9, 0, 0),
             datetime(2020, 1, 1, 9, 0, 2),
@@ -341,7 +354,7 @@ def test_join_asof_projection() -> None:
         (
             df1.lazy().join_asof(df2.lazy(), left_on="df1_date", right_on="df2_date")
         ).select([pl.col("df2_date"), "df1_date"])
-    ).collect().to_dict(False) == {
+    ).collect().to_dict(as_series=False) == {
         "df2_date": [None, 20221012, 20221012, 20221012, 20221015],
         "df1_date": [20221011, 20221012, 20221013, 20221014, 20221016],
     }
@@ -349,7 +362,7 @@ def test_join_asof_projection() -> None:
         df1.lazy().join_asof(
             df2.lazy(), by="key", left_on="df1_date", right_on="df2_date"
         )
-    ).select(["df2_date", "df1_date"]).collect().to_dict(False) == {
+    ).select(["df2_date", "df1_date"]).collect().to_dict(as_series=False) == {
         "df2_date": [None, None, None, 20221012, 20221015],
         "df1_date": [20221011, 20221012, 20221013, 20221014, 20221016],
     }
@@ -357,16 +370,17 @@ def test_join_asof_projection() -> None:
 
 def test_asof_join_by_logical_types() -> None:
     dates = (
-        pl.date_range(
+        pl.datetime_range(
             datetime(2022, 1, 1), datetime(2022, 1, 2), interval="2h", eager=True
         )
         .cast(pl.Datetime("ns"))
         .head(9)
     )
     x = pl.DataFrame({"a": dates, "b": map(float, range(9)), "c": ["1", "2", "3"] * 3})
-    assert x.join_asof(x, on=pl.col("b").set_sorted(), by=["c", "a"]).to_dict(
-        False
-    ) == {
+
+    result = x.join_asof(x, on=pl.col("b").set_sorted(), by=["c", "a"])
+
+    expected = {
         "a": [
             datetime(2022, 1, 1, 0, 0),
             datetime(2022, 1, 1, 2, 0),
@@ -381,6 +395,7 @@ def test_asof_join_by_logical_types() -> None:
         "b": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
         "c": ["1", "2", "3", "1", "2", "3", "1", "2", "3"],
     }
+    assert result.to_dict(as_series=False) == expected
 
 
 def test_join_asof_projection_7481() -> None:
@@ -389,7 +404,10 @@ def test_join_asof_projection_7481() -> None:
 
     assert (
         ldf1.join_asof(ldf2, left_on="a", right_on="b").select("a", "b")
-    ).collect().to_dict(False) == {"a": [1, 2, 2], "b": ["bleft", "bleft", "bleft"]}
+    ).collect().to_dict(as_series=False) == {
+        "a": [1, 2, 2],
+        "b": ["bleft", "bleft", "bleft"],
+    }
 
 
 def test_asof_join_sorted_by_group(capsys: Any) -> None:
@@ -426,6 +444,7 @@ def test_asof_join_sorted_by_group(capsys: Any) -> None:
 
 
 def test_asof_join_nearest() -> None:
+    # Generic join_asof
     df1 = pl.DataFrame(
         {
             "asof_key": [-1, 1, 2, 4, 6],
@@ -435,20 +454,194 @@ def test_asof_join_nearest() -> None:
 
     df2 = pl.DataFrame(
         {
-            "asof_key": [1, 2, 4, 5],
+            "asof_key": [-1, 2, 4, 5],
             "b": [1, 2, 3, 4],
         }
     ).sort(by="asof_key")
 
     expected = pl.DataFrame(
-        {"asof_key": [-1, 1, 2, 4, 6], "a": [1, 2, 3, 4, 5], "b": [1, 1, 2, 3, 4]}
+        {"asof_key": [-1, 1, 2, 4, 6], "a": [1, 2, 3, 4, 5], "b": [1, 2, 2, 3, 4]}
+    )
+
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest")
+    assert_frame_equal(out, expected)
+
+    # Edge case: last item of right matches multiples on left
+    df1 = pl.DataFrame(
+        {
+            "asof_key": [9, 9, 10, 10, 10],
+            "a": [1, 2, 3, 4, 5],
+        }
+    ).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [1, 2, 3, 10],
+            "b": [1, 2, 3, 4],
+        }
+    ).set_sorted("asof_key")
+    expected = pl.DataFrame(
+        {
+            "asof_key": [9, 9, 10, 10, 10],
+            "a": [1, 2, 3, 4, 5],
+            "b": [4, 4, 4, 4, 4],
+        }
     )
 
     out = df1.join_asof(df2, on="asof_key", strategy="nearest")
     assert_frame_equal(out, expected)
 
 
+def test_asof_join_nearest_with_tolerance() -> None:
+    a = b = [1, 2, 3, 4, 5]
+
+    nones = pl.Series([None, None, None, None, None], dtype=pl.Int64)
+
+    # Case 1: complete miss
+    df1 = pl.DataFrame({"asof_key": [1, 2, 3, 4, 5], "a": a}).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [7, 8, 9, 10, 11],
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    expected = df1.with_columns(nones.alias("b"))
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance=1)
+    assert_frame_equal(out, expected)
+
+    # Case 2: complete miss in other direction
+    df1 = pl.DataFrame({"asof_key": [7, 8, 9, 10, 11], "a": a}).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [1, 2, 3, 4, 5],
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    expected = df1.with_columns(nones.alias("b"))
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance=1)
+    assert_frame_equal(out, expected)
+
+    # Case 3: match first item
+    df1 = pl.DataFrame({"asof_key": [1, 2, 3, 4, 5], "a": a}).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [6, 7, 8, 9, 10],
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance=1)
+    expected = df1.with_columns(pl.Series([None, None, None, None, 1]).alias("b"))
+    assert_frame_equal(out, expected)
+
+    # Case 4: match last item
+    df1 = pl.DataFrame({"asof_key": [1, 2, 3, 4, 5], "a": a}).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [-4, -3, -2, -1, 0],
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance=1)
+    expected = df1.with_columns(pl.Series([5, None, None, None, None]).alias("b"))
+    assert_frame_equal(out, expected)
+
+    # Case 5: match multiples, pick closer
+    df1 = pl.DataFrame(
+        {"asof_key": pl.Series([1, 2, 3, 4, 5], dtype=pl.Float64), "a": a}
+    ).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [0, 2, 2.4, 3.4, 10],
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance=1)
+    expected = df1.with_columns(pl.Series([2, 2, 4, 4, None]).alias("b"))
+    assert_frame_equal(out, expected)
+
+    # Case 6: use 0 tolerance
+    df1 = pl.DataFrame(
+        {"asof_key": pl.Series([1, 2, 3, 4, 5], dtype=pl.Float64), "a": a}
+    ).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [0, 2, 2.4, 3.4, 10],
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance=0)
+    expected = df1.with_columns(pl.Series([None, 2, None, None, None]).alias("b"))
+    assert_frame_equal(out, expected)
+
+    # Case 7: test with datetime
+    df1 = pl.DataFrame(
+        {
+            "asof_key": pl.Series(
+                [
+                    datetime(2023, 1, 1),
+                    datetime(2023, 1, 2),
+                    datetime(2023, 1, 3),
+                    datetime(2023, 1, 4),
+                    datetime(2023, 1, 6),
+                ]
+            ),
+            "a": a,
+        }
+    ).set_sorted("asof_key")
+    df2 = pl.DataFrame(
+        {
+            "asof_key": pl.Series(
+                [
+                    datetime(2022, 1, 1),
+                    datetime(2022, 1, 2),
+                    datetime(2022, 1, 3),
+                    datetime(
+                        2023, 1, 2, 21, 30, 0
+                    ),  # should match with 2023-01-02, 2023-01-03, and 2021-01-04
+                    datetime(2023, 1, 7),
+                ]
+            ),
+            "b": b,
+        }
+    ).set_sorted("asof_key")
+    out = df1.join_asof(df2, on="asof_key", strategy="nearest", tolerance="1d4h")
+    expected = df1.with_columns(pl.Series([None, 4, 4, 4, 5]).alias("b"))
+    assert_frame_equal(out, expected)
+
+    # Case 8: test using timedelta tolerance
+    out = df1.join_asof(
+        df2, on="asof_key", strategy="nearest", tolerance=timedelta(days=1, hours=4)
+    )
+    assert_frame_equal(out, expected)
+
+    # Case #9: last item is closest match
+    df1 = pl.DataFrame(
+        {
+            "asof_key_left": [10.00001, 20.0, 30.0],
+        }
+    ).set_sorted("asof_key_left")
+    df2 = pl.DataFrame(
+        {
+            "asof_key_right": [10.00001, 20.0001, 29.0],
+        }
+    ).set_sorted("asof_key_right")
+    out = df1.join_asof(
+        df2,
+        left_on="asof_key_left",
+        right_on="asof_key_right",
+        strategy="nearest",
+        tolerance=0.5,
+    )
+    expected = pl.DataFrame(
+        {
+            "asof_key_left": [10.00001, 20.0, 30.0],
+            "asof_key_right": [10.00001, 20.0001, None],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
 def test_asof_join_nearest_by() -> None:
+    # Generic join_asof
     df1 = pl.DataFrame(
         {
             "asof_key": [-1, 1, 2, 6, 1],
@@ -459,7 +652,7 @@ def test_asof_join_nearest_by() -> None:
 
     df2 = pl.DataFrame(
         {
-            "asof_key": [1, 2, 5, 1],
+            "asof_key": [-1, 2, 5, 1],
             "group": [1, 1, 2, 2],
             "b": [1, 2, 3, 4],
         }
@@ -469,10 +662,36 @@ def test_asof_join_nearest_by() -> None:
         {
             "asof_key": [-1, 1, 2, 6, 1],
             "group": [1, 1, 1, 2, 2],
-            "a": [1, 2, 3, 2, 5],
-            "b": [1, 1, 2, 3, 4],
+            "a": [1, 2, 3, 5, 2],
+            "b": [1, 2, 2, 4, 3],
         }
     ).sort(by=["group", "asof_key"])
+
+    # Edge case: last item of right matches multiples on left
+    df1 = pl.DataFrame(
+        {
+            "asof_key": [9, 9, 10, 10, 10],
+            "group": [1, 1, 1, 2, 2],
+            "a": [1, 2, 3, 2, 5],
+        }
+    ).sort(by=["group", "asof_key"])
+
+    df2 = pl.DataFrame(
+        {
+            "asof_key": [-1, 1, 1, 10],
+            "group": [1, 1, 2, 2],
+            "b": [1, 2, 3, 4],
+        }
+    ).sort(by=["group", "asof_key"])
+
+    expected = pl.DataFrame(
+        {
+            "asof_key": [9, 9, 10, 10, 10],
+            "group": [1, 1, 1, 2, 2],
+            "a": [1, 2, 3, 2, 5],
+            "b": [2, 2, 2, 4, 4],
+        }
+    )
 
     out = df1.join_asof(df2, on="asof_key", by="group", strategy="nearest")
     assert_frame_equal(out, expected)
@@ -500,6 +719,320 @@ def test_asof_join_nearest_by() -> None:
     )
 
     out = a.join_asof(b, by="code", on="time", strategy="nearest")
+    assert_frame_equal(out, expected)
+
+    # last item is closest match
+    df1 = pl.DataFrame(
+        {
+            "a": [1, 1, 1],
+            "asof_key_left": [10.00001, 20.0, 30.0],
+        }
+    ).set_sorted("asof_key_left")
+    df2 = pl.DataFrame(
+        {
+            "a": [1, 1, 1],
+            "asof_key_right": [10.00001, 20.0001, 29.0],
+        }
+    ).set_sorted("asof_key_right")
+    out = df1.join_asof(
+        df2,
+        left_on="asof_key_left",
+        right_on="asof_key_right",
+        by="a",
+        strategy="nearest",
+    )
+    expected = pl.DataFrame(
+        {
+            "a": [1, 1, 1],
+            "asof_key_left": [10.00001, 20.0, 30.0],
+            "asof_key_right": [10.00001, 20.0001, 29.0],
+        }
+    )
+    assert_frame_equal(out, expected)
+
+
+def test_asof_join_nearest_by_with_tolerance() -> None:
+    df1 = pl.DataFrame(
+        {
+            "group": [
+                1,
+                1,
+                1,
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+                2,
+                3,
+                3,
+                3,
+                3,
+                3,
+                4,
+                4,
+                4,
+                4,
+                4,
+                5,
+                5,
+                5,
+                5,
+                5,
+                6,
+                6,
+                6,
+                6,
+                6,
+            ],
+            "asof_key": pl.Series(
+                [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                ],
+                dtype=pl.Float32,
+            ),
+            "a": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+            ],
+        }
+    )
+
+    df2 = pl.DataFrame(
+        {
+            "group": [
+                1,
+                1,
+                1,
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+                2,
+                3,
+                3,
+                3,
+                3,
+                3,
+                4,
+                4,
+                4,
+                4,
+                4,
+                5,
+                5,
+                5,
+                5,
+                5,
+                6,
+                6,
+                6,
+                6,
+                6,
+            ],
+            "asof_key": pl.Series(
+                [
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    5,
+                    -3,
+                    -2,
+                    -1,
+                    0,
+                    0,
+                    2,
+                    2.4,
+                    3.4,
+                    10,
+                    -3,
+                    3,
+                    8,
+                    9,
+                    10,
+                ],
+                dtype=pl.Float32,
+            ),
+            "b": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+                1,
+                2,
+                3,
+                4,
+                5,
+            ],
+        }
+    )
+
+    expected = df1.with_columns(
+        pl.Series(
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                1,
+                5,
+                None,
+                None,
+                1,
+                1,
+                2,
+                2,
+                4,
+                4,
+                None,
+                None,
+                2,
+                2,
+                2,
+                None,
+            ]
+        ).alias("b")
+    )
+    df1 = df1.sort(by=["group", "asof_key"])
+    df2 = df2.sort(by=["group", "asof_key"])
+    expected = expected.sort(by=["group", "a"])
+
+    out = df1.join_asof(
+        df2, by="group", on="asof_key", strategy="nearest", tolerance=1.0
+    ).sort(by=["group", "a"])
+    assert_frame_equal(out, expected)
+
+    # last item is closest match
+    df1 = pl.DataFrame(
+        {
+            "a": [1, 1, 1],
+            "asof_key_left": [10.00001, 20.0, 30.0],
+        }
+    ).set_sorted("asof_key_left")
+    df2 = pl.DataFrame(
+        {
+            "a": [1, 1, 1],
+            "asof_key_right": [10.00001, 20.0001, 29.0],
+        }
+    ).set_sorted("asof_key_right")
+    out = df1.join_asof(
+        df2,
+        left_on="asof_key_left",
+        right_on="asof_key_right",
+        by="a",
+        strategy="nearest",
+        tolerance=0.5,
+    )
+    expected = pl.DataFrame(
+        {
+            "a": [1, 1, 1],
+            "asof_key_left": [10.00001, 20.0, 30.0],
+            "asof_key_right": [10.00001, 20.0001, None],
+        }
+    )
     assert_frame_equal(out, expected)
 
 
@@ -550,13 +1083,27 @@ def test_asof_join_nearest_by_date() -> None:
     assert_frame_equal(out, expected)
 
 
-def test_asof_join_string_err() -> None:
-    left = pl.DataFrame({"date_str": ["2023/02/15"]}).sort("date_str")
-    right = pl.DataFrame(
-        {"date_str": ["2023/01/31", "2023/02/28"], "value": [0, 1]}
-    ).sort("date_str")
-    with pytest.raises(pl.InvalidOperationError):
-        left.join_asof(right, on="date_str")
+def test_asof_join_string() -> None:
+    left = pl.DataFrame({"x": [None, "a", "b", "c", None, "d", None]}).set_sorted("x")
+    right = pl.DataFrame({"x": ["apple", None, "chutney"], "y": [0, 1, 2]}).set_sorted(
+        "x"
+    )
+    forward = left.join_asof(right, on="x", strategy="forward")
+    backward = left.join_asof(right, on="x", strategy="backward")
+    forward_expected = pl.DataFrame(
+        {
+            "x": [None, "a", "b", "c", None, "d", None],
+            "y": [None, 0, 2, 2, None, None, None],
+        }
+    )
+    backward_expected = pl.DataFrame(
+        {
+            "x": [None, "a", "b", "c", None, "d", None],
+            "y": [None, None, 0, 0, None, 2, None],
+        }
+    )
+    assert_frame_equal(forward, forward_expected)
+    assert_frame_equal(backward, backward_expected)
 
 
 def test_join_asof_by_argument_parsing() -> None:
@@ -592,3 +1139,29 @@ def test_join_asof_by_argument_parsing() -> None:
     )
     assert_frame_equal(by_list2, by_list)
     assert_frame_equal(by_tuple2, by_list)
+
+
+def test_join_asof_invalid_args() -> None:
+    df1 = pl.DataFrame(
+        {
+            "a": [1, 2, 3],
+            "b": [1, 2, 3],
+        }
+    ).set_sorted("a")
+    df2 = pl.DataFrame(
+        {
+            "a": [1, 2, 3],
+            "c": [1, 2, 3],
+        }
+    ).set_sorted("a")
+
+    with pytest.raises(TypeError, match="expected `on` to be str or Expr, got 'list'"):
+        df1.join_asof(df2, on=["a"])  # type: ignore[arg-type]
+    with pytest.raises(
+        TypeError, match="expected `left_on` to be str or Expr, got 'list'"
+    ):
+        df1.join_asof(df2, left_on=["a"], right_on="a")  # type: ignore[arg-type]
+    with pytest.raises(
+        TypeError, match="expected `right_on` to be str or Expr, got 'list'"
+    ):
+        df1.join_asof(df2, left_on="a", right_on=["a"])  # type: ignore[arg-type]

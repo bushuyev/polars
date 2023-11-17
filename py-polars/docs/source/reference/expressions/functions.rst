@@ -30,6 +30,10 @@ These functions are available from the polars module root and can be used as exp
    corr
    count
    cov
+   cum_fold
+   cum_reduce
+   cum_sum
+   cum_sum_horizontal
    cumfold
    cumreduce
    cumsum
@@ -38,6 +42,8 @@ These functions are available from the polars module root and can be used as exp
    datetime
    date_range
    date_ranges
+   datetime_range
+   datetime_ranges
    duration
    element
    exclude
@@ -53,6 +59,8 @@ These functions are available from the polars module root and can be used as exp
    last
    lit
    map
+   map_batches
+   map_groups
    max
    max_horizontal
    mean
@@ -97,6 +105,8 @@ These functions are available from the polars module root and can be used as exp
    Expr.head
    Expr.implode
    Expr.map
+   Expr.map_batches
+   Expr.map_elements
    Expr.max
    Expr.mean
    Expr.median

@@ -81,7 +81,7 @@ impl AExpr {
                 Ok(field)
             },
             Sort { expr, .. } => arena.get(*expr).to_field(schema, ctxt, arena),
-            Take { expr, .. } => arena.get(*expr).to_field(schema, ctxt, arena),
+            Gather { expr, .. } => arena.get(*expr).to_field(schema, ctxt, arena),
             SortBy { expr, .. } => arena.get(*expr).to_field(schema, ctxt, arena),
             Filter { input, .. } => arena.get(*input).to_field(schema, ctxt, arena),
             Agg(agg) => {
@@ -185,6 +185,7 @@ impl AExpr {
                 output_type,
                 input,
                 function,
+                options,
                 ..
             } => {
                 let tmp = function.get_output();
@@ -194,6 +195,7 @@ impl AExpr {
                     // default context because `col()` would return a list in aggregation context
                     .map(|node| arena.get(*node).to_field(schema, Context::Default, arena))
                     .collect::<PolarsResult<Vec<_>>>()?;
+                polars_ensure!(!fields.is_empty(), ComputeError: "expression: '{}' didn't get any inputs", options.fmt_str);
                 Ok(output_type.get_field(schema, ctxt, &fields))
             },
             Function {
@@ -204,6 +206,7 @@ impl AExpr {
                     // default context because `col()` would return a list in aggregation context
                     .map(|node| arena.get(*node).to_field(schema, Context::Default, arena))
                     .collect::<PolarsResult<Vec<_>>>()?;
+                polars_ensure!(!fields.is_empty(), ComputeError: "expression: '{}' didn't get any inputs", function);
                 function.get_field(schema, ctxt, &fields)
             },
             Slice { input, .. } => arena.get(*input).to_field(schema, ctxt, arena),
@@ -252,21 +255,27 @@ fn get_arithmetic_field(
             IDX_DTYPE
         },
         _ => {
-            match (left_ae, right_ae) {
-                (AExpr::Literal(_), AExpr::Literal(_)) => {},
-                (AExpr::Literal(_), _) => {
-                    // literal will be coerced to match right type
-                    let right_type = right_ae.get_type(schema, ctxt, arena)?;
-                    left_field.coerce(right_type);
-                    return Ok(left_field);
-                },
-                (_, AExpr::Literal(_)) => {
-                    // literal will be coerced to match right type
-                    return Ok(left_field);
-                },
-                _ => {},
-            }
             let right_type = right_ae.get_type(schema, ctxt, arena)?;
+
+            // Avoid needlessly type casting numeric columns during arithmetic
+            // with literals.
+            if (left_field.dtype.is_integer() && right_type.is_integer())
+                || (left_field.dtype.is_float() && right_type.is_float())
+            {
+                match (left_ae, right_ae) {
+                    (AExpr::Literal(_), AExpr::Literal(_)) => {},
+                    (AExpr::Literal(_), _) => {
+                        // literal will be coerced to match right type
+                        left_field.coerce(right_type);
+                        return Ok(left_field);
+                    },
+                    (_, AExpr::Literal(_)) => {
+                        // literal will be coerced to match right type
+                        return Ok(left_field);
+                    },
+                    _ => {},
+                }
+            }
             try_get_supertype(&left_field.dtype, &right_type)?
         },
     };

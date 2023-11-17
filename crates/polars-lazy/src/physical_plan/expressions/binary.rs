@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use polars_core::frame::groupby::GroupsProxy;
+use polars_core::frame::group_by::GroupsProxy;
 use polars_core::prelude::*;
 use polars_core::POOL;
+#[cfg(feature = "round_series")]
+use polars_ops::prelude::floor_div_series;
 
 use crate::physical_plan::state::ExecutionState;
 use crate::prelude::*;
@@ -46,14 +48,12 @@ fn apply_operator_owned(left: Series, right: Series, op: Operator) -> PolarsResu
 pub fn apply_operator(left: &Series, right: &Series, op: Operator) -> PolarsResult<Series> {
     use DataType::*;
     match op {
-        Operator::Gt => ChunkCompare::<&Series>::gt(left, right).map(|ca| ca.into_series()),
-        Operator::GtEq => ChunkCompare::<&Series>::gt_eq(left, right).map(|ca| ca.into_series()),
-        Operator::Lt => ChunkCompare::<&Series>::lt(left, right).map(|ca| ca.into_series()),
-        Operator::LtEq => ChunkCompare::<&Series>::lt_eq(left, right).map(|ca| ca.into_series()),
-        Operator::Eq => ChunkCompare::<&Series>::equal(left, right).map(|ca| ca.into_series()),
-        Operator::NotEq => {
-            ChunkCompare::<&Series>::not_equal(left, right).map(|ca| ca.into_series())
-        },
+        Operator::Gt => ChunkCompare::gt(left, right).map(|ca| ca.into_series()),
+        Operator::GtEq => ChunkCompare::gt_eq(left, right).map(|ca| ca.into_series()),
+        Operator::Lt => ChunkCompare::lt(left, right).map(|ca| ca.into_series()),
+        Operator::LtEq => ChunkCompare::lt_eq(left, right).map(|ca| ca.into_series()),
+        Operator::Eq => ChunkCompare::equal(left, right).map(|ca| ca.into_series()),
+        Operator::NotEq => ChunkCompare::not_equal(left, right).map(|ca| ca.into_series()),
         Operator::Plus => Ok(left + right),
         Operator::Minus => Ok(left - right),
         Operator::Multiply => Ok(left * right),
@@ -90,19 +90,37 @@ impl BinaryExpr {
         ac_r: AggregationContext,
         aggregated: bool,
     ) -> PolarsResult<AggregationContext<'a>> {
-        // we want to be able to mutate in place
-        // so we take the lhs to make sure that we drop
+        // We want to be able to mutate in place, so we take the lhs to make sure that we drop.
         let lhs = ac_l.series().clone();
         let rhs = ac_r.series().clone();
 
-        // drop lhs so that we might operate in place
-        {
-            let _ = ac_l.take();
-        }
+        // Drop lhs so that we might operate in place.
+        drop(ac_l.take());
 
         let out = apply_operator_owned(lhs, rhs, self.op)?;
-
         ac_l.with_series(out, aggregated, Some(&self.expr))?;
+        Ok(ac_l)
+    }
+
+    fn apply_all_literal<'a>(
+        &self,
+        mut ac_l: AggregationContext<'a>,
+        mut ac_r: AggregationContext<'a>,
+    ) -> PolarsResult<AggregationContext<'a>> {
+        let name = ac_l.series().name().to_string();
+        ac_l.groups();
+        ac_r.groups();
+        polars_ensure!(ac_l.groups.len() == ac_r.groups.len(), ComputeError: "lhs and rhs should have same group length");
+        let left_s = ac_l.series().rechunk();
+        let right_s = ac_r.series().rechunk();
+        let res_s = apply_operator(&left_s, &right_s, self.op)?;
+        ac_l.with_update_groups(UpdateGroups::WithSeriesLen);
+        let res_s = if res_s.len() == 1 {
+            res_s.new_from_index(0, ac_l.groups.len())
+        } else {
+            ListChunked::full(&name, &res_s, ac_l.groups.len()).into_series()
+        };
+        ac_l.with_series(res_s, true, Some(&self.expr))?;
         Ok(ac_l)
     }
 
@@ -112,39 +130,18 @@ impl BinaryExpr {
         mut ac_r: AggregationContext<'a>,
     ) -> PolarsResult<AggregationContext<'a>> {
         let name = ac_l.series().name().to_string();
-        let mut ca: ListChunked = ac_l
-            .iter_groups(false)
-            .zip(ac_r.iter_groups(false))
-            .map(|(l, r)| {
-                match (l, r) {
-                    (Some(l), Some(r)) => {
-                        let l = l.as_ref();
-                        let r = r.as_ref();
-                        Some(apply_operator(l, r, self.op))
-                    },
-                    _ => None,
-                }
-                .transpose()
-            })
-            .collect::<PolarsResult<_>>()?;
-        ca.rename(&name);
+        // SAFETY: unstable series never lives longer than the iterator.
+        let ca = unsafe {
+            ac_l.iter_groups(false)
+                .zip(ac_r.iter_groups(false))
+                .map(|(l, r)| Some(apply_operator(l?.as_ref(), r?.as_ref(), self.op)))
+                .map(|opt_res| opt_res.transpose())
+                .collect::<PolarsResult<ListChunked>>()?
+                .with_name(&name)
+        };
 
-        // try if we can reuse the groups
-        use AggState::*;
-        match (ac_l.agg_state(), ac_r.agg_state()) {
-            // no need to change update groups
-            (AggregatedList(_), _) => {},
-            // we can take the groups of the rhs
-            (_, AggregatedList(_)) if matches!(ac_r.update_groups, UpdateGroups::No) => {
-                ac_l.groups = ac_r.groups
-            },
-            // we must update the groups
-            _ => {
-                ac_l.with_update_groups(UpdateGroups::WithSeriesLen);
-            },
-        }
-
-        ac_l.with_series(ca.into_series(), true, Some(&self.expr))?;
+        ac_l.with_update_groups(UpdateGroups::WithSeriesLen);
+        ac_l.with_agg_state(AggState::AggregatedList(ca.into_series()));
         Ok(ac_l)
     }
 }
@@ -155,47 +152,42 @@ impl PhysicalExpr for BinaryExpr {
     }
 
     fn evaluate(&self, df: &DataFrame, state: &ExecutionState) -> PolarsResult<Series> {
-        // window functions may set a global state that determine their output
+        // Window functions may set a global state that determine their output
         // state, so we don't let them run in parallel as they race
-        // they also saturate the thread pool by themselves, so that's fine
+        // they also saturate the thread pool by themselves, so that's fine.
         let has_window = state.has_window();
-        // streaming takes care of parallelism, don't parallelize here, as it
-        // increases contention
 
+        // Streaming takes care of parallelism, don't parallelize here, as it
+        // increases contention.
         #[cfg(feature = "streaming")]
         let in_streaming = state.in_streaming_engine();
 
         #[cfg(not(feature = "streaming"))]
         let in_streaming = false;
 
-        let (lhs, rhs) = if has_window {
+        let (lhs, rhs);
+        if has_window {
             let mut state = state.split();
             state.remove_cache_window_flag();
-            (
-                self.left.evaluate(df, &state),
-                self.right.evaluate(df, &state),
-            )
-        }
-        // literals are free, don't pay par cost
-        else if in_streaming || self.has_literal {
-            (
-                self.left.evaluate(df, state),
-                self.right.evaluate(df, state),
-            )
+            lhs = self.left.evaluate(df, &state)?;
+            rhs = self.right.evaluate(df, &state)?;
+        } else if in_streaming || self.has_literal {
+            // Literals are free, don't pay par cost.
+            lhs = self.left.evaluate(df, state)?;
+            rhs = self.right.evaluate(df, state)?;
         } else {
-            POOL.install(|| {
+            let (opt_lhs, opt_rhs) = POOL.install(|| {
                 rayon::join(
                     || self.left.evaluate(df, state),
                     || self.right.evaluate(df, state),
                 )
-            })
+            });
+            (lhs, rhs) = (opt_lhs?, opt_rhs?);
         };
-        let lhs = lhs?;
-        let rhs = rhs?;
         polars_ensure!(
             lhs.len() == rhs.len() || lhs.len() == 1 || rhs.len() == 1,
             expr = self.expr,
-            ComputeError: "cannot evaluate two series of different lengths ({} and {})",
+            ComputeError: "cannot evaluate two Series of different lengths ({} and {})",
             lhs.len(), rhs.len(),
         );
         apply_operator_owned(lhs, rhs, self.op)
@@ -218,16 +210,21 @@ impl PhysicalExpr for BinaryExpr {
         let ac_r = result_b?;
 
         match (ac_l.agg_state(), ac_r.agg_state()) {
+            (AggState::Literal(s), AggState::NotAggregated(_))
+            | (AggState::NotAggregated(_), AggState::Literal(s)) => match s.len() {
+                1 => self.apply_elementwise(ac_l, ac_r, false),
+                _ => self.apply_group_aware(ac_l, ac_r),
+            },
+            (AggState::Literal(_), AggState::Literal(_)) => self.apply_all_literal(ac_l, ac_r),
+            (AggState::NotAggregated(_), AggState::NotAggregated(_)) => {
+                self.apply_elementwise(ac_l, ac_r, false)
+            },
             (
-                AggState::Literal(_) | AggState::NotAggregated(_),
-                AggState::Literal(_) | AggState::NotAggregated(_),
-            ) => self.apply_elementwise(ac_l, ac_r, false),
-            (
-                AggState::AggregatedFlat(_) | AggState::Literal(_),
-                AggState::AggregatedFlat(_) | AggState::Literal(_),
+                AggState::AggregatedScalar(_) | AggState::Literal(_),
+                AggState::AggregatedScalar(_) | AggState::Literal(_),
             ) => self.apply_elementwise(ac_l, ac_r, true),
-            (AggState::AggregatedFlat(_), AggState::NotAggregated(_))
-            | (AggState::NotAggregated(_), AggState::AggregatedFlat(_)) => {
+            (AggState::AggregatedScalar(_), AggState::NotAggregated(_))
+            | (AggState::NotAggregated(_), AggState::AggregatedScalar(_)) => {
                 self.apply_group_aware(ac_l, ac_r)
             },
             (AggState::AggregatedList(lhs), AggState::AggregatedList(rhs)) => {
@@ -254,135 +251,108 @@ impl PhysicalExpr for BinaryExpr {
     fn as_stats_evaluator(&self) -> Option<&dyn polars_io::predicates::StatsEvaluator> {
         Some(self)
     }
-
-    fn is_valid_aggregation(&self) -> bool {
-        // we don't want:
-        // col(a) == lit(1)
-
-        // we do want
-        // col(a).sum() == lit(1)
-        (!self.left.is_literal() && self.left.is_valid_aggregation())
-            | (!self.right.is_literal() && self.right.is_valid_aggregation())
-    }
 }
 
 #[cfg(feature = "parquet")]
 mod stats {
-    use polars_io::parquet::predicates::BatchStats;
-    use polars_io::predicates::StatsEvaluator;
+    use polars_io::predicates::{BatchStats, StatsEvaluator};
 
     use super::*;
 
     fn apply_operator_stats_eq(min_max: &Series, literal: &Series) -> bool {
-        // literal is greater than max, don't need to read
-        if ChunkCompare::<&Series>::gt(literal, min_max)
-            .ok()
-            .map(|s| s.all())
-            == Some(true)
-        {
+        use ChunkCompare as C;
+        // Literal is greater than max, don't need to read.
+        if C::gt(literal, min_max).map(|s| s.all()).unwrap_or(false) {
             return false;
         }
 
-        // literal is smaller than min, don't need to read
-        if ChunkCompare::<&Series>::lt(literal, min_max)
-            .ok()
-            .map(|s| s.all())
-            == Some(true)
-        {
+        // Literal is smaller than min, don't need to read.
+        if C::lt(literal, min_max).map(|s| s.all()).unwrap_or(false) {
             return false;
         }
 
         true
     }
 
+    fn apply_operator_stats_neq(min_max: &Series, literal: &Series) -> bool {
+        if min_max.len() < 2 || min_max.null_count() > 0 {
+            return true;
+        }
+        use ChunkCompare as C;
+
+        // First check proofs all values are the same (e.g. min/max is the same)
+        // Second check proofs all values are equal, so we can skip as we search
+        // for non-equal values.
+        if min_max.get(0).unwrap() == min_max.get(1).unwrap()
+            && C::equal(literal, min_max).map(|s| s.all()).unwrap_or(false)
+        {
+            return false;
+        }
+        true
+    }
+
     fn apply_operator_stats_rhs_lit(min_max: &Series, literal: &Series, op: Operator) -> bool {
+        use ChunkCompare as C;
         match op {
             Operator::Eq => apply_operator_stats_eq(min_max, literal),
+            Operator::NotEq => apply_operator_stats_neq(min_max, literal),
             // col > lit
             // e.g.
-            // [min,
-            // max] > 0
+            // [min, max] > 0
             //
-            // [-1,
-            // 2] > 0
+            // [-1, 2] > 0
             //
             // [false, true] -> true -> read
             Operator::Gt => {
-                // literal is bigger than max value
-                // selection needs all rows
-                ChunkCompare::<&Series>::gt(min_max, literal)
-                    .ok()
-                    .map(|s| s.any())
-                    == Some(true)
+                // Literal is bigger than max value, selection needs all rows.
+                C::gt(min_max, literal).map(|s| s.any()).unwrap_or(false)
             },
             // col >= lit
             Operator::GtEq => {
-                // literal is bigger than max value
-                // selection needs all rows
-                ChunkCompare::<&Series>::gt_eq(min_max, literal)
-                    .ok()
-                    .map(|ca| ca.any())
-                    == Some(true)
+                // Literal is bigger than max value, selection needs all rows.
+                C::gt_eq(min_max, literal).map(|s| s.any()).unwrap_or(false)
             },
             // col < lit
             Operator::Lt => {
-                // literal is smaller than min value
-                // selection needs all rows
-                ChunkCompare::<&Series>::lt(min_max, literal)
-                    .ok()
-                    .map(|ca| ca.any())
-                    == Some(true)
+                // Literal is smaller than min value, selection needs all rows.
+                C::lt(min_max, literal).map(|s| s.any()).unwrap_or(false)
             },
             // col <= lit
             Operator::LtEq => {
-                // literal is smaller than min value
-                // selection needs all rows
-                ChunkCompare::<&Series>::lt_eq(min_max, literal)
-                    .ok()
-                    .map(|ca| ca.any())
-                    == Some(true)
+                // Literal is smaller than min value, selection needs all rows.
+                C::lt_eq(min_max, literal).map(|s| s.any()).unwrap_or(false)
             },
-            // default: read the file
+            // Default: read the file
             _ => true,
         }
     }
 
     fn apply_operator_stats_lhs_lit(literal: &Series, min_max: &Series, op: Operator) -> bool {
+        use ChunkCompare as C;
         match op {
             Operator::Eq => apply_operator_stats_eq(min_max, literal),
+            Operator::NotEq => apply_operator_stats_eq(min_max, literal),
             Operator::Gt => {
-                // literal is bigger than max value
-                // selection needs all rows
-                ChunkCompare::<&Series>::gt(literal, min_max)
-                    .ok()
-                    .map(|ca| ca.any())
-                    == Some(true)
+                // Literal is bigger than max value, selection needs all rows.
+                C::gt(literal, min_max).map(|ca| ca.any()).unwrap_or(false)
             },
             Operator::GtEq => {
-                // literal is bigger than max value
-                // selection needs all rows
-                ChunkCompare::<&Series>::gt_eq(literal, min_max)
-                    .ok()
+                // Literal is bigger than max value, selection needs all rows.
+                C::gt_eq(literal, min_max)
                     .map(|ca| ca.any())
-                    == Some(true)
+                    .unwrap_or(false)
             },
             Operator::Lt => {
-                // literal is smaller than min value
-                // selection needs all rows
-                ChunkCompare::<&Series>::lt(literal, min_max)
-                    .ok()
-                    .map(|ca| ca.any())
-                    == Some(true)
+                // Literal is smaller than min value, selection needs all rows.
+                C::lt(literal, min_max).map(|ca| ca.any()).unwrap_or(false)
             },
             Operator::LtEq => {
-                // literal is smaller than min value
-                // selection needs all rows
-                ChunkCompare::<&Series>::lt_eq(literal, min_max)
-                    .ok()
+                // Literal is smaller than min value, selection needs all rows.
+                C::lt_eq(literal, min_max)
                     .map(|ca| ca.any())
-                    == Some(true)
+                    .unwrap_or(false)
             },
-            // default: read the file
+            // Default: read the file.
             _ => true,
         }
     }
@@ -393,19 +363,21 @@ mod stats {
             use Expr::*;
             use Operator::*;
             if !self.expr.into_iter().all(|e| match e {
-                BinaryExpr { op, .. } => !matches!(
-                    op,
-                    Multiply | Divide | TrueDivide | FloorDivide | Modulus | NotEq
-                ),
+                BinaryExpr { op, .. } => {
+                    !matches!(op, Multiply | Divide | TrueDivide | FloorDivide | Modulus)
+                },
                 Column(_) | Literal(_) | Alias(_, _) => true,
                 _ => false,
             }) {
                 return Ok(true);
             }
-
             let schema = stats.schema();
-            let fld_l = self.left.to_field(schema)?;
-            let fld_r = self.right.to_field(schema)?;
+            let Some(fld_l) = self.left.to_field(schema).ok() else {
+                return Ok(true);
+            };
+            let Some(fld_r) = self.right.to_field(schema).ok() else {
+                return Ok(true);
+            };
 
             #[cfg(debug_assertions)]
             {
@@ -447,7 +419,7 @@ mod stats {
                         },
                     }
                 },
-                // default: read the file
+                // Default: read the file
                 _ => Ok(true),
             };
             out.map(|read| {

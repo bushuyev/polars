@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from polars.interchange.protocol import DlpackDeviceType, DtypeKind
+from polars.interchange.protocol import (
+    Buffer,
+    CopyNotAllowedError,
+    DlpackDeviceType,
+    DtypeKind,
+)
 from polars.interchange.utils import polars_dtype_to_dtype
 
 if TYPE_CHECKING:
@@ -11,7 +16,7 @@ if TYPE_CHECKING:
     from polars import Series
 
 
-class PolarsBuffer:
+class PolarsBuffer(Buffer):
     """
     A buffer object backed by a Polars Series consisting of a single chunk.
 
@@ -20,7 +25,7 @@ class PolarsBuffer:
     data
         The Polars Series backing the buffer object.
     allow_copy
-        Allow data to be copied during operations on this column. If set to ``False``,
+        Allow data to be copied during operations on this column. If set to `False`,
         a RuntimeError will be raised if data would be copied.
 
     """
@@ -28,8 +33,8 @@ class PolarsBuffer:
     def __init__(self, data: Series, *, allow_copy: bool = True):
         if data.n_chunks() > 1:
             if not allow_copy:
-                raise RuntimeError(
-                    "non-contiguous buffer must be made contiguous, which is not zero-copy"
+                raise CopyNotAllowedError(
+                    "non-contiguous buffer must be made contiguous"
                 )
             data = data.rechunk()
 
@@ -41,16 +46,18 @@ class PolarsBuffer:
         dtype = polars_dtype_to_dtype(self._data.dtype)
 
         if dtype[0] == DtypeKind.STRING:
-            return self._data.str.lengths().sum()  # type: ignore[return-value]
+            return self._data.str.len_bytes().sum()  # type: ignore[return-value]
+        elif dtype[0] == DtypeKind.BOOL:
+            offset, length, _pointer = self._data._s.get_ptr()
+            n_bits = offset + length
+            n_bytes, rest = divmod(n_bits, 8)
+            # Round up to the nearest byte
+            if rest:
+                return n_bytes + 1
+            else:
+                return n_bytes
 
-        n_bits = self._data.len() * dtype[1]
-
-        result, rest = divmod(n_bits, 8)
-        # Round up to the nearest byte
-        if rest:
-            return result + 1
-        else:
-            return result
+        return self._data.len() * (dtype[1] // 8)
 
     @property
     def ptr(self) -> int:

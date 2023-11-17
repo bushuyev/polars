@@ -6,16 +6,23 @@ Manipulation/selection
 .. autosummary::
    :toctree: api/
 
+    LazyFrame.approx_n_unique
+    LazyFrame.approx_unique
     LazyFrame.bottom_k
+    LazyFrame.cast
     LazyFrame.clear
     LazyFrame.clone
     LazyFrame.drop
     LazyFrame.drop_nulls
     LazyFrame.explode
+    LazyFrame.gather_every
     LazyFrame.fill_nan
     LazyFrame.fill_null
     LazyFrame.filter
     LazyFrame.first
+    LazyFrame.group_by
+    LazyFrame.group_by_dynamic
+    LazyFrame.group_by_rolling
     LazyFrame.groupby
     LazyFrame.groupby_dynamic
     LazyFrame.groupby_rolling
@@ -30,6 +37,7 @@ Manipulation/selection
     LazyFrame.merge_sorted
     LazyFrame.rename
     LazyFrame.reverse
+    LazyFrame.rolling
     LazyFrame.select
     LazyFrame.select_seq
     LazyFrame.set_sorted

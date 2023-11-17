@@ -1,4 +1,5 @@
-use numpy::PyArray1;
+use numpy::{Element, PyArray1};
+use polars::export::arrow::types::NativeType;
 use polars_core::prelude::*;
 use polars_core::utils::CustomIterTools;
 use pyo3::exceptions::PyValueError;
@@ -18,11 +19,7 @@ macro_rules! init_method {
         impl PySeries {
             #[staticmethod]
             fn $name(py: Python, name: &str, array: &PyArray1<$type>, _strict: bool) -> PySeries {
-                let array = array.readonly();
-                let vals = array.as_slice().unwrap();
-                py.allow_threads(|| PySeries {
-                    series: Series::new(name, vals),
-                })
+                mmap_numpy_array(py, name, array)
             }
         }
     };
@@ -32,48 +29,65 @@ init_method!(new_i8, i8);
 init_method!(new_i16, i16);
 init_method!(new_i32, i32);
 init_method!(new_i64, i64);
-init_method!(new_bool, bool);
 init_method!(new_u8, u8);
 init_method!(new_u16, u16);
 init_method!(new_u32, u32);
 init_method!(new_u64, u64);
 
+fn mmap_numpy_array<T: Element + NativeType>(
+    py: Python,
+    name: &str,
+    array: &PyArray1<T>,
+) -> PySeries {
+    use arrow::array::Array;
+    use polars::export::arrow;
+
+    let ro_array = array.readonly();
+    let vals = ro_array.as_slice().unwrap();
+
+    let arr = unsafe { arrow::ffi::mmap::slice_and_owner(vals, array.to_object(py)) };
+    Series::from_arrow(name, arr.to_boxed()).unwrap().into()
+}
+
 #[pymethods]
 impl PySeries {
     #[staticmethod]
-    fn new_f32(py: Python, name: &str, array: &PyArray1<f32>, nan_is_null: bool) -> PySeries {
+    fn new_bool(py: Python, name: &str, array: &PyArray1<bool>, _strict: bool) -> PySeries {
         let array = array.readonly();
         let vals = array.as_slice().unwrap();
-        py.allow_threads(|| {
-            if nan_is_null {
-                let mut ca: Float32Chunked = vals
-                    .iter()
-                    .map(|&val| if f32::is_nan(val) { None } else { Some(val) })
-                    .collect_trusted();
-                ca.rename(name);
-                ca.into_series().into()
-            } else {
-                Series::new(name, vals).into()
-            }
+        py.allow_threads(|| PySeries {
+            series: Series::new(name, vals),
         })
     }
 
     #[staticmethod]
+    fn new_f32(py: Python, name: &str, array: &PyArray1<f32>, nan_is_null: bool) -> PySeries {
+        if nan_is_null {
+            let array = array.readonly();
+            let vals = array.as_slice().unwrap();
+            let ca: Float32Chunked = vals
+                .iter()
+                .map(|&val| if f32::is_nan(val) { None } else { Some(val) })
+                .collect_trusted();
+            ca.with_name(name).into_series().into()
+        } else {
+            mmap_numpy_array(py, name, array)
+        }
+    }
+
+    #[staticmethod]
     fn new_f64(py: Python, name: &str, array: &PyArray1<f64>, nan_is_null: bool) -> PySeries {
-        let array = array.readonly();
-        let vals = array.as_slice().unwrap();
-        py.allow_threads(|| {
-            if nan_is_null {
-                let mut ca: Float64Chunked = vals
-                    .iter()
-                    .map(|&val| if f64::is_nan(val) { None } else { Some(val) })
-                    .collect_trusted();
-                ca.rename(name);
-                ca.into_series().into()
-            } else {
-                Series::new(name, vals).into()
-            }
-        })
+        if nan_is_null {
+            let array = array.readonly();
+            let vals = array.as_slice().unwrap();
+            let ca: Float64Chunked = vals
+                .iter()
+                .map(|&val| if f64::is_nan(val) { None } else { Some(val) })
+                .collect_trusted();
+            ca.with_name(name).into_series().into()
+        } else {
+            mmap_numpy_array(py, name, array)
+        }
     }
 }
 
@@ -176,37 +190,45 @@ impl PySeries {
         val: Vec<Wrap<AnyValue<'_>>>,
         strict: bool,
     ) -> PyResult<PySeries> {
+        // From AnyValues is fallible.
         let avs = slice_extract_wrapped(&val);
-        // from anyvalues is fallible
         let s = Series::from_any_values(name, avs, strict).map_err(PyPolarsErr::from)?;
         Ok(s.into())
     }
 
     #[staticmethod]
+    fn new_from_anyvalues_and_dtype(
+        name: &str,
+        val: Vec<Wrap<AnyValue<'_>>>,
+        dtype: Wrap<DataType>,
+        strict: bool,
+    ) -> PyResult<PySeries> {
+        let avs = slice_extract_wrapped(&val);
+        let s = Series::from_any_values_and_dtype(name, avs, &dtype.0, strict)
+            .map_err(PyPolarsErr::from)?;
+        Ok(s.into())
+    }
+
+    #[staticmethod]
     fn new_str(name: &str, val: Wrap<Utf8Chunked>, _strict: bool) -> Self {
-        let mut s = val.0.into_series();
-        s.rename(name);
-        s.into()
+        val.0.into_series().with_name(name).into()
     }
 
     #[staticmethod]
     fn new_binary(name: &str, val: Wrap<BinaryChunked>, _strict: bool) -> Self {
-        let mut s = val.0.into_series();
-        s.rename(name);
-        s.into()
+        val.0.into_series().with_name(name).into()
     }
 
     #[staticmethod]
     fn new_null(name: &str, val: &PyAny, _strict: bool) -> PyResult<Self> {
-        let s = Series::new_null(name, val.len()?);
-        Ok(s.into())
+        Ok(Series::new_null(name, val.len()?).into())
     }
 
     #[staticmethod]
     pub fn new_object(name: &str, val: Vec<ObjectValue>, _strict: bool) -> Self {
         #[cfg(feature = "object")]
         {
-            // object builder must be registered. this is done on import
+            // Object builder must be registered. This is done on import.
             let s = ObjectChunked::<ObjectValue>::new_from_vec(name, val).into_series();
             s.into()
         }
@@ -255,9 +277,9 @@ impl PySeries {
 
     #[staticmethod]
     fn new_decimal(name: &str, val: Vec<Wrap<AnyValue<'_>>>, strict: bool) -> PyResult<PySeries> {
-        // TODO: do we have to respect 'strict' here? it's possible if we want to
+        // TODO: do we have to respect 'strict' here? It's possible if we want to.
         let avs = slice_extract_wrapped(&val);
-        // create a fake dtype with a placeholder "none" scale, to be inferred later
+        // Create a fake dtype with a placeholder "none" scale, to be inferred later.
         let dtype = DataType::Decimal(None, None);
         let s = Series::from_any_values_and_dtype(name, avs, &dtype, strict)
             .map_err(PyPolarsErr::from)?;
@@ -271,16 +293,7 @@ impl PySeries {
         match arr.data_type() {
             ArrowDataType::LargeList(_) => {
                 let array = arr.as_any().downcast_ref::<LargeListArray>().unwrap();
-
-                let mut previous = 0;
-                let mut fast_explode = true;
-                for &o in array.offsets().as_slice()[1..].iter() {
-                    if o == previous {
-                        fast_explode = false;
-                        break;
-                    }
-                    previous = o;
-                }
+                let fast_explode = array.offsets().as_slice().windows(2).all(|w| w[0] != w[1]);
 
                 let mut out = ListChunked::with_chunk(name, array.clone());
                 if fast_explode {

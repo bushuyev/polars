@@ -6,7 +6,7 @@ import pytest
 
 import polars as pl
 from polars.interchange.buffer import PolarsBuffer
-from polars.interchange.protocol import DlpackDeviceType
+from polars.interchange.protocol import CopyNotAllowedError, DlpackDeviceType
 
 
 @pytest.mark.parametrize(
@@ -26,7 +26,9 @@ def test_init_invalid_input() -> None:
     s = pl.Series([1, 2])
     data = pl.concat([s, s], rechunk=False)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(
+        CopyNotAllowedError, match="non-contiguous buffer must be made contiguous"
+    ):
         PolarsBuffer(data, allow_copy=False)
 
 
@@ -40,6 +42,7 @@ def test_init_invalid_input() -> None:
         (pl.Series(["a", "b", "a", "c", "a"], dtype=pl.Categorical), 20),
         (pl.Series([True, False], dtype=pl.Boolean), 1),
         (pl.Series([True] * 9, dtype=pl.Boolean), 2),
+        (pl.Series([True] * 9, dtype=pl.Boolean)[5:], 2),
     ],
 )
 def test_bufsize(data: pl.Series, expected: int) -> None:

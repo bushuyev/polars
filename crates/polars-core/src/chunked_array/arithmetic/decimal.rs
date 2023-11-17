@@ -1,7 +1,8 @@
-use polars_arrow::compute::arithmetics::decimal;
+use arrow::legacy::compute::arithmetics::decimal;
 
 use super::*;
 use crate::prelude::DecimalChunked;
+use crate::utils::align_chunks_binary;
 
 // TODO: remove
 impl ArrayArithmetics for i128 {

@@ -18,6 +18,12 @@ Computation
     Expr.cbrt
     Expr.cos
     Expr.cosh
+    Expr.cot
+    Expr.cum_count
+    Expr.cum_max
+    Expr.cum_min
+    Expr.cum_prod
+    Expr.cum_sum
     Expr.cumcount
     Expr.cummax
     Expr.cummin
@@ -41,9 +47,12 @@ Computation
     Expr.n_unique
     Expr.null_count
     Expr.pct_change
+    Expr.peak_max
+    Expr.peak_min
     Expr.radians
     Expr.rank
     Expr.rolling_apply
+    Expr.rolling_map
     Expr.rolling_max
     Expr.rolling_mean
     Expr.rolling_median

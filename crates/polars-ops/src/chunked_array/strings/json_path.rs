@@ -9,7 +9,7 @@ pub fn extract_json<'a>(expr: &PathCompiled, json_str: &'a str) -> Option<Cow<'a
     serde_json::from_str(json_str).ok().and_then(|value| {
         // TODO: a lot of heap allocations here. Improve json path by adding a take?
         let result = expr.select(&value).ok()?;
-        let first = *result.get(0)?;
+        let first = *result.first()?;
 
         match first {
             Value::String(s) => Some(Cow::Owned(s.clone())),
@@ -45,7 +45,7 @@ pub trait Utf8JsonPathImpl: AsUtf8 {
             .map_err(|e| polars_err!(ComputeError: "error compiling JSONpath expression {}", e))?;
         Ok(self
             .as_utf8()
-            .apply_on_opt(|opt_s| opt_s.and_then(|s| extract_json(&pat, s))))
+            .apply(|opt_s| opt_s.and_then(|s| extract_json(&pat, s))))
     }
 
     /// Returns the inferred DataType for JSON values for each row
@@ -93,7 +93,7 @@ pub trait Utf8JsonPathImpl: AsUtf8 {
             .map_err(|e| polars_err!(ComputeError: "error compiling JSONpath expression: {}", e))?;
         Ok(self
             .as_utf8()
-            .apply_on_opt(|opt_s| opt_s.and_then(|s| select_json(&pat, s))))
+            .apply(|opt_s| opt_s.and_then(|s| select_json(&pat, s))))
     }
 
     fn json_path_extract(

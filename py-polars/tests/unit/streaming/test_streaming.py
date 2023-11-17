@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import polars as pl
-from polars.exceptions import PolarsInefficientApplyWarning
+from polars.exceptions import PolarsInefficientMapWarning
 from polars.testing import assert_frame_equal
 
 if TYPE_CHECKING:
@@ -25,7 +25,7 @@ def test_streaming_categoricals_5921() -> None:
             pl.DataFrame({"X": ["a", "a", "a", "b", "b"], "Y": [2, 2, 2, 1, 1]})
             .lazy()
             .with_columns(pl.col("X").cast(pl.Categorical))
-            .groupby("X")
+            .group_by("X")
             .agg(pl.col("Y").min())
             .sort("Y", descending=True)
             .collect(streaming=True)
@@ -34,23 +34,23 @@ def test_streaming_categoricals_5921() -> None:
         out_eager = (
             pl.DataFrame({"X": ["a", "a", "a", "b", "b"], "Y": [2, 2, 2, 1, 1]})
             .with_columns(pl.col("X").cast(pl.Categorical))
-            .groupby("X")
+            .group_by("X")
             .agg(pl.col("Y").min())
             .sort("Y", descending=True)
         )
 
     for out in [out_eager, out_lazy]:
         assert out.dtypes == [pl.Categorical, pl.Int64]
-        assert out.to_dict(False) == {"X": ["a", "b"], "Y": [2, 1]}
+        assert out.to_dict(as_series=False) == {"X": ["a", "b"], "Y": [2, 1]}
 
 
 def test_streaming_block_on_literals_6054() -> None:
     df = pl.DataFrame({"col_1": [0] * 5 + [1] * 5})
     s = pl.Series("col_2", list(range(10)))
 
-    assert df.lazy().with_columns(s).groupby("col_1").agg(pl.all().first()).collect(
+    assert df.lazy().with_columns(s).group_by("col_1").agg(pl.all().first()).collect(
         streaming=True
-    ).sort("col_1").to_dict(False) == {"col_1": [0, 1], "col_2": [0, 5]}
+    ).sort("col_1").to_dict(as_series=False) == {"col_1": [0, 1], "col_2": [0, 5]}
 
 
 def test_streaming_streamable_functions(monkeypatch: Any, capfd: Any) -> None:
@@ -58,12 +58,15 @@ def test_streaming_streamable_functions(monkeypatch: Any, capfd: Any) -> None:
     assert (
         pl.DataFrame({"a": [1, 2, 3]})
         .lazy()
-        .map(
+        .map_batches(
             function=lambda df: df.with_columns(pl.col("a").alias("b")),
             schema={"a": pl.Int64, "b": pl.Int64},
             streamable=True,
         )
-    ).collect(streaming=True).to_dict(False) == {"a": [1, 2, 3], "b": [1, 2, 3]}
+    ).collect(streaming=True).to_dict(as_series=False) == {
+        "a": [1, 2, 3],
+        "b": [1, 2, 3],
+    }
 
     (_, err) = capfd.readouterr()
     assert "df -> function -> ordered_sink" in err
@@ -94,19 +97,19 @@ def test_streaming_literal_expansion() -> None:
         z=pl.col("z"),
     )
 
-    assert q.collect(streaming=True).to_dict(False) == {
+    assert q.collect(streaming=True).to_dict(as_series=False) == {
         "x": ["constant", "constant"],
         "y": ["a", "b"],
         "z": [1, 2],
     }
-    assert q.groupby(["x", "y"]).agg(pl.mean("z")).sort("y").collect(
+    assert q.group_by(["x", "y"]).agg(pl.mean("z")).sort("y").collect(
         streaming=True
-    ).to_dict(False) == {
+    ).to_dict(as_series=False) == {
         "x": ["constant", "constant"],
         "y": ["a", "b"],
         "z": [1.0, 2.0],
     }
-    assert q.groupby(["x"]).agg(pl.mean("z")).collect().to_dict(False) == {
+    assert q.group_by(["x"]).agg(pl.mean("z")).collect().to_dict(as_series=False) == {
         "x": ["constant"],
         "z": [1.5],
     }
@@ -154,12 +157,12 @@ def test_streaming_apply(monkeypatch: Any, capfd: Any) -> None:
     q = pl.DataFrame({"a": [1, 2]}).lazy()
 
     with pytest.warns(
-        PolarsInefficientApplyWarning, match="In this case, you can replace"
+        PolarsInefficientMapWarning, match="In this case, you can replace"
     ):
         (
-            q.select(pl.col("a").apply(lambda x: x * 2, return_dtype=pl.Int64)).collect(
-                streaming=True
-            )
+            q.select(
+                pl.col("a").map_elements(lambda x: x * 2, return_dtype=pl.Int64)
+            ).collect(streaming=True)
         )
         (_, err) = capfd.readouterr()
         assert "df -> projection -> ordered_sink" in err
@@ -187,10 +190,13 @@ def test_streaming_sortedness_propagation_9494() -> None:
         )
         .lazy()
         .sort("when")
-        .groupby_dynamic("when", every="1mo")
+        .group_by_dynamic("when", every="1mo")
         .agg(pl.col("what").sum())
         .collect(streaming=True)
-    ).to_dict(False) == {"when": [date(2023, 5, 1), date(2023, 6, 1)], "what": [3, 3]}
+    ).to_dict(as_series=False) == {
+        "when": [date(2023, 5, 1), date(2023, 6, 1)],
+        "what": [3, 3],
+    }
 
 
 @pytest.mark.write_disk()
@@ -215,7 +221,7 @@ def test_streaming_generic_left_and_inner_join_from_disk(tmp_path: Path) -> None
     df1.write_parquet(p1)
 
     lf0 = pl.scan_parquet(p0)
-    lf1 = pl.scan_parquet(p1).select(pl.all().suffix("_r"))
+    lf1 = pl.scan_parquet(p1).select(pl.all().name.suffix("_r"))
 
     join_strategies: list[JoinStrategy] = ["left", "inner"]
     for how in join_strategies:
@@ -226,43 +232,18 @@ def test_streaming_generic_left_and_inner_join_from_disk(tmp_path: Path) -> None
 def test_streaming_9776() -> None:
     df = pl.DataFrame({"col_1": ["a"] * 1000, "ID": [None] + ["a"] * 999})
     ordered = (
-        df.groupby("col_1", "ID", maintain_order=True)
+        df.group_by("col_1", "ID", maintain_order=True)
         .count()
         .filter(pl.col("col_1") == "a")
     )
     unordered = (
-        df.groupby("col_1", "ID", maintain_order=False)
+        df.group_by("col_1", "ID", maintain_order=False)
         .count()
         .filter(pl.col("col_1") == "a")
     )
     expected = [("a", None, 1), ("a", "a", 999)]
     assert ordered.rows() == expected
     assert unordered.sort(["col_1", "ID"]).rows() == expected
-
-
-@pytest.mark.write_disk()
-def test_streaming_10115(tmp_path: Path) -> None:
-    in_path = tmp_path / "in.parquet"
-    out_path = tmp_path / "out.parquet"
-
-    # this fails if the schema will be incorrectly due to the projection
-    # pushdown
-    (pl.DataFrame([{"x": 1, "y": "foo"}]).write_parquet(in_path))
-
-    joiner = pl.LazyFrame([{"y": "foo", "z": "_"}])
-
-    (
-        pl.scan_parquet(in_path)
-        .join(joiner, how="left", on="y")
-        .select("x", "y", "z")
-        .sink_parquet(out_path)  #
-    )
-
-    assert pl.read_parquet(out_path).to_dict(False) == {
-        "x": [1],
-        "y": ["foo"],
-        "z": ["_"],
-    }
 
 
 @pytest.mark.write_disk()
@@ -297,13 +278,13 @@ def test_streaming_empty_df() -> None:
         .collect(streaming=True)
     )
 
-    assert result.to_dict(False) == {"a": [], "b": [], "b_right": []}
+    assert result.to_dict(as_series=False) == {"a": [], "b": [], "b_right": []}
 
 
 def test_streaming_duplicate_cols_5537() -> None:
     assert pl.DataFrame({"a": [1, 2, 3], "b": [1, 2, 3]}).lazy().with_columns(
         [(pl.col("a") * 2).alias("foo"), (pl.col("a") * 3)]
-    ).collect(streaming=True).to_dict(False) == {
+    ).collect(streaming=True).to_dict(as_series=False) == {
         "a": [3, 6, 9],
         "b": [1, 2, 3],
         "foo": [2, 4, 6],
@@ -317,7 +298,9 @@ def test_null_sum_streaming_10455() -> None:
             "y": [None] * 10,
         }
     )
-    assert df.lazy().groupby("x").sum().collect(streaming=True).to_dict(False) == {
+    assert df.lazy().group_by("x").sum().collect(streaming=True).to_dict(
+        as_series=False
+    ) == {
         "x": [1],
         "y": [0.0],
     }
@@ -331,7 +314,7 @@ def test_boolean_agg_schema() -> None:
         }
     ).lazy()
 
-    agg_df = df.groupby("x").agg(pl.col("y").max().alias("max_y"))
+    agg_df = df.group_by("x").agg(pl.col("y").max().alias("max_y"))
 
     for streaming in [True, False]:
         assert (
@@ -339,3 +322,13 @@ def test_boolean_agg_schema() -> None:
             == agg_df.schema
             == {"x": pl.Int64, "max_y": pl.Boolean}
         )
+
+
+def test_streaming_11219() -> None:
+    lf = pl.LazyFrame({"a": [1, 2, 3], "b": ["a", "c", None]})
+    lf_other = pl.LazyFrame({"c": ["foo", "ham"]})
+    lf_other2 = pl.LazyFrame({"c": ["foo", "ham"]})
+
+    assert lf.with_context([lf_other, lf_other2]).select(
+        pl.col("b") + pl.col("c").first()
+    ).collect(streaming=True).to_dict(as_series=False) == {"b": ["afoo", "cfoo", None]}

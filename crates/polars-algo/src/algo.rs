@@ -47,7 +47,7 @@ pub fn hist(s: &Series, bins: Option<&Series>, bin_count: Option<usize>) -> Resu
         DataType::UInt16 => (lit(u32::MIN), AnyValue::UInt16(u16::MAX)),
         _ => polars_bail!(
             InvalidOperation:
-            "cannot take histogram of non-numeric types; consider a groupby and count"
+            "cannot take histogram of non-numeric types; consider a group_by and count"
         ),
     };
     let mut bins = bins.extend_constant(max_value, 1)?;
@@ -63,7 +63,7 @@ pub fn hist(s: &Series, bins: Option<&Series>, bin_count: Option<usize>) -> Resu
             format_str(
                 "({}, {}]",
                 [
-                    col(breakpoint_str).shift_and_fill(1, min_value),
+                    col(breakpoint_str).shift_and_fill(lit(1), min_value),
                     col(breakpoint_str),
                 ],
             )?
@@ -92,7 +92,7 @@ pub fn hist(s: &Series, bins: Option<&Series>, bin_count: Option<usize>) -> Resu
 
     let out = out
         .select(["category", s.name()])?
-        .groupby(["category"])?
+        .group_by(["category"])?
         .count()?;
 
     cuts.left_join(&out, [category_str], [category_str])?

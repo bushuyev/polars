@@ -37,7 +37,7 @@ fn test_streaming_parquet() -> PolarsResult<()> {
     let q = get_parquet_file();
 
     let q = q
-        .groupby([col("sugars_g")])
+        .group_by([col("sugars_g")])
         .agg([((lit(1) - col("fats_g")) + col("calories")).sum()])
         .sort("sugars_g", Default::default());
 
@@ -51,7 +51,7 @@ fn test_streaming_csv() -> PolarsResult<()> {
 
     let q = q
         .select([col("sugars_g"), col("calories")])
-        .groupby([col("sugars_g")])
+        .group_by([col("sugars_g")])
         .agg([col("calories").sum()])
         .sort("sugars_g", Default::default());
 
@@ -95,7 +95,7 @@ fn test_streaming_multiple_keys_aggregate() -> PolarsResult<()> {
 
     let q = q
         .filter(col("sugars_g").gt(lit(10)))
-        .groupby([col("sugars_g"), col("calories")])
+        .group_by([col("sugars_g"), col("calories")])
         .agg([
             (col("fats_g") * lit(10)).sum(),
             col("calories").mean().alias("cal_mean"),
@@ -117,7 +117,7 @@ fn test_streaming_first_sum() -> PolarsResult<()> {
 
     let q = q
         .select([col("sugars_g"), col("calories")])
-        .groupby([col("sugars_g")])
+        .group_by([col("sugars_g")])
         .agg([
             col("calories").sum(),
             col("calories").first().alias("calories_first"),
@@ -146,7 +146,7 @@ fn test_streaming_aggregate_slice() -> PolarsResult<()> {
     let q = get_parquet_file();
 
     let q = q
-        .groupby([col("sugars_g")])
+        .group_by([col("sugars_g")])
         .agg([((lit(1) - col("fats_g")) + col("calories")).sum()])
         .slice(3, 3);
 
@@ -173,7 +173,7 @@ fn test_streaming_cross_join() -> PolarsResult<()> {
         .cross_join(q.clone())
         .filter(col("calories").gt(col("calories_right")));
     let q2 = q1
-        .select([all().suffix("_second")])
+        .select([all().name().suffix("_second")])
         .cross_join(q)
         .filter(col("calories_right_second").lt(col("calories")))
         .select([
@@ -297,7 +297,7 @@ fn test_streaming_partial() -> PolarsResult<()> {
         .finish();
 
     let q = q.left_join(
-        lf_left.select([all().suffix("_foo")]),
+        lf_left.select([all().name().suffix("_foo")]),
         col("a"),
         col("a_foo"),
     );
@@ -311,7 +311,7 @@ fn test_streaming_aggregate_join() -> PolarsResult<()> {
     let q = get_parquet_file();
 
     let q = q
-        .groupby([col("sugars_g")])
+        .group_by([col("sugars_g")])
         .agg([((lit(1) - col("fats_g")) + col("calories")).sum()])
         .slice(0, 3);
 

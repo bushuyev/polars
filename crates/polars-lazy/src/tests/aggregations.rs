@@ -1,6 +1,26 @@
 use polars_ops::prelude::ListNameSpaceImpl;
+use polars_utils::idxvec;
 
 use super::*;
+
+#[test]
+#[cfg(feature = "dtype-datetime")]
+fn test_agg_list_type() -> PolarsResult<()> {
+    let s = Series::new("foo", &[1, 2, 3]);
+    let s = s.cast(&DataType::Datetime(TimeUnit::Nanoseconds, None))?;
+
+    let l = unsafe { s.agg_list(&GroupsProxy::Idx(vec![(0, idxvec![0, 1, 2])].into())) };
+
+    let result = match l.dtype() {
+        DataType::List(inner) => {
+            matches!(&**inner, DataType::Datetime(TimeUnit::Nanoseconds, None))
+        },
+        _ => false,
+    };
+    assert!(result);
+
+    Ok(())
+}
 
 #[test]
 fn test_agg_exprs() -> PolarsResult<()> {
@@ -9,7 +29,7 @@ fn test_agg_exprs() -> PolarsResult<()> {
     // a binary expression followed by a function and an aggregation. See if it runs
     let out = df
         .lazy()
-        .groupby_stable([col("cars")])
+        .group_by_stable([col("cars")])
         .agg([(lit(1) - col("A"))
             .map(|s| Ok(Some(&s * 2)), GetOutput::same_type())
             .alias("foo")])
@@ -30,7 +50,7 @@ fn test_agg_unique_first() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby_stable([col("g")])
+        .group_by_stable([col("g")])
         .agg([
             col("v").unique().first().alias("v_first"),
             col("v").unique().sort(false).first().alias("true_first"),
@@ -52,6 +72,7 @@ fn test_agg_unique_first() -> PolarsResult<()> {
 }
 
 #[test]
+#[cfg(feature = "csv")]
 fn test_lazy_agg_scan() {
     let lf = scan_foods_csv;
     let df = lf().min().collect().unwrap();
@@ -64,7 +85,7 @@ fn test_lazy_agg_scan() {
 }
 
 #[test]
-fn test_cumsum_agg_as_key() -> PolarsResult<()> {
+fn test_cum_sum_agg_as_key() -> PolarsResult<()> {
     let df = df![
         "depth" => &[0i32, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         "soil" => &["peat", "peat", "peat", "silt", "silt", "silt", "sand", "sand", "peat", "peat"]
@@ -73,11 +94,11 @@ fn test_cumsum_agg_as_key() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby([col("soil")
-            .neq(col("soil").shift_and_fill(1, col("soil").first()))
-            .cumsum(false)
+        .group_by([col("soil")
+            .neq(col("soil").shift_and_fill(lit(1), col("soil").first()))
+            .cum_sum(false)
             .alias("key")])
-        .agg([col("depth").max().keep_name()])
+        .agg([col("depth").max().name().keep()])
         .sort("depth", SortOptions::default())
         .collect()?;
 
@@ -100,7 +121,7 @@ fn test_auto_skew_kurtosis_agg() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby([col("fruits")])
+        .group_by([col("fruits")])
         .agg([
             col("B").skew(false).alias("bskew"),
             col("B").kurtosis(false, false).alias("bkurt"),
@@ -121,30 +142,30 @@ fn test_auto_list_agg() -> PolarsResult<()> {
     let out = df
         .clone()
         .lazy()
-        .groupby([col("fruits")])
-        .agg([col("B").shift_and_fill(-1, lit(-1)).alias("foo")])
+        .group_by([col("fruits")])
+        .agg([col("B").shift_and_fill(lit(-1), lit(-1)).alias("foo")])
         .collect()?;
 
     assert!(matches!(out.column("foo")?.dtype(), DataType::List(_)));
 
-    // test if it runs and groupby executor thus implements a list after shift_and_fill
+    // test if it runs and group_by executor thus implements a list after shift_and_fill
     let _out = df
         .clone()
         .lazy()
-        .groupby([col("fruits")])
-        .agg([col("B").shift_and_fill(-1, lit(-1))])
+        .group_by([col("fruits")])
+        .agg([col("B").shift_and_fill(lit(-1), lit(-1))])
         .collect()?;
 
     // test if window expr executor adds list
     let _out = df
         .clone()
         .lazy()
-        .select([col("B").shift_and_fill(-1, lit(-1)).alias("foo")])
+        .select([col("B").shift_and_fill(lit(-1), lit(-1)).alias("foo")])
         .collect()?;
 
     let _out = df
         .lazy()
-        .select([col("B").shift_and_fill(-1, lit(-1))])
+        .select([col("B").shift_and_fill(lit(-1), lit(-1))])
         .collect()?;
     Ok(())
 }
@@ -157,7 +178,7 @@ fn test_power_in_agg_list1() -> PolarsResult<()> {
     // a flat apply on a final aggregation
     let out = df
         .lazy()
-        .groupby([col("fruits")])
+        .group_by([col("fruits")])
         .agg([
             col("A")
                 .rolling_min(RollingOptions {
@@ -183,7 +204,7 @@ fn test_power_in_agg_list1() -> PolarsResult<()> {
         .collect()?;
 
     let agg = out.column("foo")?.list()?;
-    let first = agg.get(0).unwrap();
+    let first = agg.get_as_series(0).unwrap();
     let vals = first.f64()?;
     assert_eq!(Vec::from(vals), &[Some(1.0), Some(4.0), Some(25.0)]);
 
@@ -199,7 +220,7 @@ fn test_power_in_agg_list2() -> PolarsResult<()> {
     // a flat apply on evaluate_on_groups
     let out = df
         .lazy()
-        .groupby([col("fruits")])
+        .group_by([col("fruits")])
         .agg([col("A")
             .rolling_min(RollingOptions {
                 window_size: Duration::new(2),
@@ -233,7 +254,7 @@ fn test_binary_agg_context_0() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby_stable([col("groups")])
+        .group_by_stable([col("groups")])
         .agg([when(col("vals").first().neq(lit(1)))
             .then(repeat(lit("a"), count()))
             .otherwise(repeat(lit("b"), count()))
@@ -274,7 +295,7 @@ fn test_binary_agg_context_1() -> PolarsResult<()> {
     let out = df
         .clone()
         .lazy()
-        .groupby_stable([col("groups")])
+        .group_by_stable([col("groups")])
         .agg([when(col("vals").eq(lit(1)))
             .then(col("vals").sum())
             .otherwise(lit(90))
@@ -295,7 +316,7 @@ fn test_binary_agg_context_1() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby_stable([col("groups")])
+        .group_by_stable([col("groups")])
         .agg([when(col("vals").eq(lit(1)))
             .then(lit(90))
             .otherwise(col("vals").sum())
@@ -329,7 +350,7 @@ fn test_binary_agg_context_2() -> PolarsResult<()> {
     let out = df
         .clone()
         .lazy()
-        .groupby_stable([col("groups")])
+        .group_by_stable([col("groups")])
         .agg([(col("vals").first() - col("vals")).alias("vals")])
         .collect()?;
 
@@ -347,7 +368,7 @@ fn test_binary_agg_context_2() -> PolarsResult<()> {
     // Same, but now we reverse the lhs / rhs.
     let out = df
         .lazy()
-        .groupby_stable([col("groups")])
+        .group_by_stable([col("groups")])
         .agg([((col("vals")) - col("vals").first()).alias("vals")])
         .collect()?;
 
@@ -371,7 +392,7 @@ fn test_binary_agg_context_3() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby_stable([col("cars")])
+        .group_by_stable([col("cars")])
         .agg([(col("A") - col("A").first()).last().alias("last")])
         .collect()?;
 
@@ -391,8 +412,8 @@ fn test_shift_elementwise_issue_2509() -> PolarsResult<()> {
     let out = df
         .lazy()
         // Don't use maintain order here! That hides the bug
-        .groupby([col("x")])
-        .agg(&[(col("y").shift(-1) + col("x")).alias("sum")])
+        .group_by([col("x")])
+        .agg(&[(col("y").shift(lit(-1)) + col("x")).alias("sum")])
         .sort("x", Default::default())
         .collect()?;
 
@@ -419,8 +440,8 @@ fn take_aggregations() -> PolarsResult<()> {
     let out = df
         .clone()
         .lazy()
-        .groupby([col("user")])
-        .agg([col("book").take(col("count").arg_max()).alias("fav_book")])
+        .group_by([col("user")])
+        .agg([col("book").get(col("count").arg_max()).alias("fav_book")])
         .sort("user", Default::default())
         .collect()?;
 
@@ -432,11 +453,11 @@ fn take_aggregations() -> PolarsResult<()> {
     let out = df
         .clone()
         .lazy()
-        .groupby([col("user")])
+        .group_by([col("user")])
         .agg([
             // keep the head as it test slice correctness
             col("book")
-                .take(
+                .gather(
                     col("count")
                         .arg_sort(SortOptions {
                             descending: true,
@@ -458,8 +479,8 @@ fn take_aggregations() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby([col("user")])
-        .agg([col("book").take(lit(0)).alias("take_lit")])
+        .group_by([col("user")])
+        .agg([col("book").get(lit(0)).alias("take_lit")])
         .sort("user", Default::default())
         .collect()?;
 
@@ -483,7 +504,7 @@ fn test_take_consistency() -> PolarsResult<()> {
                 multithreaded: true,
                 maintain_order: false,
             })
-            .take(lit(0))])
+            .get(lit(0))])
         .collect()?;
 
     let a = out.column("A")?;
@@ -493,7 +514,7 @@ fn test_take_consistency() -> PolarsResult<()> {
     let out = df
         .clone()
         .lazy()
-        .groupby_stable([col("cars")])
+        .group_by_stable([col("cars")])
         .agg([col("A")
             .arg_sort(SortOptions {
                 descending: true,
@@ -501,7 +522,7 @@ fn test_take_consistency() -> PolarsResult<()> {
                 multithreaded: true,
                 maintain_order: false,
             })
-            .take(lit(0))])
+            .get(lit(0))])
         .collect()?;
 
     let out = out.column("A")?;
@@ -510,7 +531,7 @@ fn test_take_consistency() -> PolarsResult<()> {
 
     let out_df = df
         .lazy()
-        .groupby_stable([col("cars")])
+        .group_by_stable([col("cars")])
         .agg([
             col("A"),
             col("A")
@@ -520,10 +541,10 @@ fn test_take_consistency() -> PolarsResult<()> {
                     multithreaded: true,
                     maintain_order: false,
                 })
-                .take(lit(0))
+                .get(lit(0))
                 .alias("1"),
             col("A")
-                .take(
+                .get(
                     col("A")
                         .arg_sort(SortOptions {
                             descending: true,
@@ -531,7 +552,7 @@ fn test_take_consistency() -> PolarsResult<()> {
                             multithreaded: true,
                             maintain_order: false,
                         })
-                        .take(lit(0)),
+                        .get(lit(0)),
                 )
                 .alias("2"),
         ])
@@ -555,10 +576,7 @@ fn test_take_in_groups() -> PolarsResult<()> {
     let out = df
         .lazy()
         .sort("fruits", Default::default())
-        .select([col("B")
-            .take(lit(Series::new("", &[0u32])))
-            .over([col("fruits")])
-            .alias("taken")])
+        .select([col("B").get(lit(0u32)).over([col("fruits")]).alias("taken")])
         .collect()?;
 
     assert_eq!(

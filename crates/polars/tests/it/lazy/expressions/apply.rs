@@ -28,7 +28,7 @@ fn test_groups_update() -> PolarsResult<()> {
 
     let out = df
         .lazy()
-        .groupby_stable([col("group")])
+        .group_by_stable([col("group")])
         .agg([col("id").unique_counts().log(2.0)])
         .explode([col("id")])
         .collect()?;
@@ -50,8 +50,8 @@ fn test_groups_update_binary_shift_log() -> PolarsResult<()> {
         "b" => [1, 2, 1, 2],
     ]?
     .lazy()
-    .groupby([col("b")])
-    .agg([col("a") - col("a").shift(1).log(2.0)])
+    .group_by([col("b")])
+    .agg([col("a") - col("a").shift(lit(1)).log(2.0)])
     .sort("b", Default::default())
     .explode([col("a")])
     .collect()?;
@@ -70,7 +70,7 @@ fn test_expand_list() -> PolarsResult<()> {
         "b" => [2, 3],
     ]?
     .lazy()
-    .select([cols(["a", "b"]).cumsum(false)])
+    .select([cols(["a", "b"]).cum_sum(false)])
     .collect()?;
 
     let expected = df![
@@ -93,7 +93,7 @@ fn test_apply_groups_empty() -> PolarsResult<()> {
     let out = df
         .lazy()
         .filter(col("id").eq(lit(2)))
-        .groupby([col("id")])
+        .group_by([col("id")])
         .agg([col("hi").drop_nulls().unique()])
         .collect()?;
 
