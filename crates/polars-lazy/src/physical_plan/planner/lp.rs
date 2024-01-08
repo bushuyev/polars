@@ -90,7 +90,7 @@ fn partitionable_gb(
                                                 | AAggExpr::Sum(_)
                                                 | AAggExpr::Last(_)
                                                 | AAggExpr::First(_)
-                                                | AAggExpr::Count(_)
+                                                | AAggExpr::Count(_, true)
                                         )
                         },
                         Function {input, options, ..} => {
@@ -123,7 +123,7 @@ fn partitionable_gb(
                     for name in aexpr_to_leaf_names(*agg, expr_arena) {
                         let dtype = _input_schema.get(&name).unwrap();
 
-                        if let DataType::Object(_) = dtype {
+                        if let DataType::Object(_, _) = dtype {
                             partitionable = false;
                             break;
                         }
@@ -171,6 +171,15 @@ pub fn create_physical_plan(
                 .map(|node| create_physical_plan(node, lp_arena, expr_arena))
                 .collect::<PolarsResult<Vec<_>>>()?;
             Ok(Box::new(executors::UnionExec { inputs, options }))
+        },
+        HConcat {
+            inputs, options, ..
+        } => {
+            let inputs = inputs
+                .into_iter()
+                .map(|node| create_physical_plan(node, lp_arena, expr_arena))
+                .collect::<PolarsResult<Vec<_>>>()?;
+            Ok(Box::new(executors::HConcatExec { inputs, options }))
         },
         Slice { input, offset, len } => {
             let input = create_physical_plan(input, lp_arena, expr_arena)?;

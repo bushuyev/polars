@@ -1,12 +1,13 @@
 import pytest
 
 import polars as pl
+from polars.testing import assert_frame_equal
 from polars.type_aliases import TransferEncoding
 
 
 def test_binary_conversions() -> None:
     df = pl.DataFrame({"blob": [b"abc", None, b"cde"]}).with_columns(
-        pl.col("blob").cast(pl.Utf8).alias("decoded_blob")
+        pl.col("blob").cast(pl.String).alias("decoded_blob")
     )
 
     assert df.to_dict(as_series=False) == {
@@ -15,7 +16,7 @@ def test_binary_conversions() -> None:
     }
     assert df[0, 0] == b"abc"
     assert df[1, 0] is None
-    assert df.dtypes == [pl.Binary, pl.Utf8]
+    assert df.dtypes == [pl.Binary, pl.String]
 
 
 def test_contains() -> None:
@@ -132,7 +133,7 @@ def test_compare_encode_between_lazy_and_eager_6814(encoding: TransferEncoding) 
     result_eager = df.select(expr)
     dtype = result_eager["x"].dtype
     result_lazy = df.lazy().select(expr).select(pl.col(dtype)).collect()
-    assert result_eager.frame_equal(result_lazy)
+    assert_frame_equal(result_eager, result_lazy)
 
 
 @pytest.mark.parametrize(
@@ -148,4 +149,4 @@ def test_compare_decode_between_lazy_and_eager_6814(encoding: TransferEncoding) 
     result_eager = df.select(expr)
     dtype = result_eager["x"].dtype
     result_lazy = df.lazy().select(expr).select(pl.col(dtype)).collect()
-    assert result_eager.frame_equal(result_lazy)
+    assert_frame_equal(result_eager, result_lazy)

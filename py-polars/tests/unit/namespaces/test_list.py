@@ -395,7 +395,7 @@ def test_list_gather() -> None:
     # use another list to make sure negative indices are respected
     gatherer = pl.Series([[-1, 1], [-1, 1], [-1, -2]])
     assert s.list.gather(gatherer).to_list() == [[3, 2], [5, 5], [8, 7]]
-    with pytest.raises(pl.ComputeError, match=r"gather indices are out of bounds"):
+    with pytest.raises(pl.OutOfBoundsError, match=r"gather indices are out of bounds"):
         s.list.gather([1, 2])
     s = pl.Series(
         [["A", "B", "C"], ["A"], ["B"], ["1", "2"], ["e"]],
@@ -417,7 +417,7 @@ def test_list_gather() -> None:
     ]
     s = pl.Series([[42, 1, 2], [5, 6, 7]])
 
-    with pytest.raises(pl.ComputeError, match=r"gather indices are out of bounds"):
+    with pytest.raises(pl.OutOfBoundsError, match=r"gather indices are out of bounds"):
         s.list.gather([[0, 1, 2, 3], [0, 1, 2, 3]])
 
     assert s.list.gather([0, 1, 2, 3], null_on_oob=True).to_list() == [
@@ -428,7 +428,7 @@ def test_list_gather() -> None:
 
 def test_list_eval_all_null() -> None:
     df = pl.DataFrame({"foo": [1, 2, 3], "bar": [None, None, None]}).with_columns(
-        pl.col("bar").cast(pl.List(pl.Utf8))
+        pl.col("bar").cast(pl.List(pl.String))
     )
 
     assert df.select(pl.col("bar").list.eval(pl.element())).to_dict(
@@ -492,11 +492,18 @@ def test_list_gather_logical_type() -> None:
 
 
 def test_list_unique() -> None:
-    assert (
-        pl.Series([[1, 1, 2, 2, 3], [3, 3, 3, 2, 1, 2]])
-        .list.unique(maintain_order=True)
-        .series_equal(pl.Series([[1, 2, 3], [3, 2, 1]]))
-    )
+    s = pl.Series([[1, 1, 2, 2, 3], [3, 3, 3, 2, 1, 2]])
+    result = s.list.unique(maintain_order=True)
+    expected = pl.Series([[1, 2, 3], [3, 2, 1]])
+    assert_series_equal(result, expected)
+
+
+def test_list_unique2() -> None:
+    s = pl.Series("a", [[2, 1], [1, 2, 2]])
+    result = s.list.unique()
+    assert len(result) == 2
+    assert sorted(result[0]) == [1, 2]
+    assert sorted(result[1]) == [1, 2]
 
 
 def test_list_to_struct() -> None:
@@ -522,6 +529,15 @@ def test_list_to_struct() -> None:
     ]
 
 
+def test_select_from_list_to_struct_11143() -> None:
+    ldf = pl.LazyFrame({"some_col": [[1.0, 2.0], [1.5, 3.0]]})
+    ldf = ldf.select(
+        pl.col("some_col").list.to_struct(fields=["a", "b"], upper_bound=2)
+    )
+    df = ldf.select(pl.col("some_col").struct.field("a")).collect()
+    assert df.equals(pl.DataFrame({"a": [1.0, 1.5]}))
+
+
 def test_list_arr_get_8810() -> None:
     assert pl.DataFrame(pl.Series("a", [None], pl.List(pl.Int64))).select(
         pl.col("a").list.get(0)
@@ -543,6 +559,13 @@ def test_list_count_matches_boolean_nulls_9141() -> None:
     a = pl.DataFrame({"a": [[True, None, False]]})
 
     assert a.select(pl.col("a").list.count_matches(True))["a"].to_list() == [1]
+
+
+def test_list_set_oob() -> None:
+    df = pl.DataFrame({"a": [42, 23]})
+    assert df.select(pl.col("a").list.set_intersection([])).to_dict(
+        as_series=False
+    ) == {"a": [[], []]}
 
 
 def test_list_set_operations() -> None:
@@ -626,6 +649,19 @@ def test_list_set_operations_broadcast() -> None:
     ).to_dict(as_series=False) == {"a": [[1], [2], []]}
 
 
+def test_list_set_operation_different_length_chunk_12734() -> None:
+    df = pl.DataFrame(
+        {
+            "a": [[2, 3, 3], [4, 1], [1, 2, 3]],
+        }
+    )
+
+    df = pl.concat([df.slice(0, 1), df.slice(1, 1), df.slice(2, 1)], rechunk=False)
+    assert df.with_columns(
+        pl.col("a").list.set_difference(pl.lit(pl.Series([[1, 2]])))
+    ).to_dict(as_series=False) == {"a": [[3], [4], [3]]}
+
+
 def test_list_gather_oob_10079() -> None:
     df = pl.DataFrame(
         {
@@ -633,7 +669,7 @@ def test_list_gather_oob_10079() -> None:
             "b": [["2"], ["3"], [None], ["3", "Hi"]],
         }
     )
-    with pytest.raises(pl.ComputeError, match="gather indices are out of bounds"):
+    with pytest.raises(pl.OutOfBoundsError, match="gather indices are out of bounds"):
         df.select(pl.col("a").gather(999))
 
 
@@ -671,13 +707,31 @@ def test_list_to_array() -> None:
 
     result = s.list.to_array(2)
 
-    expected = pl.Series(data, dtype=pl.Array(inner=pl.Float32, width=2))
+    expected = pl.Series(data, dtype=pl.Array(pl.Float32, 2))
     assert_series_equal(result, expected)
+
+    # test logical type
+    df = pl.DataFrame(
+        data={"duration": [[1000, 2000], None]},
+        schema={
+            "duration": pl.List(pl.Datetime),
+        },
+    ).with_columns(pl.col("duration").list.to_array(2))
+
+    expected_df = pl.DataFrame(
+        data={"duration": [[1000, 2000], None]},
+        schema={
+            "duration": pl.Array(pl.Datetime, 2),
+        },
+    )
+    assert_frame_equal(df, expected_df)
 
 
 def test_list_to_array_wrong_lengths() -> None:
     s = pl.Series([[1.0, 2.0], [3.0, 4.0]], dtype=pl.List(pl.Float32))
-    with pytest.raises(pl.ComputeError, match="incompatible offsets in source list"):
+    with pytest.raises(
+        pl.ComputeError, match="not all elements have the specified width"
+    ):
         s.list.to_array(3)
 
 
@@ -685,3 +739,53 @@ def test_list_to_array_wrong_dtype() -> None:
     s = pl.Series([1.0, 2.0])
     with pytest.raises(pl.ComputeError, match="expected List dtype"):
         s.list.to_array(2)
+
+
+def test_list_lengths() -> None:
+    s = pl.Series("a", [[1, 2], [1, 2, 3]])
+    assert_series_equal(s.list.len(), pl.Series("a", [2, 3], dtype=pl.UInt32))
+    df = pl.DataFrame([s])
+    assert_series_equal(
+        df.select(pl.col("a").list.len())["a"], pl.Series("a", [2, 3], dtype=pl.UInt32)
+    )
+
+
+def test_list_arithmetic() -> None:
+    s = pl.Series("a", [[1, 2], [1, 2, 3]])
+    assert_series_equal(s.list.sum(), pl.Series("a", [3, 6]))
+    assert_series_equal(s.list.mean(), pl.Series("a", [1.5, 2.0]))
+    assert_series_equal(s.list.max(), pl.Series("a", [2, 3]))
+    assert_series_equal(s.list.min(), pl.Series("a", [1, 1]))
+
+
+def test_list_ordering() -> None:
+    s = pl.Series("a", [[2, 1], [1, 3, 2]])
+    assert_series_equal(s.list.sort(), pl.Series("a", [[1, 2], [1, 2, 3]]))
+    assert_series_equal(s.list.reverse(), pl.Series("a", [[1, 2], [2, 3, 1]]))
+
+
+def test_list_get_logical_type() -> None:
+    s = pl.Series(
+        "a",
+        [
+            [date(1999, 1, 1), date(2000, 1, 1)],
+            [date(2001, 10, 1), None],
+        ],
+        dtype=pl.List(pl.Date),
+    )
+
+    out = s.list.get(0)
+    expected = pl.Series(
+        "a",
+        [date(1999, 1, 1), date(2001, 10, 1)],
+        dtype=pl.Date,
+    )
+    assert_series_equal(out, expected)
+
+    out = s.list.get(pl.Series([1, -2]))
+    expected = pl.Series(
+        "a",
+        [date(2000, 1, 1), date(2001, 10, 1)],
+        dtype=pl.Date,
+    )
+    assert_series_equal(out, expected)

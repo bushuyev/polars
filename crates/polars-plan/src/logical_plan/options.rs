@@ -4,7 +4,7 @@ use polars_core::prelude::*;
 #[cfg(feature = "csv")]
 use polars_io::csv::SerializeOptions;
 #[cfg(feature = "csv")]
-use polars_io::csv::{CsvEncoding, NullValues};
+use polars_io::csv::{CommentPrefix, CsvEncoding, NullValues};
 #[cfg(feature = "ipc")]
 use polars_io::ipc::IpcCompression;
 #[cfg(feature = "parquet")]
@@ -25,7 +25,7 @@ pub type FileCount = u32;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CsvParserOptions {
     pub separator: u8,
-    pub comment_char: Option<u8>,
+    pub comment_prefix: Option<CommentPrefix>,
     pub quote_char: Option<u8>,
     pub eol_char: u8,
     pub has_header: bool,
@@ -85,6 +85,14 @@ pub struct CsvWriterOptions {
     pub serialize_options: SerializeOptions,
 }
 
+#[cfg(feature = "json")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct JsonWriterOptions {
+    /// maintain the order the data was processed
+    pub maintain_order: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct IpcScanOptions {
@@ -114,6 +122,12 @@ pub struct UnionOptions {
     pub from_partitioned_ds: bool,
     pub flattened_by_opt: bool,
     pub rechunk: bool,
+}
+
+#[derive(Clone, Debug, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct HConcatOptions {
+    pub parallel: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -329,6 +343,8 @@ pub enum FileType {
     Ipc(IpcWriterOptions),
     #[cfg(feature = "csv")]
     Csv(CsvWriterOptions),
+    #[cfg(feature = "json")]
+    Json(JsonWriterOptions),
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

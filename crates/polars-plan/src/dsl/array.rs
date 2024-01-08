@@ -1,3 +1,5 @@
+use polars_core::prelude::SortOptions;
+
 use crate::dsl::function_expr::{ArrayFunction, FunctionExpr};
 use crate::prelude::*;
 
@@ -42,5 +44,39 @@ impl ArrayNameSpace {
     pub fn to_list(self) -> Expr {
         self.0
             .map_private(FunctionExpr::ArrayExpr(ArrayFunction::ToList))
+    }
+
+    #[cfg(feature = "array_any_all")]
+    /// Evaluate whether all boolean values are true for every subarray.
+    pub fn all(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::ArrayExpr(ArrayFunction::All))
+    }
+
+    #[cfg(feature = "array_any_all")]
+    /// Evaluate whether any boolean value is true for every subarray
+    pub fn any(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::ArrayExpr(ArrayFunction::Any))
+    }
+
+    pub fn sort(self, options: SortOptions) -> Expr {
+        self.0
+            .map_private(FunctionExpr::ArrayExpr(ArrayFunction::Sort(options)))
+    }
+
+    pub fn reverse(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::ArrayExpr(ArrayFunction::Reverse))
+    }
+
+    pub fn arg_min(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::ArrayExpr(ArrayFunction::ArgMin))
+    }
+
+    pub fn arg_max(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::ArrayExpr(ArrayFunction::ArgMax))
     }
 }

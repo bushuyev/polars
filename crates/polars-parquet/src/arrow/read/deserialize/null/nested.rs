@@ -5,7 +5,8 @@ use arrow::datatypes::ArrowDataType;
 use polars_error::PolarsResult;
 
 use super::super::nested_utils::*;
-use super::super::{utils, Pages};
+use super::super::utils::MaybeNext;
+use super::super::{utils, PagesIter};
 use crate::arrow::read::deserialize::utils::DecodedState;
 use crate::parquet::page::{DataPage, DictPage};
 
@@ -64,11 +65,11 @@ impl<'a> NestedDecoder<'a> for NullDecoder {
     }
 }
 
-/// An iterator adapter over [`Pages`] assumed to be encoded as null arrays
+/// An iterator adapter over [`PagesIter`] assumed to be encoded as null arrays
 #[derive(Debug)]
 pub struct NestedIter<I>
 where
-    I: Pages,
+    I: PagesIter,
 {
     iter: I,
     init: Vec<InitNested>,
@@ -81,7 +82,7 @@ where
 
 impl<I> NestedIter<I>
 where
-    I: Pages,
+    I: PagesIter,
 {
     pub fn new(
         iter: I,
@@ -104,27 +105,29 @@ where
 
 impl<I> Iterator for NestedIter<I>
 where
-    I: Pages,
+    I: PagesIter,
 {
     type Item = PolarsResult<(NestedState, NullArray)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let maybe_state = next(
-            &mut self.iter,
-            &mut self.items,
-            &mut None,
-            &mut self.remaining,
-            &self.init,
-            self.chunk_size,
-            &self.decoder,
-        );
-        match maybe_state {
-            utils::MaybeNext::Some(Ok((nested, state))) => {
-                Some(Ok((nested, NullArray::new(self.data_type.clone(), state))))
-            },
-            utils::MaybeNext::Some(Err(e)) => Some(Err(e)),
-            utils::MaybeNext::None => None,
-            utils::MaybeNext::More => self.next(),
+        loop {
+            let maybe_state = next(
+                &mut self.iter,
+                &mut self.items,
+                &mut None,
+                &mut self.remaining,
+                &self.init,
+                self.chunk_size,
+                &self.decoder,
+            );
+            match maybe_state {
+                MaybeNext::Some(Ok((nested, state))) => {
+                    return Some(Ok((nested, NullArray::new(self.data_type.clone(), state))))
+                },
+                MaybeNext::Some(Err(e)) => return Some(Err(e)),
+                MaybeNext::None => return None,
+                MaybeNext::More => continue,
+            }
         }
     }
 }

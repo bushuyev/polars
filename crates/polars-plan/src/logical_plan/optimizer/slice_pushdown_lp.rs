@@ -295,7 +295,6 @@ impl SlicePushDown {
             | m @ (MapFunction {function: FunctionNode::Melt {..}, ..}, _)
             | m @ (Cache {..}, _)
             | m @ (Distinct {..}, _)
-            | m @ (HStack {..},_)
             | m @ (Aggregate{..},_)
             // blocking in streaming
             | m @ (Join{..},_)
@@ -335,6 +334,26 @@ impl SlicePushDown {
                     let lp = Projection {input, expr, schema, options};
                     self.no_pushdown_restart_opt(lp, state, lp_arena, expr_arena)
                 }
+            }
+            // this is copied from `Projection`
+            (HStack {input, exprs, schema, options}, _) => {
+                // The slice operation may only pass on simple projections. col("foo").alias("bar")
+                if exprs.iter().all(|root|  {
+                    aexpr_is_elementwise(*root, expr_arena)
+                }) {
+                    let lp = HStack {input, exprs, schema, options};
+                    self.pushdown_and_continue(lp, state, lp_arena, expr_arena)
+                }
+                // don't push down slice, but restart optimization
+                else {
+                    let lp = HStack {input, exprs, schema, options};
+                    self.no_pushdown_restart_opt(lp, state, lp_arena, expr_arena)
+                }
+            }
+            (HConcat {inputs, schema, options}, _) => {
+                // Slice can always be pushed down for horizontal concatenation
+                let lp = HConcat {inputs, schema, options};
+                self.pushdown_and_continue(lp, state, lp_arena, expr_arena)
             }
             (catch_all, state) => {
                 self.no_pushdown_finish_opt(catch_all, state, lp_arena)

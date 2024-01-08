@@ -21,18 +21,17 @@ from polars.datatypes import (
     Decimal,
     Duration,
     Int64,
+    String,
     Time,
-    Utf8,
-    unpack_dtypes,
 )
-from polars.dependencies import _PYARROW_AVAILABLE, _check_for_numpy
+from polars.dependencies import _check_for_numpy
 from polars.dependencies import numpy as np
 
 if TYPE_CHECKING:
     from collections.abc import Reversible
 
     from polars import DataFrame
-    from polars.type_aliases import PolarsDataType, PolarsIntegerType, SizeUnit
+    from polars.type_aliases import PolarsDataType, SizeUnit
 
     if sys.version_info >= (3, 10):
         from typing import ParamSpec, TypeGuard
@@ -117,22 +116,40 @@ def is_str_sequence(
     elif _check_for_numpy(val) and isinstance(val, np.ndarray):
         return np.issubdtype(val.dtype, np.str_)
     elif include_series and isinstance(val, pl.Series):
-        return val.dtype == pl.Utf8
+        return val.dtype == pl.String
     return isinstance(val, Sequence) and _is_iterable_of(val, str)
 
 
+def is_column(obj: Any) -> bool:
+    """Indicate if the given object is a basic/unaliased column."""
+    from polars.expr import Expr
+
+    return isinstance(obj, Expr) and obj.meta.is_column()
+
+
+def _warn_null_comparison(obj: Any) -> None:
+    if obj is None:
+        warnings.warn(
+            "Comparisons with None always result in null. Consider using `.is_null()` or `.is_not_null()`.",
+            UserWarning,
+            stacklevel=find_stacklevel(),
+        )
+
+
 def range_to_series(
-    name: str, rng: range, dtype: PolarsIntegerType | None = None
+    name: str, rng: range, dtype: PolarsDataType | None = None
 ) -> pl.Series:
     """Fast conversion of the given range to a Series."""
     dtype = dtype or Int64
-    return F.int_range(
-        start=rng.start,
-        end=rng.stop,
-        step=rng.step,
-        dtype=dtype,
-        eager=True,
-    ).alias(name)
+    if dtype.is_integer():
+        range = F.int_range(  # type: ignore[call-overload]
+            start=rng.start, end=rng.stop, step=rng.step, dtype=dtype, eager=True
+        )
+    else:
+        range = F.int_range(
+            start=rng.start, end=rng.stop, step=rng.step, eager=True
+        ).cast(dtype)
+    return range.alias(name)
 
 
 def range_to_slice(rng: range) -> slice:
@@ -199,18 +216,6 @@ def arrlen(obj: Any) -> int | None:
         return None
 
 
-def can_create_dicts_with_pyarrow(dtypes: Sequence[PolarsDataType]) -> bool:
-    """Check if the given dtypes can be used to create dicts with pyarrow fast path."""
-    # TODO: have our own fast-path for dict iteration in Rust
-    return (
-        _PYARROW_AVAILABLE
-        # note: 'ns' precision instantiates values as pandas types - avoid
-        and not any(
-            (getattr(tp, "time_unit", None) == "ns") for tp in unpack_dtypes(*dtypes)
-        )
-    )
-
-
 def normalize_filepath(path: str | Path, *, check_not_directory: bool = True) -> str:
     """Create a string path, expanding the home directory if present."""
     # don't use pathlib here as it modifies slashes (s3:// -> s3:/)
@@ -273,14 +278,13 @@ def _cast_repr_strings_with_schema(
     -----
     Table repr strings are less strict (or different) than equivalent CSV data, so need
     special handling; as this function is only used for reprs, parsing is flexible.
-
     """
     tp: PolarsDataType | None
     if not df.is_empty():
         for tp in df.schema.values():
-            if tp != Utf8:
+            if tp != String:
                 raise TypeError(
-                    f"DataFrame should contain only Utf8 string repr data; found {tp!r}"
+                    f"DataFrame should contain only String repr data; found {tp!r}"
                 )
 
     # duration string scaling
@@ -341,9 +345,9 @@ def _cast_repr_strings_with_schema(
                     .cast(tp)
                 )
             elif tp == Boolean:
-                cast_cols[c] = F.col(c).map_dict(
-                    remapping={"true": True, "false": False},
-                    return_dtype=Boolean,
+                cast_cols[c] = F.col(c).replace(
+                    {"true": True, "false": False},
+                    default=None,
                 )
             elif tp in INTEGER_DTYPES:
                 int_string = F.col(c).str.replace_all(r"[^\d+-]", "")
@@ -369,7 +373,7 @@ def _cast_repr_strings_with_schema(
                             separator=".",
                         )
                     )
-                    .cast(Utf8)
+                    .cast(String)
                     .cast(tp)
                 )
             elif tp != df.schema[c]:
@@ -394,7 +398,7 @@ class sphinx_accessor(property):  # noqa: D101
             return self.fget(  # type: ignore[misc]
                 instance if isinstance(instance, cls) else cls
             )
-        except AttributeError:
+        except (AttributeError, ImportError):
             return None  # type: ignore[return-value]
 
 
@@ -466,7 +470,6 @@ def _get_stack_locals(
         If specified, look at objects in the last `n` stack frames only.
     named
         If specified, only return objects matching the given name(s).
-
     """
     if isinstance(named, str):
         named = (named,)
@@ -504,9 +507,10 @@ def _get_stack_locals(
 
 
 # this is called from rust
-def _polars_warn(msg: str) -> None:
+def _polars_warn(msg: str, category: type[Warning] = UserWarning) -> None:
     warnings.warn(
         msg,
+        category=category,
         stacklevel=find_stacklevel(),
     )
 

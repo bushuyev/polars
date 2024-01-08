@@ -1,9 +1,9 @@
 use crate::array::{
-    Array, BinaryArray, BooleanArray, FixedSizeListArray, ListArray, PrimitiveArray, Utf8Array,
+    new_null_array, Array, BinaryArray, BooleanArray, FixedSizeListArray, ListArray,
+    PrimitiveArray, StructArray, Utf8Array,
 };
 use crate::bitmap::MutableBitmap;
 use crate::datatypes::ArrowDataType;
-use crate::legacy::prelude::*;
 use crate::legacy::utils::CustomIterTools;
 use crate::offset::Offsets;
 use crate::types::NativeType;
@@ -11,7 +11,6 @@ use crate::types::NativeType;
 pub mod default_arrays;
 #[cfg(feature = "dtype-array")]
 pub mod fixed_size_list;
-#[cfg(feature = "compute_concatenate")]
 pub mod list;
 pub mod null;
 pub mod slice;
@@ -19,63 +18,7 @@ pub mod utf8;
 
 pub use slice::*;
 
-pub trait ValueSize {
-    /// Useful for a Utf8 or a List to get underlying value size.
-    /// During a rechunk this is handy
-    fn get_values_size(&self) -> usize;
-}
-
-impl ValueSize for ListArray<i64> {
-    fn get_values_size(&self) -> usize {
-        self.values().len()
-    }
-}
-
-impl ValueSize for FixedSizeListArray {
-    fn get_values_size(&self) -> usize {
-        self.values().len()
-    }
-}
-
-impl ValueSize for Utf8Array<i64> {
-    fn get_values_size(&self) -> usize {
-        self.values().len()
-    }
-}
-
-impl ValueSize for BinaryArray<i64> {
-    fn get_values_size(&self) -> usize {
-        self.values().len()
-    }
-}
-
-impl ValueSize for ArrayRef {
-    fn get_values_size(&self) -> usize {
-        match self.data_type() {
-            ArrowDataType::LargeUtf8 => self
-                .as_any()
-                .downcast_ref::<Utf8Array<i64>>()
-                .unwrap()
-                .get_values_size(),
-            ArrowDataType::FixedSizeList(_, _) => self
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .unwrap()
-                .get_values_size(),
-            ArrowDataType::LargeList(_) => self
-                .as_any()
-                .downcast_ref::<ListArray<i64>>()
-                .unwrap()
-                .get_values_size(),
-            ArrowDataType::LargeBinary => self
-                .as_any()
-                .downcast_ref::<BinaryArray<i64>>()
-                .unwrap()
-                .get_values_size(),
-            _ => unimplemented!(),
-        }
-    }
-}
+use crate::legacy::prelude::LargeListArray;
 
 macro_rules! iter_to_values {
     ($iterator:expr, $validity:expr, $offsets:expr, $length_so_far:expr) => {{
@@ -90,6 +33,7 @@ macro_rules! iter_to_values {
                 },
                 None => {
                     $validity.push(false);
+                    $offsets.push($length_so_far);
                     None
                 },
             })
@@ -192,6 +136,7 @@ pub trait ListFromIter {
                 },
                 None => {
                     validity.push(false);
+                    offsets.push(length_so_far);
                     None
                 },
             })
@@ -238,6 +183,7 @@ pub trait ListFromIter {
                 },
                 None => {
                     validity.push(false);
+                    offsets.push(length_so_far);
                     None
                 },
             })
@@ -264,3 +210,53 @@ pub trait PolarsArray: Array {
 }
 
 impl<A: Array + ?Sized> PolarsArray for A {}
+
+fn is_nested_null(data_type: &ArrowDataType) -> bool {
+    match data_type {
+        ArrowDataType::Null => true,
+        ArrowDataType::LargeList(field) => is_nested_null(field.data_type()),
+        ArrowDataType::FixedSizeList(field, _) => is_nested_null(field.data_type()),
+        ArrowDataType::Struct(fields) => {
+            fields.iter().all(|field| is_nested_null(field.data_type()))
+        },
+        _ => false,
+    }
+}
+
+/// Cast null arrays to inner type and ensure that all offsets remain correct
+pub fn convert_inner_type(array: &dyn Array, dtype: &ArrowDataType) -> Box<dyn Array> {
+    match dtype {
+        ArrowDataType::LargeList(field) => {
+            let array = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            let inner = array.values();
+            let new_values = convert_inner_type(inner.as_ref(), field.data_type());
+            let dtype = LargeListArray::default_datatype(new_values.data_type().clone());
+            LargeListArray::new(
+                dtype,
+                array.offsets().clone(),
+                new_values,
+                array.validity().cloned(),
+            )
+            .boxed()
+        },
+        ArrowDataType::FixedSizeList(field, width) => {
+            let array = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+            let inner = array.values();
+            let new_values = convert_inner_type(inner.as_ref(), field.data_type());
+            let dtype =
+                FixedSizeListArray::default_datatype(new_values.data_type().clone(), *width);
+            FixedSizeListArray::new(dtype, new_values, array.validity().cloned()).boxed()
+        },
+        ArrowDataType::Struct(fields) => {
+            let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+            let inner = array.values();
+            let new_values = inner
+                .iter()
+                .zip(fields)
+                .map(|(arr, field)| convert_inner_type(arr.as_ref(), field.data_type()))
+                .collect::<Vec<_>>();
+            StructArray::new(dtype.clone(), new_values, array.validity().cloned()).boxed()
+        },
+        _ => new_null_array(dtype.clone(), array.len()),
+    }
+}

@@ -1,11 +1,21 @@
 use std::error::Error;
 
 use arrow::array::Array;
-use arrow::legacy::utils::combine_validities_and;
+use arrow::compute::utils::combine_validities_and;
 
 use crate::datatypes::{ArrayCollectIterExt, ArrayFromIter, StaticArray};
 use crate::prelude::{ChunkedArray, PolarsDataType};
 use crate::utils::{align_chunks_binary, align_chunks_ternary};
+
+// We need this helper because for<'a> notation can't yet be applied properly
+// on the return type.
+pub trait UnaryFnMut<A1>: FnMut(A1) -> Self::Ret {
+    type Ret;
+}
+
+impl<A1, R, T: FnMut(A1) -> R> UnaryFnMut<A1> for T {
+    type Ret = R;
+}
 
 // We need this helper because for<'a> notation can't yet be applied properly
 // on the return type.
@@ -25,6 +35,112 @@ pub trait BinaryFnMut<A1, A2>: FnMut(A1, A2) -> Self::Ret {
 
 impl<A1, A2, R, T: FnMut(A1, A2) -> R> BinaryFnMut<A1, A2> for T {
     type Ret = R;
+}
+
+#[inline]
+pub fn unary_elementwise<'a, T, V, F>(ca: &'a ChunkedArray<T>, mut op: F) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    V: PolarsDataType,
+    F: UnaryFnMut<Option<T::Physical<'a>>>,
+    V::Array: ArrayFromIter<<F as UnaryFnMut<Option<T::Physical<'a>>>>::Ret>,
+{
+    let iter = ca
+        .downcast_iter()
+        .map(|arr| arr.iter().map(&mut op).collect_arr());
+    ChunkedArray::from_chunk_iter(ca.name(), iter)
+}
+
+#[inline]
+pub fn try_unary_elementwise<'a, T, V, F, K, E>(
+    ca: &'a ChunkedArray<T>,
+    mut op: F,
+) -> Result<ChunkedArray<V>, E>
+where
+    T: PolarsDataType,
+    V: PolarsDataType,
+    F: FnMut(Option<T::Physical<'a>>) -> Result<Option<K>, E>,
+    V::Array: ArrayFromIter<Option<K>>,
+{
+    let iter = ca
+        .downcast_iter()
+        .map(|arr| arr.iter().map(&mut op).try_collect_arr());
+    ChunkedArray::try_from_chunk_iter(ca.name(), iter)
+}
+
+#[inline]
+pub fn unary_elementwise_values<'a, T, V, F>(ca: &'a ChunkedArray<T>, mut op: F) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    V: PolarsDataType,
+    F: UnaryFnMut<T::Physical<'a>>,
+    V::Array: ArrayFromIter<<F as UnaryFnMut<T::Physical<'a>>>::Ret>,
+{
+    if ca.null_count() == ca.len() {
+        let arr = V::Array::full_null(ca.len(), V::get_dtype().to_arrow());
+        return ChunkedArray::with_chunk(ca.name(), arr);
+    }
+
+    let iter = ca.downcast_iter().map(|arr| {
+        let validity = arr.validity().cloned();
+        let arr: V::Array = arr.values_iter().map(&mut op).collect_arr();
+        arr.with_validity_typed(validity)
+    });
+    ChunkedArray::from_chunk_iter(ca.name(), iter)
+}
+
+#[inline]
+pub fn try_unary_elementwise_values<'a, T, V, F, K, E>(
+    ca: &'a ChunkedArray<T>,
+    mut op: F,
+) -> Result<ChunkedArray<V>, E>
+where
+    T: PolarsDataType,
+    V: PolarsDataType,
+    F: FnMut(T::Physical<'a>) -> Result<K, E>,
+    V::Array: ArrayFromIter<K>,
+{
+    if ca.null_count() == ca.len() {
+        let arr = V::Array::full_null(ca.len(), V::get_dtype().to_arrow());
+        return Ok(ChunkedArray::with_chunk(ca.name(), arr));
+    }
+
+    let iter = ca.downcast_iter().map(|arr| {
+        let validity = arr.validity().cloned();
+        let arr: V::Array = arr.values_iter().map(&mut op).try_collect_arr()?;
+        Ok(arr.with_validity_typed(validity))
+    });
+    ChunkedArray::try_from_chunk_iter(ca.name(), iter)
+}
+
+/// Applies a kernel that produces `Array` types.
+///
+/// Intended for kernels that apply on values, this function will apply the
+/// validity mask afterwards.
+#[inline]
+pub fn unary_mut_values<T, V, F, Arr>(ca: &ChunkedArray<T>, mut op: F) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    V: PolarsDataType<Array = Arr>,
+    Arr: Array + StaticArray,
+    F: FnMut(&T::Array) -> Arr,
+{
+    let iter = ca
+        .downcast_iter()
+        .map(|arr| op(arr).with_validity_typed(arr.validity().cloned()));
+    ChunkedArray::from_chunk_iter(ca.name(), iter)
+}
+
+/// Applies a kernel that produces `Array` types.
+#[inline]
+pub fn unary_mut_with_options<T, V, F, Arr>(ca: &ChunkedArray<T>, op: F) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    V: PolarsDataType<Array = Arr>,
+    Arr: Array + StaticArray,
+    F: FnMut(&T::Array) -> Arr,
+{
+    ChunkedArray::from_chunk_iter(ca.name(), ca.downcast_iter().map(op))
 }
 
 #[inline]
@@ -146,6 +262,13 @@ where
     F: for<'a> FnMut(T::Physical<'a>, U::Physical<'a>) -> K,
     V::Array: ArrayFromIter<K>,
 {
+    if lhs.null_count() == lhs.len() || rhs.null_count() == rhs.len() {
+        let len = lhs.len().min(rhs.len());
+        let arr = V::Array::full_null(len, V::get_dtype().to_arrow());
+
+        return ChunkedArray::with_chunk(lhs.name(), arr);
+    }
+
     let (lhs, rhs) = align_chunks_binary(lhs, rhs);
 
     let iter = lhs
@@ -178,6 +301,13 @@ where
     F: for<'a> FnMut(T::Physical<'a>, U::Physical<'a>) -> Result<K, E>,
     V::Array: ArrayFromIter<K>,
 {
+    if lhs.null_count() == lhs.len() || rhs.null_count() == rhs.len() {
+        let len = lhs.len().min(rhs.len());
+        let arr = V::Array::full_null(len, V::get_dtype().to_arrow());
+
+        return Ok(ChunkedArray::with_chunk(lhs.name(), arr));
+    }
+
     let (lhs, rhs) = align_chunks_binary(lhs, rhs);
     let iter = lhs
         .downcast_iter()
@@ -194,6 +324,37 @@ where
             Ok(array.with_validity_typed(validity))
         });
     ChunkedArray::try_from_chunk_iter(lhs.name(), iter)
+}
+
+/// Applies a kernel that produces `Array` types.
+///
+/// Intended for kernels that apply on values, this function will filter out any
+/// results which do not have two non-null inputs.
+#[inline]
+pub fn binary_mut_values<T, U, V, F, Arr>(
+    lhs: &ChunkedArray<T>,
+    rhs: &ChunkedArray<U>,
+    mut op: F,
+    name: &str,
+) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    U: PolarsDataType,
+    V: PolarsDataType<Array = Arr>,
+    Arr: Array + StaticArray,
+    F: FnMut(&T::Array, &U::Array) -> Arr,
+{
+    let (lhs, rhs) = align_chunks_binary(lhs, rhs);
+    let iter = lhs
+        .downcast_iter()
+        .zip(rhs.downcast_iter())
+        .map(|(lhs_arr, rhs_arr)| {
+            let ret = op(lhs_arr, rhs_arr);
+            let inp_val = combine_validities_and(lhs_arr.validity(), rhs_arr.validity());
+            let val = combine_validities_and(inp_val.as_ref(), ret.validity());
+            ret.with_validity_typed(val)
+        });
+    ChunkedArray::from_chunk_iter(name, iter)
 }
 
 /// Applies a kernel that produces `Array` types.
@@ -384,4 +545,132 @@ where
             element_iter.collect_arr()
         });
     ChunkedArray::from_chunk_iter(ca1.name(), iter)
+}
+
+pub fn broadcast_binary_elementwise<T, U, V, F>(
+    lhs: &ChunkedArray<T>,
+    rhs: &ChunkedArray<U>,
+    mut op: F,
+) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    U: PolarsDataType,
+    V: PolarsDataType,
+    F: for<'a> BinaryFnMut<Option<T::Physical<'a>>, Option<U::Physical<'a>>>,
+    V::Array: for<'a> ArrayFromIter<
+        <F as BinaryFnMut<Option<T::Physical<'a>>, Option<U::Physical<'a>>>>::Ret,
+    >,
+{
+    match (lhs.len(), rhs.len()) {
+        (1, _) => {
+            let a = unsafe { lhs.get_unchecked(0) };
+            let mut out = unary_elementwise(rhs, |b| op(a.clone(), b));
+            out.rename(lhs.name());
+            out
+        },
+        (_, 1) => {
+            let b = unsafe { rhs.get_unchecked(0) };
+            unary_elementwise(lhs, |a| op(a, b.clone()))
+        },
+        _ => binary_elementwise(lhs, rhs, op),
+    }
+}
+
+pub fn broadcast_try_binary_elementwise<T, U, V, F, K, E>(
+    lhs: &ChunkedArray<T>,
+    rhs: &ChunkedArray<U>,
+    mut op: F,
+) -> Result<ChunkedArray<V>, E>
+where
+    T: PolarsDataType,
+    U: PolarsDataType,
+    V: PolarsDataType,
+    F: for<'a> FnMut(Option<T::Physical<'a>>, Option<U::Physical<'a>>) -> Result<Option<K>, E>,
+    V::Array: ArrayFromIter<Option<K>>,
+{
+    match (lhs.len(), rhs.len()) {
+        (1, _) => {
+            let a = unsafe { lhs.get_unchecked(0) };
+            let mut out = try_unary_elementwise(rhs, |b| op(a.clone(), b))?;
+            out.rename(lhs.name());
+            Ok(out)
+        },
+        (_, 1) => {
+            let b = unsafe { rhs.get_unchecked(0) };
+            try_unary_elementwise(lhs, |a| op(a, b.clone()))
+        },
+        _ => try_binary_elementwise(lhs, rhs, op),
+    }
+}
+
+pub fn broadcast_binary_elementwise_values<T, U, V, F, K>(
+    lhs: &ChunkedArray<T>,
+    rhs: &ChunkedArray<U>,
+    mut op: F,
+) -> ChunkedArray<V>
+where
+    T: PolarsDataType,
+    U: PolarsDataType,
+    V: PolarsDataType,
+    F: for<'a> FnMut(T::Physical<'a>, U::Physical<'a>) -> K,
+    V::Array: ArrayFromIter<K>,
+{
+    if lhs.null_count() == lhs.len() || rhs.null_count() == rhs.len() {
+        let min = lhs.len().min(rhs.len());
+        let max = lhs.len().max(rhs.len());
+        let len = if min == 1 { max } else { min };
+        let arr = V::Array::full_null(len, V::get_dtype().to_arrow());
+
+        return ChunkedArray::with_chunk(lhs.name(), arr);
+    }
+
+    match (lhs.len(), rhs.len()) {
+        (1, _) => {
+            let a = unsafe { lhs.value_unchecked(0) };
+            let mut out = unary_elementwise_values(rhs, |b| op(a.clone(), b));
+            out.rename(lhs.name());
+            out
+        },
+        (_, 1) => {
+            let b = unsafe { rhs.value_unchecked(0) };
+            unary_elementwise_values(lhs, |a| op(a, b.clone()))
+        },
+        _ => binary_elementwise_values(lhs, rhs, op),
+    }
+}
+
+pub fn broadcast_try_binary_elementwise_values<T, U, V, F, K, E>(
+    lhs: &ChunkedArray<T>,
+    rhs: &ChunkedArray<U>,
+    mut op: F,
+) -> Result<ChunkedArray<V>, E>
+where
+    T: PolarsDataType,
+    U: PolarsDataType,
+    V: PolarsDataType,
+    F: for<'a> FnMut(T::Physical<'a>, U::Physical<'a>) -> Result<K, E>,
+    V::Array: ArrayFromIter<K>,
+{
+    if lhs.null_count() == lhs.len() || rhs.null_count() == rhs.len() {
+        let min = lhs.len().min(rhs.len());
+        let max = lhs.len().max(rhs.len());
+        let len = if min == 1 { max } else { min };
+        let arr = V::Array::full_null(len, V::get_dtype().to_arrow());
+
+        return Ok(ChunkedArray::with_chunk(lhs.name(), arr));
+    }
+
+    match (lhs.len(), rhs.len()) {
+        (1, _) => {
+            let a = unsafe { lhs.value_unchecked(0) };
+            let mut out = try_unary_elementwise_values(rhs, |b| op(a.clone(), b))?;
+            out.rename(lhs.name());
+            Ok(out)
+        },
+        (_, 1) => {
+            let b = unsafe { rhs.value_unchecked(0) };
+            try_unary_elementwise_values(lhs, |a| op(a, b.clone()))
+        },
+        _ => try_binary_elementwise_values(lhs, rhs, op),
+    }
 }

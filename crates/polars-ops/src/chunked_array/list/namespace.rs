@@ -1,8 +1,8 @@
 use std::convert::TryFrom;
 use std::fmt::Write;
 
+use arrow::array::ValueSize;
 use arrow::legacy::kernels::list::sublist_get;
-use arrow::legacy::prelude::ValueSize;
 use polars_core::chunked_array::builder::get_list_builder;
 #[cfg(feature = "list_gather")]
 use polars_core::export::num::ToPrimitive;
@@ -76,27 +76,27 @@ fn cast_rhs(
 }
 
 pub trait ListNameSpaceImpl: AsList {
-    /// In case the inner dtype [`DataType::Utf8`], the individual items will be joined into a
+    /// In case the inner dtype [`DataType::String`], the individual items will be joined into a
     /// single string separated by `separator`.
-    fn lst_join(&self, separator: &Utf8Chunked) -> PolarsResult<Utf8Chunked> {
+    fn lst_join(&self, separator: &StringChunked) -> PolarsResult<StringChunked> {
         let ca = self.as_list();
         match ca.inner_dtype() {
-            DataType::Utf8 => match separator.len() {
+            DataType::String => match separator.len() {
                 1 => match separator.get(0) {
                     Some(separator) => self.join_literal(separator),
-                    _ => Ok(Utf8Chunked::full_null(ca.name(), ca.len())),
+                    _ => Ok(StringChunked::full_null(ca.name(), ca.len())),
                 },
                 _ => self.join_many(separator),
             },
-            dt => polars_bail!(op = "`lst.join`", got = dt, expected = "Utf8"),
+            dt => polars_bail!(op = "`lst.join`", got = dt, expected = "String"),
         }
     }
 
-    fn join_literal(&self, separator: &str) -> PolarsResult<Utf8Chunked> {
+    fn join_literal(&self, separator: &str) -> PolarsResult<StringChunked> {
         let ca = self.as_list();
         // used to amortize heap allocs
         let mut buf = String::with_capacity(128);
-        let mut builder = Utf8ChunkedBuilder::new(
+        let mut builder = StringChunkedBuilder::new(
             ca.name(),
             ca.len(),
             ca.get_values_size() + separator.len() * ca.len(),
@@ -106,7 +106,7 @@ pub trait ListNameSpaceImpl: AsList {
             let opt_val = opt_s.map(|s| {
                 // make sure that we don't write values of previous iteration
                 buf.clear();
-                let ca = s.as_ref().utf8().unwrap();
+                let ca = s.as_ref().str().unwrap();
                 let iter = ca.into_iter().map(|opt_v| opt_v.unwrap_or("null"));
 
                 for val in iter {
@@ -122,12 +122,12 @@ pub trait ListNameSpaceImpl: AsList {
         Ok(builder.finish())
     }
 
-    fn join_many(&self, separator: &Utf8Chunked) -> PolarsResult<Utf8Chunked> {
+    fn join_many(&self, separator: &StringChunked) -> PolarsResult<StringChunked> {
         let ca = self.as_list();
         // used to amortize heap allocs
         let mut buf = String::with_capacity(128);
         let mut builder =
-            Utf8ChunkedBuilder::new(ca.name(), ca.len(), ca.get_values_size() + ca.len());
+            StringChunkedBuilder::new(ca.name(), ca.len(), ca.get_values_size() + ca.len());
         // SAFETY: unstable series never lives longer than the iterator.
         unsafe {
             ca.amortized_iter()
@@ -137,7 +137,7 @@ pub trait ListNameSpaceImpl: AsList {
                         let opt_val = opt_s.map(|s| {
                             // make sure that we don't write values of previous iteration
                             buf.clear();
-                            let ca = s.as_ref().utf8().unwrap();
+                            let ca = s.as_ref().str().unwrap();
                             let iter = ca.into_iter().map(|opt_v| opt_v.unwrap_or("null"));
 
                             for val in iter {
@@ -156,7 +156,7 @@ pub trait ListNameSpaceImpl: AsList {
         Ok(builder.finish())
     }
 
-    fn lst_max(&self) -> Series {
+    fn lst_max(&self) -> PolarsResult<Series> {
         list_max_function(self.as_list())
     }
 
@@ -172,11 +172,11 @@ pub trait ListNameSpaceImpl: AsList {
         list_any(ca)
     }
 
-    fn lst_min(&self) -> Series {
+    fn lst_min(&self) -> PolarsResult<Series> {
         list_min_function(self.as_list())
     }
 
-    fn lst_sum(&self) -> Series {
+    fn lst_sum(&self) -> PolarsResult<Series> {
         let ca = self.as_list();
 
         if has_inner_nulls(ca) {
@@ -184,8 +184,8 @@ pub trait ListNameSpaceImpl: AsList {
         };
 
         match ca.inner_dtype() {
-            DataType::Boolean => count_boolean_bits(ca).into_series(),
-            dt if dt.is_numeric() => sum_list_numerical(ca, &dt),
+            DataType::Boolean => Ok(count_boolean_bits(ca).into_series()),
+            dt if dt.is_numeric() => Ok(sum_list_numerical(ca, &dt)),
             dt => sum_with_nulls(ca, &dt),
         }
     }
@@ -371,7 +371,7 @@ pub trait ListNameSpaceImpl: AsList {
             },
             UInt32 | UInt64 => index_typed_index(idx),
             dt if dt.is_signed_integer() => {
-                if let Some(min) = idx.min::<i64>() {
+                if let Some(min) = idx.min::<i64>().unwrap() {
                     if min >= 0 {
                         index_typed_index(idx)
                     } else {
@@ -496,14 +496,14 @@ pub trait ListNameSpaceImpl: AsList {
                 DataType::List(inner_type) => {
                     inner_super_type = try_get_supertype(&inner_super_type, inner_type)?;
                     #[cfg(feature = "dtype-categorical")]
-                    if let DataType::Categorical(_) = &inner_super_type {
+                    if let DataType::Categorical(_, _) = &inner_super_type {
                         inner_super_type = merge_dtypes(&inner_super_type, inner_type)?;
                     }
                 },
                 dt => {
                     inner_super_type = try_get_supertype(&inner_super_type, dt)?;
                     #[cfg(feature = "dtype-categorical")]
-                    if let DataType::Categorical(_) = &inner_super_type {
+                    if let DataType::Categorical(_, _) = &inner_super_type {
                         inner_super_type = merge_dtypes(&inner_super_type, dt)?;
                     }
                 },
@@ -736,7 +736,7 @@ fn cast_index(idx: Series, len: usize, null_on_oob: bool) -> PolarsResult<Series
     };
     polars_ensure!(
         out.null_count() == idx_null_count || null_on_oob,
-        ComputeError: "gather indices are out of bounds"
+        OutOfBounds: "gather indices are out of bounds"
     );
     Ok(out)
 }

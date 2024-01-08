@@ -35,7 +35,6 @@ def concat(
         DataFrames, LazyFrames, or Series to concatenate.
     how : {'vertical', 'vertical_relaxed', 'diagonal', 'diagonal_relaxed', 'horizontal', 'align'}
         Series only support the `vertical` strategy.
-        LazyFrames do not support the `horizontal` strategy.
 
         * vertical: Applies multiple `vstack` operations.
         * vertical_relaxed: Same as `vertical`, but additionally coerces columns to
@@ -124,7 +123,6 @@ def concat(
     │ 2   ┆ 4    ┆ 5    ┆ null │
     │ 3   ┆ null ┆ 6    ┆ 8    │
     └─────┴──────┴──────┴──────┘
-
     """  # noqa: W505
     # unpack/standardise (handles generator input)
     elems = list(items)
@@ -155,7 +153,17 @@ def concat(
         # align the frame data using an outer join with no suffix-resolution
         # (so we raise an error in case of column collision, like "horizontal")
         lf: LazyFrame = reduce(
-            lambda x, y: x.join(y, how="outer", on=common_cols, suffix=""),
+            lambda x, y: (
+                x.join(y, how="outer", on=common_cols, suffix="_PL_CONCAT_RIGHT")
+                # Coalesce outer join columns
+                .with_columns(
+                    [
+                        F.coalesce([name, f"{name}_PL_CONCAT_RIGHT"])
+                        for name in common_cols
+                    ]
+                )
+                .drop([f"{name}_PL_CONCAT_RIGHT" for name in common_cols])
+            ),
             [df.lazy() for df in elems],
         ).sort(by=common_cols)
 
@@ -216,10 +224,15 @@ def concat(
                     to_supertypes=how.endswith("relaxed"),
                 )
             )
-        else:
-            allowed = ", ".join(
-                repr(m) for m in get_args(ConcatMethod) if m != "horizontal"
+        elif how == "horizontal":
+            return wrap_ldf(
+                plr.concat_lf_horizontal(
+                    elems,
+                    parallel=parallel,
+                )
             )
+        else:
+            allowed = ", ".join(repr(m) for m in get_args(ConcatMethod))
             raise ValueError(
                 f"LazyFrame `how` must be one of {{{allowed}}}, got {how!r}"
             )
@@ -238,6 +251,32 @@ def concat(
     if rechunk:
         return out.rechunk()
     return out
+
+
+def _alignment_join(
+    *idx_frames: tuple[int, LazyFrame],
+    align_on: list[str],
+    how: JoinStrategy = "outer",
+    descending: bool | Sequence[bool] = False,
+) -> LazyFrame:
+    """Create a single master frame with all rows aligned on the common key values."""
+    # note: can stackoverflow if the join becomes too large, so we
+    # collect eagerly when hitting a large enough number of frames
+    post_align_collect = len(idx_frames) >= 250
+    if how == "outer":
+        how = "outer_coalesce"
+
+    def join_func(
+        idx_x: tuple[int, LazyFrame],
+        idx_y: tuple[int, LazyFrame],
+    ) -> tuple[int, LazyFrame]:
+        (_, x), (y_idx, y) = idx_x, idx_y
+        return y_idx, x.join(y, how=how, on=align_on, suffix=f":{y_idx}")
+
+    joined = reduce(join_func, idx_frames)[1].sort(by=align_on, descending=descending)
+    if post_align_collect:
+        joined = joined.collect(no_optimization=True).lazy()
+    return joined
 
 
 def align_frames(
@@ -379,7 +418,6 @@ def align_frames(
     ├╌╌╌╌╌╌╌┤
     │ 47.0  │
     └───────┘
-
     """  # noqa: W505
     if not frames:
         return []
@@ -388,46 +426,22 @@ def align_frames(
             "input frames must be of a consistent type (all LazyFrame or all DataFrame)"
         )
 
+    eager = isinstance(frames[0], pl.DataFrame)
     on = [on] if (isinstance(on, str) or not isinstance(on, Sequence)) else on
     align_on = [(c.meta.output_name() if isinstance(c, pl.Expr) else c) for c in on]
 
     # create aligned master frame (this is the most expensive part; afterwards
     # we just subselect out the columns representing the component frames)
-    eager = isinstance(frames[0], pl.DataFrame)
-
-    # we stackoverflow on many frames
-    # so we branch on an arbitrary chosen large number of frames
-    if len(frames) < 250:
-        # lazy variant
-        # this can SO
-        alignment_frame: LazyFrame = (
-            reduce(  # type: ignore[attr-defined]
-                lambda x, y: x.lazy().join(  # type: ignore[arg-type, return-value]
-                    y.lazy(), how=how, on=align_on, suffix=str(id(y))
-                ),
-                frames,
-            )
-            .sort(by=align_on, descending=descending)
-            .collect(no_optimization=True)
-            .lazy()
-        )
-    else:
-        # eager variant
-        # this doesn't SO
-        alignment_frame = (
-            reduce(
-                lambda x, y: x.join(y, how=how, on=align_on, suffix=str(id(y))),
-                frames,
-            )
-            .sort(by=align_on, descending=descending)
-            .lazy()
-        )
+    idx_frames = tuple((idx, df.lazy()) for idx, df in enumerate(frames))
+    alignment_frame = _alignment_join(
+        *idx_frames, align_on=align_on, how=how, descending=descending
+    )
 
     # select-out aligned components from the master frame
     aligned_cols = set(alignment_frame.columns)
     aligned_frames = []
-    for df in frames:
-        sfx = str(id(df))
+    for idx, df in idx_frames:
+        sfx = f":{idx}"
         df_cols = [
             F.col(f"{c}{sfx}").alias(c) if f"{c}{sfx}" in aligned_cols else F.col(c)
             for c in df.columns
@@ -438,5 +452,6 @@ def align_frames(
         aligned_frames.append(f)
 
     return cast(
-        List[FrameType], F.collect_all(aligned_frames) if eager else aligned_frames
+        List[FrameType],
+        F.collect_all(aligned_frames) if eager else aligned_frames,
     )

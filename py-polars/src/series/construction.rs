@@ -1,4 +1,6 @@
 use numpy::{Element, PyArray1};
+use polars::export::arrow;
+use polars::export::arrow::array::Array;
 use polars::export::arrow::types::NativeType;
 use polars_core::prelude::*;
 use polars_core::utils::CustomIterTools;
@@ -39,11 +41,7 @@ fn mmap_numpy_array<T: Element + NativeType>(
     name: &str,
     array: &PyArray1<T>,
 ) -> PySeries {
-    use arrow::array::Array;
-    use polars::export::arrow;
-
-    let ro_array = array.readonly();
-    let vals = ro_array.as_slice().unwrap();
+    let vals = unsafe { array.as_slice().unwrap() };
 
     let arr = unsafe { arrow::ffi::mmap::slice_and_owner(vals, array.to_object(py)) };
     Series::from_arrow(name, arr.to_boxed()).unwrap().into()
@@ -210,7 +208,7 @@ impl PySeries {
     }
 
     #[staticmethod]
-    fn new_str(name: &str, val: Wrap<Utf8Chunked>, _strict: bool) -> Self {
+    fn new_str(name: &str, val: Wrap<StringChunked>, _strict: bool) -> Self {
         val.0.into_series().with_name(name).into()
     }
 
@@ -259,19 +257,30 @@ impl PySeries {
             Ok(series.into())
         } else {
             let val = vec_extract_wrapped(val);
-            let series = Series::new(name, &val);
-            match series.dtype() {
-                DataType::List(list_inner) => {
-                    let series = series
-                        .cast(&DataType::Array(
-                            Box::new(inner.map(|dt| dt.0).unwrap_or(*list_inner.clone())),
-                            width,
-                        ))
-                        .map_err(PyPolarsErr::from)?;
-                    Ok(series.into())
-                },
-                _ => Err(PyValueError::new_err("could not create Array from input")),
-            }
+            return if let Some(inner) = inner {
+                let series = Series::from_any_values_and_dtype(
+                    name,
+                    val.as_ref(),
+                    &DataType::Array(Box::new(inner.0), width),
+                    true,
+                )
+                .map_err(PyPolarsErr::from)?;
+                Ok(series.into())
+            } else {
+                let series = Series::new(name, &val);
+                match series.dtype() {
+                    DataType::List(list_inner) => {
+                        let series = series
+                            .cast(&DataType::Array(
+                                Box::new(inner.map(|dt| dt.0).unwrap_or(*list_inner.clone())),
+                                width,
+                            ))
+                            .map_err(PyPolarsErr::from)?;
+                        Ok(series.into())
+                    },
+                    _ => Err(PyValueError::new_err("could not create Array from input")),
+                }
+            };
         }
     }
 

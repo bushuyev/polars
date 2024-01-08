@@ -1,7 +1,7 @@
 use arrow::legacy::utils::CustomIterTools;
 use polars_core::frame::group_by::IntoGroupsProxy;
 use polars_core::prelude::*;
-use polars_core::with_match_physical_integer_polars_type;
+use polars_core::{with_match_physical_integer_polars_type, POOL};
 
 fn mode_primitive<T: PolarsDataType>(ca: &ChunkedArray<T>) -> PolarsResult<ChunkedArray<T>>
 where
@@ -10,7 +10,8 @@ where
     if ca.is_empty() {
         return Ok(ca.clone());
     }
-    let groups = ca.group_tuples(true, false).unwrap();
+    let parallel = !POOL.current_thread_has_pending_tasks().unwrap_or(false);
+    let groups = ca.group_tuples(parallel, false).unwrap();
     let idx = mode_indices(groups);
 
     // Safety:
@@ -68,7 +69,7 @@ pub fn mode(s: &Series) -> PolarsResult<Series> {
         DataType::Boolean => mode_primitive(s_phys.bool().unwrap())?.into_series(),
         DataType::Float32 => mode_f32(s_phys.f32().unwrap())?.into_series(),
         DataType::Float64 => mode_64(s_phys.f64().unwrap())?.into_series(),
-        DataType::Utf8 => mode_primitive(&s_phys.utf8().unwrap().as_binary())?.into_series(),
+        DataType::String => mode_primitive(&s_phys.str().unwrap().as_binary())?.into_series(),
         dt if dt.is_integer() => {
             with_match_physical_integer_polars_type!(dt, |$T| {
                 let ca: &ChunkedArray<$T> = s_phys.as_ref().as_ref().as_ref();
@@ -108,12 +109,12 @@ mod test {
         let result = mode_primitive(&ca).unwrap().to_vec();
         assert_eq!(result, &[Some(3.0f32)]);
 
-        let ca = Utf8Chunked::from_slice("test", &["test", "test", "test", "another test"]);
+        let ca = StringChunked::from_slice("test", &["test", "test", "test", "another test"]);
         let result = mode_primitive(&ca).unwrap();
         let vec_result4: Vec<Option<&str>> = result.into_iter().collect();
         assert_eq!(vec_result4, &[Some("test")]);
 
-        let mut ca_builder = CategoricalChunkedBuilder::new("test", 5);
+        let mut ca_builder = CategoricalChunkedBuilder::new("test", 5, Default::default());
         ca_builder.append_value("test");
         ca_builder.append_value("test");
         ca_builder.append_value("test2");

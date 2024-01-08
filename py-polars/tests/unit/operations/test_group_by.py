@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import polars as pl
 from polars.testing import assert_frame_equal, assert_series_equal
+
+if TYPE_CHECKING:
+    from polars.type_aliases import PolarsDataType
 
 
 def test_group_by() -> None:
@@ -47,6 +50,188 @@ def test_group_by() -> None:
     result = df.group_by("b", maintain_order=True).agg(pl.count("a"))
     assert result.rows() == [("a", 2), ("b", 3)]
     assert result.columns == ["b", "a"]
+
+
+@pytest.mark.parametrize(
+    ("input", "expected", "input_dtype", "output_dtype"),
+    [
+        ([1, 2, 3, 4], [2, 4], pl.UInt8, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.Int8, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.UInt16, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.Int16, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.UInt32, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.Int32, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.UInt64, pl.Float64),
+        ([1, 2, 3, 4], [2, 4], pl.Float32, pl.Float32),
+        ([1, 2, 3, 4], [2, 4], pl.Float64, pl.Float64),
+        ([False, True, True, True], [2 / 3, 1], pl.Boolean, pl.Float64),
+        (
+            [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 1, 3),
+                datetime(2023, 1, 4),
+            ],
+            [datetime(2023, 1, 2), datetime(2023, 1, 4)],
+            pl.Datetime("ms"),
+            pl.Datetime("ms"),
+        ),
+        (
+            [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 1, 3),
+                datetime(2023, 1, 4),
+            ],
+            [datetime(2023, 1, 2), datetime(2023, 1, 4)],
+            pl.Datetime("us"),
+            pl.Datetime("us"),
+        ),
+        (
+            [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 1, 3),
+                datetime(2023, 1, 4),
+            ],
+            [datetime(2023, 1, 2), datetime(2023, 1, 4)],
+            pl.Datetime("ns"),
+            pl.Datetime("ns"),
+        ),
+        (
+            [timedelta(1), timedelta(2), timedelta(3), timedelta(4)],
+            [timedelta(2), timedelta(4)],
+            pl.Duration("ms"),
+            pl.Duration("ms"),
+        ),
+        (
+            [timedelta(1), timedelta(2), timedelta(3), timedelta(4)],
+            [timedelta(2), timedelta(4)],
+            pl.Duration("us"),
+            pl.Duration("us"),
+        ),
+        (
+            [timedelta(1), timedelta(2), timedelta(3), timedelta(4)],
+            [timedelta(2), timedelta(4)],
+            pl.Duration("ns"),
+            pl.Duration("ns"),
+        ),
+    ],
+)
+def test_group_by_mean_by_dtype(
+    input: list[Any],
+    expected: list[Any],
+    input_dtype: PolarsDataType,
+    output_dtype: PolarsDataType,
+) -> None:
+    # groups are defined by first 3 values, then last value
+    name = str(input_dtype)
+    key = ["a", "a", "a", "b"]
+    df = pl.DataFrame(
+        {
+            "key": key,
+            name: pl.Series(input, dtype=input_dtype),
+        }
+    )
+    result = df.group_by("key", maintain_order=True).mean()
+    df_expected = pl.DataFrame(
+        {
+            "key": ["a", "b"],
+            name: pl.Series(expected, dtype=output_dtype),
+        }
+    )
+    assert_frame_equal(result, df_expected)
+
+
+@pytest.mark.parametrize(
+    ("input", "expected", "input_dtype", "output_dtype"),
+    [
+        ([1, 2, 4, 5], [2, 5], pl.UInt8, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.Int8, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.UInt16, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.Int16, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.UInt32, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.Int32, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.UInt64, pl.Float64),
+        ([1, 2, 4, 5], [2, 5], pl.Float32, pl.Float32),
+        ([1, 2, 4, 5], [2, 5], pl.Float64, pl.Float64),
+        ([False, True, True, True], [1, 1], pl.Boolean, pl.Float64),
+        (
+            [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 1, 4),
+                datetime(2023, 1, 5),
+            ],
+            [datetime(2023, 1, 2), datetime(2023, 1, 5)],
+            pl.Datetime("ms"),
+            pl.Datetime("ms"),
+        ),
+        (
+            [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 1, 4),
+                datetime(2023, 1, 5),
+            ],
+            [datetime(2023, 1, 2), datetime(2023, 1, 5)],
+            pl.Datetime("us"),
+            pl.Datetime("us"),
+        ),
+        (
+            [
+                datetime(2023, 1, 1),
+                datetime(2023, 1, 2),
+                datetime(2023, 1, 4),
+                datetime(2023, 1, 5),
+            ],
+            [datetime(2023, 1, 2), datetime(2023, 1, 5)],
+            pl.Datetime("ns"),
+            pl.Datetime("ns"),
+        ),
+        (
+            [timedelta(1), timedelta(2), timedelta(4), timedelta(5)],
+            [timedelta(2), timedelta(5)],
+            pl.Duration("ms"),
+            pl.Duration("ms"),
+        ),
+        (
+            [timedelta(1), timedelta(2), timedelta(4), timedelta(5)],
+            [timedelta(2), timedelta(5)],
+            pl.Duration("us"),
+            pl.Duration("us"),
+        ),
+        (
+            [timedelta(1), timedelta(2), timedelta(4), timedelta(5)],
+            [timedelta(2), timedelta(5)],
+            pl.Duration("ns"),
+            pl.Duration("ns"),
+        ),
+    ],
+)
+def test_group_by_median_by_dtype(
+    input: list[Any],
+    expected: list[Any],
+    input_dtype: PolarsDataType,
+    output_dtype: PolarsDataType,
+) -> None:
+    # groups are defined by first 3 values, then last value
+    name = str(input_dtype)
+    key = ["a", "a", "a", "b"]
+    df = pl.DataFrame(
+        {
+            "key": key,
+            name: pl.Series(input, dtype=input_dtype),
+        }
+    )
+    result = df.group_by("key", maintain_order=True).median()
+    df_expected = pl.DataFrame(
+        {
+            "key": ["a", "b"],
+            name: pl.Series(expected, dtype=output_dtype),
+        }
+    )
+    assert_frame_equal(result, df_expected)
 
 
 @pytest.fixture()
@@ -162,62 +347,19 @@ def test_group_by_iteration() -> None:
     assert result3 == expected3
 
 
-def bad_agg_parameters() -> list[Any]:
-    """Currently, IntoExpr and Iterable[IntoExpr] are supported."""
-    return [str, "b".join]
+@pytest.mark.parametrize("input", [[pl.col("b").sum()], pl.col("b").sum()])
+def test_group_by_agg_input_types(input: Any) -> None:
+    df = pl.LazyFrame({"a": [1, 1, 2, 2], "b": [1, 2, 3, 4]})
+    result = df.group_by("a", maintain_order=True).agg(input)
+    expected = pl.LazyFrame({"a": [1, 2], "b": [3, 7]})
+    assert_frame_equal(result, expected)
 
 
-def good_agg_parameters() -> list[pl.Expr | list[pl.Expr]]:
-    return [
-        [pl.col("b").sum()],
-        pl.col("b").sum(),
-    ]
-
-
-@pytest.mark.parametrize("lazy", [True, False])
-def test_group_by_agg_input_types(lazy: bool) -> None:
-    df = pl.DataFrame({"a": [1, 1, 2, 2], "b": [1, 2, 3, 4]})
-    df_or_lazy: pl.DataFrame | pl.LazyFrame = df.lazy() if lazy else df
-
-    for bad_param in bad_agg_parameters():
-        with pytest.raises(TypeError):  # noqa: PT012
-            result = df_or_lazy.group_by("a").agg(bad_param)
-            if lazy:
-                result.collect()  # type: ignore[union-attr]
-
-    expected = pl.DataFrame({"a": [1, 2], "b": [3, 7]})
-
-    for good_param in good_agg_parameters():
-        result = df_or_lazy.group_by("a", maintain_order=True).agg(good_param)
-        if lazy:
-            result = result.collect()  # type: ignore[union-attr]
-        assert_frame_equal(result, expected)
-
-
-@pytest.mark.parametrize("lazy", [True, False])
-def test_group_by_dynamic_agg_input_types(lazy: bool) -> None:
-    df = pl.DataFrame({"index_column": [0, 1, 2, 3], "b": [1, 3, 1, 2]}).set_sorted(
-        "index_column"
-    )
-    df_or_lazy: pl.DataFrame | pl.LazyFrame = df.lazy() if lazy else df
-
-    for bad_param in bad_agg_parameters():
-        with pytest.raises(TypeError):  # noqa: PT012
-            result = df_or_lazy.group_by_dynamic(
-                index_column="index_column", every="2i", closed="right"
-            ).agg(bad_param)
-            if lazy:
-                result.collect()  # type: ignore[union-attr]
-
-    expected = pl.DataFrame({"index_column": [-2, 0, 2], "b": [1, 4, 2]})
-
-    for good_param in good_agg_parameters():
-        result = df_or_lazy.group_by_dynamic(
-            index_column="index_column", every="2i", closed="right"
-        ).agg(good_param)
-        if lazy:
-            result = result.collect()  # type: ignore[union-attr]
-        assert_frame_equal(result, expected)
+@pytest.mark.parametrize("input", [str, "b".join])
+def test_group_by_agg_bad_input_types(input: Any) -> None:
+    df = pl.LazyFrame({"a": [1, 1, 2, 2], "b": [1, 2, 3, 4]})
+    with pytest.raises(TypeError):
+        df.group_by("a").agg(input)
 
 
 def test_group_by_sorted_empty_dataframe_3680() -> None:
@@ -320,17 +462,17 @@ def test_arg_sort_sort_by_groups_update__4360() -> None:
 
 
 def test_unique_order() -> None:
-    df = pl.DataFrame({"a": [1, 2, 1]}).with_row_count()
+    df = pl.DataFrame({"a": [1, 2, 1]}).with_row_index()
     assert df.unique(keep="last", subset="a", maintain_order=True).to_dict(
         as_series=False
     ) == {
-        "row_nr": [1, 2],
+        "index": [1, 2],
         "a": [2, 1],
     }
     assert df.unique(keep="first", subset="a", maintain_order=True).to_dict(
         as_series=False
     ) == {
-        "row_nr": [0, 1],
+        "index": [0, 1],
         "a": [1, 2],
     }
 
@@ -359,7 +501,7 @@ def test_group_by_dynamic_flat_agg_4814() -> None:
         (timedelta(seconds=10), "100s"),
     ],
 )
-@pytest.mark.parametrize("time_zone", [None, "Asia/Kathmandu"])
+@pytest.mark.parametrize("time_zone", [None, "UTC", "Asia/Kathmandu"])
 def test_group_by_dynamic_overlapping_groups_flat_apply_multiple_5038(
     every: str | timedelta, period: str | timedelta, time_zone: str | None
 ) -> None:
@@ -538,202 +680,69 @@ def test_group_by_empty_groups(
     assert_frame_equal(result, expected)
 
 
-def test_perfect_hash_table_null_values_8663() -> None:
-    s = pl.Series(
-        "a",
-        [
-            "3",
-            "41",
-            "17",
-            "5",
-            "26",
-            "27",
-            "43",
-            "45",
-            "41",
-            "13",
-            "45",
-            "48",
-            "17",
-            "22",
-            "31",
-            "25",
-            "28",
-            "13",
-            "7",
-            "26",
-            "17",
-            "4",
-            "43",
-            "47",
-            "30",
-            "28",
-            "8",
-            "27",
-            "6",
-            "7",
-            "26",
-            "11",
-            "37",
-            "29",
-            "49",
-            "20",
-            "29",
-            "28",
-            "23",
-            "9",
-            None,
-            "38",
-            "19",
-            "7",
-            "38",
-            "3",
-            "30",
-            "37",
-            "41",
-            "5",
-            "16",
-            "26",
-            "31",
-            "6",
-            "25",
-            "11",
-            "17",
-            "31",
-            "31",
-            "20",
-            "26",
-            None,
-            "39",
-            "10",
-            "38",
-            "4",
-            "39",
-            "15",
-            "13",
-            "35",
-            "38",
-            "11",
-            "39",
-            "11",
-            "48",
-            "36",
-            "18",
-            "11",
-            "34",
-            "16",
-            "28",
-            "9",
-            "37",
-            "8",
-            "17",
-            "48",
-            "44",
-            "28",
-            "25",
-            "30",
-            "37",
-            "30",
-            "18",
-            "12",
-            None,
-            "27",
-            "10",
-            "3",
-            "16",
-            "27",
-            "6",
-        ],
-        dtype=pl.Categorical,
+# https://github.com/pola-rs/polars/issues/8663
+def test_perfect_hash_table_null_values() -> None:
+    # fmt: off
+    values = ["3", "41", "17", "5", "26", "27", "43", "45", "41", "13", "45", "48", "17", "22", "31", "25", "28", "13", "7", "26", "17", "4", "43", "47", "30", "28", "8", "27", "6", "7", "26", "11", "37", "29", "49", "20", "29", "28", "23", "9", None, "38", "19", "7", "38", "3", "30", "37", "41", "5", "16", "26", "31", "6", "25", "11", "17", "31", "31", "20", "26", None, "39", "10", "38", "4", "39", "15", "13", "35", "38", "11", "39", "11", "48", "36", "18", "11", "34", "16", "28", "9", "37", "8", "17", "48", "44", "28", "25", "30", "37", "30", "18", "12", None, "27", "10", "3", "16", "27", "6"]
+    groups = ["3", "41", "17", "5", "26", "27", "43", "45", "13", "48", "22", "31", "25", "28", "7", "4", "47", "30", "8", "6", "11", "37", "29", "49", "20", "23", "9", None, "38", "19", "16", "39", "10", "15", "35", "36", "18", "34", "44", "12"]
+    # fmt: on
+
+    s = pl.Series("a", values, dtype=pl.Categorical)
+
+    result = (
+        s.to_frame("a").group_by("a", maintain_order=True).agg(pl.col("a").alias("agg"))
     )
-    result = s.to_frame("a").group_by("a").agg(pl.col("a").alias("agg"))
-    expected = {
-        "a": [
-            "3",
-            "41",
-            "17",
-            "5",
-            "26",
-            "27",
-            "43",
-            "45",
-            "13",
-            "48",
-            "22",
-            "31",
-            "25",
-            "28",
-            "7",
-            "4",
-            "47",
-            "30",
-            "8",
-            "6",
-            "11",
-            "37",
-            "29",
-            "49",
-            "20",
-            "23",
-            "9",
-            "38",
-            "19",
-            "16",
-            "39",
-            "10",
-            "15",
-            "35",
-            "36",
-            "18",
-            "34",
-            "44",
-            "12",
-            None,
-        ],
-        "agg": [
-            ["3", "3", "3"],
-            ["41", "41", "41"],
-            ["17", "17", "17", "17", "17"],
-            ["5", "5"],
-            ["26", "26", "26", "26", "26"],
-            ["27", "27", "27", "27"],
-            ["43", "43"],
-            ["45", "45"],
-            ["13", "13", "13"],
-            ["48", "48", "48"],
-            ["22"],
-            ["31", "31", "31", "31"],
-            ["25", "25", "25"],
-            ["28", "28", "28", "28", "28"],
-            ["7", "7", "7"],
-            ["4", "4"],
-            ["47"],
-            ["30", "30", "30", "30"],
-            ["8", "8"],
-            ["6", "6", "6"],
-            ["11", "11", "11", "11", "11"],
-            ["37", "37", "37", "37"],
-            ["29", "29"],
-            ["49"],
-            ["20", "20"],
-            ["23"],
-            ["9", "9"],
-            ["38", "38", "38", "38"],
-            ["19"],
-            ["16", "16", "16"],
-            ["39", "39", "39"],
-            ["10", "10"],
-            ["15"],
-            ["35"],
-            ["36"],
-            ["18", "18"],
-            ["34"],
-            ["44"],
-            ["12"],
-            [None, None, None],
-        ],
-    }
-    assert result.to_dict(as_series=False) == expected
+
+    agg_values = [
+        ["3", "3", "3"],
+        ["41", "41", "41"],
+        ["17", "17", "17", "17", "17"],
+        ["5", "5"],
+        ["26", "26", "26", "26", "26"],
+        ["27", "27", "27", "27"],
+        ["43", "43"],
+        ["45", "45"],
+        ["13", "13", "13"],
+        ["48", "48", "48"],
+        ["22"],
+        ["31", "31", "31", "31"],
+        ["25", "25", "25"],
+        ["28", "28", "28", "28", "28"],
+        ["7", "7", "7"],
+        ["4", "4"],
+        ["47"],
+        ["30", "30", "30", "30"],
+        ["8", "8"],
+        ["6", "6", "6"],
+        ["11", "11", "11", "11", "11"],
+        ["37", "37", "37", "37"],
+        ["29", "29"],
+        ["49"],
+        ["20", "20"],
+        ["23"],
+        ["9", "9"],
+        [None, None, None],
+        ["38", "38", "38", "38"],
+        ["19"],
+        ["16", "16", "16"],
+        ["39", "39", "39"],
+        ["10", "10"],
+        ["15"],
+        ["35"],
+        ["36"],
+        ["18", "18"],
+        ["34"],
+        ["44"],
+        ["12"],
+    ]
+    expected = pl.DataFrame(
+        {
+            "a": groups,
+            "agg": agg_values,
+        },
+        schema={"a": pl.Categorical, "agg": pl.List(pl.Categorical)},
+    )
+    assert_frame_equal(result, expected)
 
 
 def test_group_by_partitioned_ending_cast(monkeypatch: Any) -> None:
@@ -850,18 +859,25 @@ def test_group_by_list_scalar_11749() -> None:
 
 def test_group_by_with_expr_as_key() -> None:
     gb = pl.select(x=1).group_by(pl.col("x").alias("key"))
-    assert gb.agg(pl.all().first()).frame_equal(gb.agg(pl.first("x")))
+    result = gb.agg(pl.all().first())
+    expected = gb.agg(pl.first("x"))
+    assert_frame_equal(result, expected)
 
     # tests: 11766
-    assert gb.head(0).frame_equal(gb.agg(pl.col("x").head(0)).explode("x"))
-    assert gb.tail(0).frame_equal(gb.agg(pl.col("x").tail(0)).explode("x"))
+    result = gb.head(0)
+    expected = gb.agg(pl.col("x").head(0)).explode("x")
+    assert_frame_equal(result, expected)
+
+    result = gb.tail(0)
+    expected = gb.agg(pl.col("x").tail(0)).explode("x")
+    assert_frame_equal(result, expected)
 
 
 def test_lazy_group_by_reuse_11767() -> None:
     lgb = pl.select(x=1).lazy().group_by("x")
     a = lgb.count()
     b = lgb.count()
-    assert a.collect().frame_equal(b.collect())
+    assert_frame_equal(a, b)
 
 
 def test_group_by_double_on_empty_12194() -> None:
@@ -887,3 +903,18 @@ def test_group_by_when_then_no_aggregation_predicate() -> None:
         "pos": [5, 5],
         "neg": [-8, 0],
     }
+
+
+def test_group_by_apply_first_input_is_literal() -> None:
+    df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "g": [1, 1, 2, 2, 2]})
+    pow = df.group_by("g").agg(2 ** pl.col("x"))
+    assert pow.sort("g").to_dict(as_series=False) == {
+        "g": [1, 2],
+        "x": [[2.0, 4.0], [8.0, 16.0, 32.0]],
+    }
+
+
+def test_group_by_all_12869() -> None:
+    df = pl.DataFrame({"a": [1]})
+    result = next(iter(df.group_by(pl.all())))[1]
+    assert_frame_equal(df, result)

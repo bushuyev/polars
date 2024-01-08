@@ -1,31 +1,44 @@
-use std::hash::Hash;
-
 use polars_core::prelude::*;
 use polars_core::utils::{try_get_supertype, CustomIterTools};
-use polars_core::with_match_physical_integer_polars_type;
+use polars_core::with_match_physical_numeric_polars_type;
+#[cfg(feature = "dtype-categorical")]
+use polars_utils::iter::EnumerateIdxTrait;
+use polars_utils::total_ord::{TotalEq, TotalHash, TotalOrdWrap};
+
+fn is_in_helper_ca<'a, T>(
+    ca: &'a ChunkedArray<T>,
+    other: &'a ChunkedArray<T>,
+) -> PolarsResult<BooleanChunked>
+where
+    T: PolarsDataType,
+    T::Physical<'a>: TotalHash + TotalEq + Copy,
+{
+    let mut set = PlHashSet::with_capacity(other.len());
+    other.downcast_iter().for_each(|iter| {
+        iter.iter().for_each(|opt_val| {
+            if let Some(v) = opt_val {
+                set.insert(TotalOrdWrap(v));
+            }
+        })
+    });
+    Ok(ca
+        .apply_values_generic(|val| set.contains(&TotalOrdWrap(val)))
+        .with_name(ca.name()))
+}
 
 fn is_in_helper<'a, T>(ca: &'a ChunkedArray<T>, other: &Series) -> PolarsResult<BooleanChunked>
 where
     T: PolarsDataType,
-    T::Physical<'a>: Hash + Eq + Copy,
+    T::Physical<'a>: TotalHash + TotalEq + Copy,
 {
-    let mut set = PlHashSet::with_capacity(other.len());
-
     let other = ca.unpack_series_matching_type(other)?;
-    other.downcast_iter().for_each(|iter| {
-        iter.iter().for_each(|opt_val| {
-            if let Some(v) = opt_val {
-                set.insert(v);
-            }
-        })
-    });
-    Ok(ca.apply_values_generic(|val| set.contains(&val)))
+    is_in_helper_ca(ca, other)
 }
 
 fn is_in_numeric<T>(ca_in: &ChunkedArray<T>, other: &Series) -> PolarsResult<BooleanChunked>
 where
-    T: PolarsIntegerType,
-    T::Native: Hash + Eq,
+    T: PolarsNumericType,
+    T::Native: TotalHash + TotalEq,
 {
     // We check implicitly cast to supertype here
     match other.dtype() {
@@ -41,28 +54,33 @@ where
                 let value = ca_in.get(0);
 
                 other.list()?.apply_amortized_generic(|opt_s| {
-                    Some(opt_s.map(|s| {
-                        let ca = s.as_ref().unpack::<T>().unwrap();
-                        ca.into_iter().any(|a| a == value)
-                    }) == Some(true))
+                    Some(
+                        opt_s.map(|s| {
+                            let ca = s.as_ref().unpack::<T>().unwrap();
+                            ca.into_iter().any(|a| a == value)
+                        }) == Some(true),
+                    )
                 })
             } else {
                 polars_ensure!(ca_in.len() == other.len(), ComputeError: "shapes don't match: expected {} elements in 'is_in' comparison, got {}", ca_in.len(), other.len());
                 // SAFETY: unstable series never lives longer than the iterator.
-                unsafe { ca_in.into_iter()
-                    .zip(other.list()?.amortized_iter())
-                    .map(|(value, series)| match (value, series) {
-                        (val, Some(series)) => {
-                            let ca = series.as_ref().unpack::<T>().unwrap();
-                            ca.into_iter().any(|a| a == val)
-                        }
-                        _ => false,
-                    })
-                    .collect_trusted()}
+                unsafe {
+                    ca_in
+                        .into_iter()
+                        .zip(other.list()?.amortized_iter())
+                        .map(|(value, series)| match (value, series) {
+                            (val, Some(series)) => {
+                                let ca = series.as_ref().unpack::<T>().unwrap();
+                                ca.into_iter().any(|a| a == val)
+                            },
+                            _ => false,
+                        })
+                        .collect_trusted()
+                }
             };
             ca.rename(ca_in.name());
             Ok(ca)
-        }
+        },
         _ => {
             // first make sure that the types are equal
             if ca_in.dtype() != other.dtype() {
@@ -72,19 +90,15 @@ where
                 return is_in(&left, &right);
             }
             is_in_helper(ca_in, other)
-        }
+        },
     }
-        .map(|mut ca| {
-            ca.rename(ca_in.name());
-            ca
-        })
 }
 
-fn is_in_utf8(ca_in: &Utf8Chunked, other: &Series) -> PolarsResult<BooleanChunked> {
+fn is_in_string(ca_in: &StringChunked, other: &Series) -> PolarsResult<BooleanChunked> {
     match other.dtype() {
         #[cfg(feature = "dtype-categorical")]
-        DataType::List(dt) if matches!(&**dt, DataType::Categorical(_)) => {
-            if let DataType::Categorical(Some(rev_map)) = &**dt {
+        DataType::List(dt) if matches!(&**dt, DataType::Categorical(_, _)) => {
+            if let DataType::Categorical(Some(rev_map), _) = &**dt {
                 let opt_val = ca_in.get(0);
 
                 let other = other.list()?;
@@ -120,112 +134,114 @@ fn is_in_utf8(ca_in: &Utf8Chunked, other: &Series) -> PolarsResult<BooleanChunke
                 unreachable!()
             }
         },
-        DataType::List(dt) if DataType::Utf8 == **dt => is_in_binary(
+        DataType::List(dt) if DataType::String == **dt => is_in_binary(
             &ca_in.as_binary(),
             &other
                 .cast(&DataType::List(Box::new(DataType::Binary)))
                 .unwrap(),
         ),
-        DataType::Utf8 => is_in_binary(&ca_in.as_binary(), &other.cast(&DataType::Binary).unwrap()),
+        DataType::String => {
+            is_in_binary(&ca_in.as_binary(), &other.cast(&DataType::Binary).unwrap())
+        },
         _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
     }
 }
 
 fn is_in_binary(ca_in: &BinaryChunked, other: &Series) -> PolarsResult<BooleanChunked> {
     match other.dtype() {
-            DataType::List(dt) if DataType::Binary == **dt => {
-                let mut ca: BooleanChunked = if ca_in.len() == 1 && other.len() != 1 {
-                    let value = ca_in.get(0);
+        DataType::List(dt) if DataType::Binary == **dt => {
+            let mut ca: BooleanChunked = if ca_in.len() == 1 && other.len() != 1 {
+                let value = ca_in.get(0);
 
-                    other.list()?.apply_amortized_generic(|opt_b| {
-                        Some(opt_b.map(|s| {
+                other.list()?.apply_amortized_generic(|opt_b| {
+                    Some(
+                        opt_b.map(|s| {
                             let ca = s.as_ref().unpack::<BinaryType>().unwrap();
                             ca.into_iter().any(|a| a == value)
-                        }) == Some(true))
-                    })
-                } else {
-                    polars_ensure!(ca_in.len() == other.len(), ComputeError: "shapes don't match: expected {} elements in 'is_in' comparison, got {}", ca_in.len(), other.len());
-                    // SAFETY: unstable series never lives longer than the iterator.
-                    unsafe { ca_in.into_iter()
+                        }) == Some(true),
+                    )
+                })
+            } else {
+                polars_ensure!(ca_in.len() == other.len(), ComputeError: "shapes don't match: expected {} elements in 'is_in' comparison, got {}", ca_in.len(), other.len());
+                // SAFETY: unstable series never lives longer than the iterator.
+                unsafe {
+                    ca_in
+                        .into_iter()
                         .zip(other.list()?.amortized_iter())
                         .map(|(value, series)| match (value, series) {
                             (val, Some(series)) => {
                                 let ca = series.as_ref().unpack::<BinaryType>().unwrap();
                                 ca.into_iter().any(|a| a == val)
-                            }
+                            },
                             _ => false,
                         })
-                        .collect_trusted()}
-                };
-                ca.rename(ca_in.name());
-                Ok(ca)
-            }
-            DataType::Binary => {
-                is_in_helper(ca_in, other)
-            }
-            _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
-        }
-            .map(|mut ca| {
-                ca.rename(ca_in.name());
-                ca
-            })
+                        .collect_trusted()
+                }
+            };
+            ca.rename(ca_in.name());
+            Ok(ca)
+        },
+        DataType::Binary => is_in_helper(ca_in, other),
+        _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
+    }
 }
 
 fn is_in_boolean(ca_in: &BooleanChunked, other: &Series) -> PolarsResult<BooleanChunked> {
     match other.dtype() {
-            DataType::List(dt) if ca_in.dtype() == &**dt => {
-                let mut ca: BooleanChunked = if ca_in.len() == 1 && other.len() != 1 {
-                    let value = ca_in.get(0);
-                    // SAFETY: we know the iterators len
-                    // SAFETY: unstable series never lives longer than the iterator.
-                    unsafe {
-                        other
-                            .list()?
-                            .amortized_iter()
-                            .map(|opt_s| {
-                                opt_s.map(|s| {
-                                    let ca = s.as_ref().unpack::<BooleanType>().unwrap();
-                                    ca.into_iter().any(|a| a == value)
-                                }) == Some(true)
-                            })
-                            .trust_my_length(other.len())
-                            .collect_trusted()
-                    }
-                } else {
-                    polars_ensure!(ca_in.len() == other.len(), ComputeError: "shapes don't match: expected {} elements in 'is_in' comparison, got {}", ca_in.len(), other.len());
-                    // SAFETY: unstable series never lives longer than the iterator.
-                    unsafe { ca_in.into_iter()
+        DataType::List(dt) if ca_in.dtype() == &**dt => {
+            let mut ca: BooleanChunked = if ca_in.len() == 1 && other.len() != 1 {
+                let value = ca_in.get(0);
+                // SAFETY: we know the iterators len
+                // SAFETY: unstable series never lives longer than the iterator.
+                unsafe {
+                    other
+                        .list()?
+                        .amortized_iter()
+                        .map(|opt_s| {
+                            opt_s.map(|s| {
+                                let ca = s.as_ref().unpack::<BooleanType>().unwrap();
+                                ca.into_iter().any(|a| a == value)
+                            }) == Some(true)
+                        })
+                        .trust_my_length(other.len())
+                        .collect_trusted()
+                }
+            } else {
+                polars_ensure!(ca_in.len() == other.len(), ComputeError: "shapes don't match: expected {} elements in 'is_in' comparison, got {}", ca_in.len(), other.len());
+                // SAFETY: unstable series never lives longer than the iterator.
+                unsafe {
+                    ca_in
+                        .into_iter()
                         .zip(other.list()?.amortized_iter())
                         .map(|(value, series)| match (value, series) {
                             (val, Some(series)) => {
                                 let ca = series.as_ref().unpack::<BooleanType>().unwrap();
                                 ca.into_iter().any(|a| a == val)
-                            }
+                            },
                             _ => false,
                         })
                         .collect_trusted()
-                }};
-                ca.rename(ca_in.name());
-                Ok(ca)
-            }
-            DataType::Boolean => {
-                let other = other.bool().unwrap();
-                let has_true = other.any();
-                let nc = other.null_count();
+                }
+            };
+            ca.rename(ca_in.name());
+            Ok(ca)
+        },
+        DataType::Boolean => {
+            let other = other.bool().unwrap();
+            let has_true = other.any();
+            let nc = other.null_count();
 
-                let has_false = if nc == 0 {
-                    !other.all()
-                } else {
-                    (other.sum().unwrap() as usize + nc) != other.len()
-                };
-                Ok(ca_in.apply_values(|v| if v { has_true } else { has_false }))
-            }
-            _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
-        }
-            .map(|mut ca| {
-                ca.rename(ca_in.name());
-                ca
-            })
+            let has_false = if nc == 0 {
+                !other.all()
+            } else {
+                (other.sum().unwrap() as usize + nc) != other.len()
+            };
+            Ok(ca_in
+                .apply_values(|v| if v { has_true } else { has_false })
+                .with_name(ca_in.name()))
+        },
+        _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
+    }
 }
 
 #[cfg(feature = "dtype-struct")]
@@ -336,24 +352,72 @@ fn is_in_struct(ca_in: &StructChunked, other: &Series) -> PolarsResult<BooleanCh
     }
 }
 
+#[cfg(feature = "dtype-categorical")]
+fn is_in_cat(ca_in: &CategoricalChunked, other: &Series) -> PolarsResult<BooleanChunked> {
+    match other.dtype() {
+        DataType::Categorical(_, _) => {
+            let (ca_in, other_in) =
+                make_categoricals_compatible(ca_in, other.categorical().unwrap())?;
+            is_in_helper_ca(ca_in.physical(), other_in.physical())
+        },
+        DataType::String => {
+            let ca_other = other.str().unwrap();
+            let rev_map = ca_in.get_rev_map();
+            let categories = rev_map.get_categories();
+            let others: PlHashSet<&str> = ca_other.downcast_iter().flatten().flatten().collect();
+            let mut set = PlHashSet::with_capacity(std::cmp::min(categories.len(), ca_other.len()));
+
+            // Either store the global or local indices of the overlapping strings
+            match &**rev_map {
+                RevMapping::Global(hash_map, categories, _) => {
+                    for (global_idx, local_idx) in hash_map.iter() {
+                        // Safety: index is in bounds
+                        if others
+                            .contains(unsafe { categories.value_unchecked(*local_idx as usize) })
+                        {
+                            #[allow(clippy::unnecessary_cast)]
+                            set.insert(TotalOrdWrap(*global_idx as u32));
+                        }
+                    }
+                },
+                RevMapping::Local(categories, _) | RevMapping::Enum(categories, _) => {
+                    categories
+                        .values_iter()
+                        .enumerate_idx()
+                        .for_each(|(idx, v)| {
+                            if others.contains(v) {
+                                #[allow(clippy::unnecessary_cast)]
+                                set.insert(TotalOrdWrap(idx as u32));
+                            }
+                        });
+                },
+            }
+
+            Ok(ca_in
+                .physical()
+                .apply_values_generic(|val| set.contains(&TotalOrdWrap(val)))
+                .with_name(ca_in.name()))
+        },
+
+        _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
+    }
+}
+
 pub fn is_in(s: &Series, other: &Series) -> PolarsResult<BooleanChunked> {
     match s.dtype() {
         #[cfg(feature = "dtype-categorical")]
-        DataType::Categorical(_) => {
-            use crate::frame::join::_check_categorical_src;
-            _check_categorical_src(s.dtype(), other.dtype())?;
+        DataType::Categorical(_, _) => {
             let ca = s.categorical().unwrap();
-            let ca = ca.physical();
-            is_in_numeric(ca, &other.to_physical_repr())
+            is_in_cat(ca, other)
         },
         #[cfg(feature = "dtype-struct")]
         DataType::Struct(_) => {
             let ca = s.struct_().unwrap();
             is_in_struct(ca, other)
         },
-        DataType::Utf8 => {
-            let ca = s.utf8().unwrap();
-            is_in_utf8(ca, other)
+        DataType::String => {
+            let ca = s.str().unwrap();
+            is_in_string(ca, other)
         },
         DataType::Binary => {
             let ca = s.binary().unwrap();
@@ -363,43 +427,9 @@ pub fn is_in(s: &Series, other: &Series) -> PolarsResult<BooleanChunked> {
             let ca = s.bool().unwrap();
             is_in_boolean(ca, other)
         },
-        DataType::Float32 => {
-            let other = match other.dtype() {
-                DataType::List(_) => {
-                    let other = other.cast(&DataType::List(Box::new(DataType::Float32)))?;
-                    let other = other.list().unwrap();
-                    other.reinterpret_unsigned()
-                },
-                _ => {
-                    let other = other.cast(&DataType::Float32)?;
-                    let other = other.f32().unwrap();
-                    other.reinterpret_unsigned()
-                },
-            };
-            let ca = s.f32().unwrap();
-            let s = ca.reinterpret_unsigned();
-            is_in(&s, &other)
-        },
-        DataType::Float64 => {
-            let other = match other.dtype() {
-                DataType::List(_) => {
-                    let other = other.cast(&DataType::List(Box::new(DataType::Float64)))?;
-                    let other = other.list().unwrap();
-                    other.reinterpret_unsigned()
-                },
-                _ => {
-                    let other = other.cast(&DataType::Float64)?;
-                    let other = other.f64().unwrap();
-                    other.reinterpret_unsigned()
-                },
-            };
-            let ca = s.f64().unwrap();
-            let s = ca.reinterpret_unsigned();
-            is_in(&s, &other)
-        },
-        dt if dt.to_physical().is_integer() => {
+        dt if dt.to_physical().is_numeric() => {
             let s = s.to_physical_repr();
-            with_match_physical_integer_polars_type!(s.dtype(), |$T| {
+            with_match_physical_numeric_polars_type!(s.dtype(), |$T| {
                 let ca: &ChunkedArray<$T> = s.as_ref().as_ref().as_ref();
                 is_in_numeric(ca, other)
             })

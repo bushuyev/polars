@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from polars.series.utils import expr_dispatch
 from polars.utils._wrap import wrap_s
+from polars.utils.deprecation import deprecate_function
 
 if TYPE_CHECKING:
     from polars import Series
@@ -20,6 +21,12 @@ class CatNameSpace:
     def __init__(self, series: Series):
         self._s: PySeries = series._s
 
+    @deprecate_function(
+        "Set the ordering directly on the datatype `pl.Categorical('lexical')`"
+        " or `pl.Categorical('physical')` or `cast()` to the intended data type."
+        " This method will be removed in the next breaking change",
+        version="0.19.19",
+    )
     def set_ordering(self, ordering: CategoricalOrdering) -> Series:
         """
         Determine how this categorical series should be sorted.
@@ -32,30 +39,6 @@ class CatNameSpace:
             - 'physical' -> Use the physical representation of the categories to
                 determine the order (default).
             - 'lexical' -> Use the string values to determine the ordering.
-
-        Examples
-        --------
-        >>> df = pl.DataFrame(
-        ...     {"cats": ["z", "z", "k", "a", "b"], "vals": [3, 1, 2, 2, 3]}
-        ... ).with_columns(
-        ...     [
-        ...         pl.col("cats").cast(pl.Categorical).cat.set_ordering("lexical"),
-        ...     ]
-        ... )
-        >>> df.sort(["cats", "vals"])
-        shape: (5, 2)
-        ┌──────┬──────┐
-        │ cats ┆ vals │
-        │ ---  ┆ ---  │
-        │ cat  ┆ i64  │
-        ╞══════╪══════╡
-        │ a    ┆ 2    │
-        │ b    ┆ 3    │
-        │ k    ┆ 2    │
-        │ z    ┆ 1    │
-        │ z    ┆ 3    │
-        └──────┴──────┘
-
         """
 
     def get_categories(self) -> Series:
@@ -73,7 +56,6 @@ class CatNameSpace:
             "bar"
             "ham"
         ]
-
         """
 
     def is_local(self) -> bool:
@@ -92,10 +74,8 @@ class CatNameSpace:
 
         >>> with pl.StringCache():
         ...     s = pl.Series(["a", "b", "a"], dtype=pl.Categorical)
-        ...
         >>> s.cat.is_local()
         False
-
         """
         return self._s.cat_is_local()
 
@@ -115,7 +95,6 @@ class CatNameSpace:
         >>> with pl.StringCache():
         ...     _ = pl.Series("x", ["a", "b", "a"], dtype=pl.Categorical)
         ...     s = pl.Series("y", ["c", "b", "d"], dtype=pl.Categorical)
-        ...
         >>> s.to_physical()
         shape: (3,)
         Series: 'y' [u32]
@@ -132,7 +111,6 @@ class CatNameSpace:
                 1
                 2
         ]
-
         """
         return wrap_s(self._s.cat_to_local())
 
@@ -156,9 +134,8 @@ class CatNameSpace:
         >>> s = pl.Series(["b", "a", "b"]).cast(pl.Categorical)
         >>> s.cat.uses_lexical_ordering()
         False
-        >>> s = s.cat.set_ordering("lexical")
+        >>> s = s.cast(pl.Categorical("lexical"))
         >>> s.cat.uses_lexical_ordering()
         True
-
         """
         return self._s.cat_uses_lexical_ordering()

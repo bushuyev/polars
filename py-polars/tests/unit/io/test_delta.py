@@ -7,6 +7,8 @@ import pyarrow as pa
 import pyarrow.fs
 import pytest
 from deltalake import DeltaTable
+from deltalake.exceptions import TableNotFoundError
+from deltalake.table import TableMerger
 
 import polars as pl
 from polars.testing import assert_frame_equal, assert_frame_not_equal
@@ -106,7 +108,7 @@ def test_read_delta_relative(delta_table_path: Path) -> None:
 
 @pytest.mark.write_disk()
 def test_write_delta(df: pl.DataFrame, tmp_path: Path) -> None:
-    v0 = df.select(pl.col(pl.Utf8))
+    v0 = df.select(pl.col(pl.String))
     v1 = df.select(pl.col(pl.Int64))
     df_supported = df.drop(["cat", "time"])
 
@@ -186,7 +188,7 @@ def test_write_delta(df: pl.DataFrame, tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "series",
     [
-        pl.Series("string", ["test"], dtype=pl.Utf8),
+        pl.Series("string", ["test"], dtype=pl.String),
         pl.Series("uint", [1], dtype=pl.UInt64),
         pl.Series("int", [1], dtype=pl.Int64),
         pl.Series(
@@ -271,7 +273,7 @@ def test_write_delta(df: pl.DataFrame, tmp_path: Path) -> None:
                         "date_range_nested",
                         pl.List(pl.List(pl.Datetime(time_unit="ms", time_zone=None))),
                     ),
-                    pl.Field("string", pl.Utf8),
+                    pl.Field("string", pl.String),
                     pl.Field("int", pl.UInt32),
                 ]
             ),
@@ -317,7 +319,7 @@ def test_write_delta(df: pl.DataFrame, tmp_path: Path) -> None:
                                 pl.List(pl.Datetime(time_unit="ns", time_zone=None))
                             ),
                         ),
-                        pl.Field("string", pl.Utf8),
+                        pl.Field("string", pl.String),
                         pl.Field("int", pl.UInt32),
                     ]
                 )
@@ -338,6 +340,7 @@ def test_write_delta_w_compatible_schema(series: pl.Series, tmp_path: Path) -> N
     assert tbl.version() == 1
 
 
+@pytest.mark.write_disk()
 def test_write_delta_with_schema_10540(tmp_path: Path) -> None:
     df = pl.DataFrame({"a": [1, 2, 3]})
 
@@ -345,6 +348,7 @@ def test_write_delta_with_schema_10540(tmp_path: Path) -> None:
     df.write_delta(tmp_path, delta_write_options={"schema": pa_schema})
 
 
+@pytest.mark.write_disk()
 @pytest.mark.parametrize(
     "expr",
     [
@@ -369,3 +373,40 @@ def test_write_delta_with_tz_in_df(expr: pl.Expr, tmp_path: Path) -> None:
 
     expected = df.cast(pl.Datetime)
     assert_frame_equal(result, expected)
+
+
+def test_write_delta_with_merge_and_no_table(tmp_path: Path) -> None:
+    df = pl.DataFrame({"a": [1, 2, 3]})
+
+    with pytest.raises(TableNotFoundError):
+        df.write_delta(
+            tmp_path, mode="merge", delta_merge_options={"predicate": "a = a"}
+        )
+
+
+@pytest.mark.write_disk()
+def test_write_delta_with_merge(tmp_path: Path) -> None:
+    df = pl.DataFrame({"a": [1, 2, 3]})
+
+    df.write_delta(tmp_path, mode="append")
+
+    merger = df.write_delta(
+        tmp_path,
+        mode="merge",
+        delta_merge_options={
+            "predicate": "s.a = t.a",
+            "source_alias": "s",
+            "target_alias": "t",
+        },
+    )
+
+    assert isinstance(merger, TableMerger)
+    assert merger.predicate == "s.a = t.a"
+    assert merger.source_alias == "s"
+    assert merger.target_alias == "t"
+
+    merger.when_matched_delete(predicate="t.a > 2").execute()
+
+    table = pl.read_delta(str(tmp_path))
+
+    assert_frame_equal(df.filter(pl.col("a") <= 2), table)

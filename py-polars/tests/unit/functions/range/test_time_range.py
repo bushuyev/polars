@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import polars as pl
-from polars.testing import assert_series_equal
+from polars.testing import assert_frame_equal, assert_series_equal
 
 if TYPE_CHECKING:
     from polars.type_aliases import ClosedInterval
@@ -14,28 +14,20 @@ if TYPE_CHECKING:
 
 def test_time_range_schema() -> None:
     df = pl.DataFrame({"start": [time(1)], "end": [time(1, 30)]}).lazy()
-    result = df.with_columns(pl.time_ranges(pl.col("start"), pl.col("end")))
-    expected_schema = {"start": pl.Time, "end": pl.Time, "time_range": pl.List(pl.Time)}
-    assert result.schema == expected_schema
-    assert result.collect().schema == expected_schema
-
-
-def test_time_range_no_alias_schema_9037() -> None:
-    df = pl.DataFrame({"start": [time(1)], "end": [time(1, 30)]}).lazy()
-    result = df.with_columns(pl.time_ranges(pl.col("start"), pl.col("end")))
+    result = df.with_columns(time_range=pl.time_ranges(pl.col("start"), pl.col("end")))
     expected_schema = {"start": pl.Time, "end": pl.Time, "time_range": pl.List(pl.Time)}
     assert result.schema == expected_schema
     assert result.collect().schema == expected_schema
 
 
 def test_time_ranges_eager() -> None:
-    start = pl.Series([time(9, 0), time(10, 0)])
-    end = pl.Series([time(12, 0), time(11, 0)])
+    start = pl.Series("start", [time(9, 0), time(10, 0)])
+    end = pl.Series("end", [time(12, 0), time(11, 0)])
 
     result = pl.time_ranges(start, end, eager=True)
 
     expected = pl.Series(
-        "time_range",
+        "start",
         [
             [time(9, 0), time(10, 0), time(11, 0), time(12, 0)],
             [time(10, 0), time(11, 0)],
@@ -45,12 +37,12 @@ def test_time_ranges_eager() -> None:
 
 
 def test_time_range_eager_explode() -> None:
-    start = pl.Series([time(9, 0)])
-    end = pl.Series([time(11, 0)])
+    start = pl.Series("start", [time(9, 0)])
+    end = pl.Series("end", [time(11, 0)])
 
     result = pl.time_range(start, end, eager=True)
 
-    expected = pl.Series("time", [time(9, 0), time(10, 0), time(11, 0)])
+    expected = pl.Series("start", [time(9, 0), time(10, 0), time(11, 0)])
     assert_series_equal(result, expected)
 
 
@@ -95,7 +87,7 @@ def test_time_range_start_equals_end() -> None:
 
     result = pl.time_range(t, t, closed="both", eager=True)
 
-    expected = pl.Series("time", [t])
+    expected = pl.Series("literal", [t])
     assert_series_equal(result, expected)
 
 
@@ -105,15 +97,14 @@ def test_time_range_start_equals_end_open(closed: ClosedInterval) -> None:
 
     result = pl.time_range(t, t, closed=closed, eager=True)
 
-    expected = pl.Series("time", dtype=pl.Time)
+    expected = pl.Series("literal", dtype=pl.Time)
     assert_series_equal(result, expected)
 
 
-def test_time_range_invalid_start_end() -> None:
-    with pytest.raises(
-        pl.ComputeError, match="`end` must be equal to or greater than `start`"
-    ):
-        pl.time_range(time(12), time(11), eager=True)
+def test_time_range_start_later_than_end() -> None:
+    result = pl.time_range(time(12), time(11), eager=True)
+    expected = pl.Series("literal", dtype=pl.Time)
+    assert_series_equal(result, expected)
 
 
 @pytest.mark.parametrize("interval", [timedelta(0), timedelta(minutes=-10)])
@@ -236,21 +227,56 @@ def test_time_range_expr() -> None:
 
 
 def test_time_range_name() -> None:
-    expected_name = "time"
+    expected_name = "literal"
     result_eager = pl.time_range(time(10), time(12), eager=True)
     assert result_eager.name == expected_name
 
-    result_lazy = pl.select(pl.time_range(time(10), time(12), eager=False)).to_series()
+    expected_name = "s1"
+    result_lazy = pl.select(
+        pl.time_range(
+            pl.Series("s1", [time(10)]), pl.Series("s2", [time(12)]), eager=False
+        )
+    ).to_series()
     assert result_lazy.name == expected_name
 
 
-def test_deprecated_name_arg() -> None:
-    name = "x"
+def test_time_ranges_broadcasting() -> None:
+    df = pl.DataFrame({"time": [time(10, 0), time(11, 0), time(12, 0)]})
+    result = df.select(
+        pl.time_ranges(start="time", end=time(12, 0)).alias("end"),
+        pl.time_ranges(start=time(10, 0), end="time").alias("start"),
+    )
+    expected = pl.DataFrame(
+        {
+            "end": [
+                [time(10, 0), time(11, 0), time(12, 0)],
+                [time(11, 0), time(12, 0)],
+                [time(12, 0)],
+            ],
+            "start": [
+                [time(10, 0)],
+                [time(10, 0), time(11, 0)],
+                [time(10, 0), time(11, 0), time(12, 0)],
+            ],
+        }
+    )
+    assert_frame_equal(result, expected)
 
-    with pytest.deprecated_call():
-        result_lazy = pl.time_range(time(10), time(12), name=name)
-        assert result_lazy.meta.output_name() == name
 
-    with pytest.deprecated_call():
-        result_eager = pl.time_range(time(10), time(12), name=name, eager=True)
-        assert result_eager.name == name
+def test_time_ranges_mismatched_chunks() -> None:
+    s1 = pl.Series("s1", [time(10), time(11)])
+    s1.append(pl.Series([time(12)]))
+
+    s2 = pl.Series("s2", [time(12)])
+    s2.append(pl.Series([time(12), time(12)]))
+
+    result = pl.time_ranges(s1, s2, eager=True)
+    expected = pl.Series(
+        "s1",
+        [
+            [time(10, 0), time(11, 0), time(12, 0)],
+            [time(11, 0), time(12, 0)],
+            [time(12, 0)],
+        ],
+    )
+    assert_series_equal(result, expected)

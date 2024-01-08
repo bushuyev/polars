@@ -1,7 +1,7 @@
 use polars::lazy::dsl;
 use polars::lazy::dsl::Expr;
 use polars::prelude::*;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyString};
 
@@ -188,6 +188,11 @@ pub fn count() -> PyExpr {
 }
 
 #[pyfunction]
+pub fn cum_count(reverse: bool) -> PyExpr {
+    dsl::cum_count(reverse).into()
+}
+
+#[pyfunction]
 pub fn cov(a: PyExpr, b: PyExpr, ddof: u8) -> PyExpr {
     dsl::cov(a.inner, b.inner, ddof).into()
 }
@@ -286,6 +291,26 @@ pub fn concat_lf_diagonal(
 }
 
 #[pyfunction]
+pub fn concat_lf_horizontal(lfs: &PyAny, parallel: bool) -> PyResult<PyLazyFrame> {
+    let iter = lfs.iter()?;
+
+    let lfs = iter
+        .map(|item| {
+            let item = item?;
+            get_lf(item)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let args = UnionArgs {
+        rechunk: false, // No need to rechunk with horizontal concatenation
+        parallel,
+        to_supertypes: false,
+    };
+    let lf = dsl::functions::concat_lf_horizontal(lfs, args).map_err(PyPolarsErr::from)?;
+    Ok(lf.into())
+}
+
+#[pyfunction]
 pub fn concat_expr(e: Vec<PyExpr>, rechunk: bool) -> PyResult<PyExpr> {
     let e = e.to_exprs();
     let e = dsl::functions::concat_expr(e, rechunk).map_err(PyPolarsErr::from)?;
@@ -359,18 +384,13 @@ pub fn lit(value: &PyAny, allow_object: bool) -> PyResult<PyExpr> {
         let val = value.extract::<bool>().unwrap();
         Ok(dsl::lit(val).into())
     } else if let Ok(int) = value.downcast::<PyInt>() {
-        match int.extract::<i64>() {
-            Ok(val) => {
-                if val >= 0 && val < i32::MAX as i64 || val <= 0 && val > i32::MIN as i64 {
-                    Ok(dsl::lit(val as i32).into())
-                } else {
-                    Ok(dsl::lit(val).into())
-                }
-            },
-            _ => {
-                let val = int.extract::<u64>().unwrap();
-                Ok(dsl::lit(val).into())
-            },
+        if let Ok(val) = int.extract::<i32>() {
+            Ok(dsl::lit(val).into())
+        } else if let Ok(val) = int.extract::<i64>() {
+            Ok(dsl::lit(val).into())
+        } else {
+            let val = int.extract::<u64>().unwrap();
+            Ok(dsl::lit(val).into())
         }
     } else if let Ok(float) = value.downcast::<PyFloat>() {
         let val = float.extract::<f64>().unwrap();
@@ -394,8 +414,8 @@ pub fn lit(value: &PyAny, allow_object: bool) -> PyResult<PyExpr> {
         });
         Ok(dsl::lit(s).into())
     } else {
-        Err(PyValueError::new_err(format!(
-            "could not convert value {:?} as a Literal",
+        Err(PyTypeError::new_err(format!(
+            "invalid literal value: {:?}",
             value.str()?
         )))
     }

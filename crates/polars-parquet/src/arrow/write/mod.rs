@@ -24,7 +24,6 @@ mod row_group;
 mod schema;
 #[cfg(feature = "async")]
 mod sink;
-mod utf8;
 mod utils;
 
 use arrow::array::*;
@@ -73,6 +72,8 @@ pub use schema::to_parquet_type;
 #[cfg(feature = "async")]
 pub use sink::FileSink;
 
+use crate::write::dictionary::encode_as_dictionary_optional;
+
 /// returns offset and length to slice the leaf values
 pub fn slice_nested_leaf(nested: &[Nested]) -> (usize, usize) {
     // find the deepest recursive dremel structure as that one determines how many values we must
@@ -116,52 +117,6 @@ pub fn to_parquet_schema(schema: &ArrowSchema) -> PolarsResult<SchemaDescriptor>
         .map(to_parquet_type)
         .collect::<PolarsResult<Vec<_>>>()?;
     Ok(SchemaDescriptor::new("root".to_string(), parquet_types))
-}
-
-/// Checks whether the `data_type` can be encoded as `encoding`.
-/// Note that this is whether this implementation supports it, which is a subset of
-/// what the parquet spec allows.
-pub fn can_encode(data_type: &ArrowDataType, encoding: Encoding) -> bool {
-    if let (Encoding::DeltaBinaryPacked, ArrowDataType::Decimal(p, _)) =
-        (encoding, data_type.to_logical_type())
-    {
-        return *p <= 18;
-    };
-
-    matches!(
-        (encoding, data_type.to_logical_type()),
-        (Encoding::Plain, _)
-            | (
-                Encoding::DeltaLengthByteArray,
-                ArrowDataType::Binary
-                    | ArrowDataType::LargeBinary
-                    | ArrowDataType::Utf8
-                    | ArrowDataType::LargeUtf8,
-            )
-            | (Encoding::RleDictionary, ArrowDataType::Dictionary(_, _, _))
-            | (
-                Encoding::PlainDictionary,
-                ArrowDataType::Dictionary(_, _, _)
-            )
-            | (
-                Encoding::DeltaBinaryPacked,
-                ArrowDataType::Null
-                    | ArrowDataType::UInt8
-                    | ArrowDataType::UInt16
-                    | ArrowDataType::UInt32
-                    | ArrowDataType::UInt64
-                    | ArrowDataType::Int8
-                    | ArrowDataType::Int16
-                    | ArrowDataType::Int32
-                    | ArrowDataType::Date32
-                    | ArrowDataType::Time32(_)
-                    | ArrowDataType::Int64
-                    | ArrowDataType::Date64
-                    | ArrowDataType::Time64(_)
-                    | ArrowDataType::Timestamp(_, _)
-                    | ArrowDataType::Duration(_)
-            )
-    )
 }
 
 /// Slices the [`Array`] to `Box<dyn Array>` and `Vec<Nested>`.
@@ -227,7 +182,7 @@ pub fn array_to_pages(
     type_: ParquetPrimitiveType,
     nested: &[Nested],
     options: WriteOptions,
-    encoding: Encoding,
+    mut encoding: Encoding,
 ) -> PolarsResult<DynIter<'static, PolarsResult<Page>>> {
     if let ArrowDataType::Dictionary(key_type, _, _) = primitive_array.data_type().to_logical_type()
     {
@@ -241,15 +196,27 @@ pub fn array_to_pages(
             )
         });
     };
+    if let Encoding::RleDictionary = encoding {
+        // Only take this path for primitive columns
+        if matches!(nested.first(), Some(Nested::Primitive(_, _, _))) {
+            if let Some(result) =
+                encode_as_dictionary_optional(primitive_array, type_.clone(), options)
+            {
+                return result;
+            }
+        }
+
+        // We didn't succeed, fallback to plain
+        encoding = Encoding::Plain;
+    }
 
     let nested = nested.to_vec();
-    let primitive_array = primitive_array.to_boxed();
 
     let number_of_rows = nested[0].len();
 
     // note: this is not correct if the array is sliced - the estimation should happen on the
     // primitive after sliced for parquet
-    let byte_size = estimated_bytes_size(primitive_array.as_ref());
+    let byte_size = estimated_bytes_size(primitive_array);
 
     const DEFAULT_PAGE_SIZE: usize = 1024 * 1024;
     let max_page_size = options.data_pagesize_limit.unwrap_or(DEFAULT_PAGE_SIZE);
@@ -261,7 +228,7 @@ pub fn array_to_pages(
     };
     let rows_per_page = (max_page_size / (bytes_per_row + 1)).max(1);
 
-    let pages = (0..number_of_rows)
+    let row_iter = (0..number_of_rows)
         .step_by(rows_per_page)
         .map(move |offset| {
             let length = if offset + rows_per_page > number_of_rows {
@@ -269,20 +236,24 @@ pub fn array_to_pages(
             } else {
                 rows_per_page
             };
-
-            let mut right_array = primitive_array.clone();
-            let mut right_nested = nested.clone();
-            slice_parquet_array(right_array.as_mut(), &mut right_nested, offset, length);
-
-            array_to_page(
-                right_array.as_ref(),
-                type_.clone(),
-                &right_nested,
-                options,
-                encoding,
-            )
+            (offset, length)
         });
 
+    let primitive_array = primitive_array.to_boxed();
+
+    let pages = row_iter.map(move |(offset, length)| {
+        let mut right_array = primitive_array.clone();
+        let mut right_nested = nested.clone();
+        slice_parquet_array(right_array.as_mut(), &mut right_nested, offset, length);
+
+        array_to_page(
+            right_array.as_ref(),
+            type_.clone(),
+            &right_nested,
+            options,
+            encoding,
+        )
+    });
     Ok(DynIter::new(pages))
 }
 
@@ -309,55 +280,62 @@ pub fn array_to_page_simple(
     encoding: Encoding,
 ) -> PolarsResult<Page> {
     let data_type = array.data_type();
-    if !can_encode(data_type, encoding) {
-        polars_bail!(InvalidOperation:
-            "The datatype {data_type:?} cannot be encoded by {encoding:?}"
-        )
-    }
 
     match data_type.to_logical_type() {
         ArrowDataType::Boolean => {
             boolean::array_to_page(array.as_any().downcast_ref().unwrap(), options, type_)
         },
         // casts below MUST match the casts done at the metadata (field -> parquet type).
-        ArrowDataType::UInt8 => primitive::array_to_page_integer::<u8, i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::UInt16 => primitive::array_to_page_integer::<u16, i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::UInt32 => primitive::array_to_page_integer::<u32, i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::UInt64 => primitive::array_to_page_integer::<u64, i64>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::Int8 => primitive::array_to_page_integer::<i8, i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::Int16 => primitive::array_to_page_integer::<i16, i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
+        ArrowDataType::UInt8 => {
+            return primitive::array_to_page_integer::<u8, i32>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
+        ArrowDataType::UInt16 => {
+            return primitive::array_to_page_integer::<u16, i32>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
+        ArrowDataType::UInt32 => {
+            return primitive::array_to_page_integer::<u32, i32>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
+        ArrowDataType::UInt64 => {
+            return primitive::array_to_page_integer::<u64, i64>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
+        ArrowDataType::Int8 => {
+            return primitive::array_to_page_integer::<i8, i32>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
+        ArrowDataType::Int16 => {
+            return primitive::array_to_page_integer::<i16, i32>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
         ArrowDataType::Int32 | ArrowDataType::Date32 | ArrowDataType::Time32(_) => {
-            primitive::array_to_page_integer::<i32, i32>(
+            return primitive::array_to_page_integer::<i32, i32>(
                 array.as_any().downcast_ref().unwrap(),
                 options,
                 type_,
@@ -368,12 +346,14 @@ pub fn array_to_page_simple(
         | ArrowDataType::Date64
         | ArrowDataType::Time64(_)
         | ArrowDataType::Timestamp(_, _)
-        | ArrowDataType::Duration(_) => primitive::array_to_page_integer::<i64, i64>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
+        | ArrowDataType::Duration(_) => {
+            return primitive::array_to_page_integer::<i64, i64>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
         ArrowDataType::Float32 => primitive::array_to_page_plain::<f32, f32>(
             array.as_any().downcast_ref().unwrap(),
             options,
@@ -384,30 +364,25 @@ pub fn array_to_page_simple(
             options,
             type_,
         ),
-        ArrowDataType::Utf8 => utf8::array_to_page::<i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::LargeUtf8 => utf8::array_to_page::<i64>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::Binary => binary::array_to_page::<i32>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
-        ArrowDataType::LargeBinary => binary::array_to_page::<i64>(
-            array.as_any().downcast_ref().unwrap(),
-            options,
-            type_,
-            encoding,
-        ),
+        ArrowDataType::LargeUtf8 => {
+            let array =
+                arrow::compute::cast::cast(array, &ArrowDataType::LargeBinary, Default::default())
+                    .unwrap();
+            return binary::array_to_page::<i64>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            );
+        },
+        ArrowDataType::LargeBinary => {
+            return binary::array_to_page::<i64>(
+                array.as_any().downcast_ref().unwrap(),
+                options,
+                type_,
+                encoding,
+            )
+        },
         ArrowDataType::Null => {
             let array = Int32Array::new_null(ArrowDataType::Int32, array.len());
             primitive::array_to_page_plain::<i32, i32>(&array, options, type_)
@@ -487,7 +462,9 @@ pub fn array_to_page_simple(
                     values,
                     array.validity().cloned(),
                 );
-                primitive::array_to_page_integer::<i32, i32>(&array, options, type_, encoding)
+                return primitive::array_to_page_integer::<i32, i32>(
+                    &array, options, type_, encoding,
+                );
             } else if precision <= 18 {
                 let values = array
                     .values()
@@ -501,7 +478,9 @@ pub fn array_to_page_simple(
                     values,
                     array.validity().cloned(),
                 );
-                primitive::array_to_page_integer::<i64, i64>(&array, options, type_, encoding)
+                return primitive::array_to_page_integer::<i64, i64>(
+                    &array, options, type_, encoding,
+                );
             } else if precision <= 38 {
                 let size = decimal_length_from_precision(precision);
                 let statistics = if options.write_statistics {
@@ -572,7 +551,9 @@ pub fn array_to_page_simple(
                     values,
                     array.validity().cloned(),
                 );
-                primitive::array_to_page_integer::<i32, i32>(&array, options, type_, encoding)
+                return primitive::array_to_page_integer::<i32, i32>(
+                    &array, options, type_, encoding,
+                );
             } else if precision <= 18 {
                 let values = array
                     .values()
@@ -586,7 +567,9 @@ pub fn array_to_page_simple(
                     values,
                     array.validity().cloned(),
                 );
-                primitive::array_to_page_integer::<i64, i64>(&array, options, type_, encoding)
+                return primitive::array_to_page_integer::<i64, i64>(
+                    &array, options, type_, encoding,
+                );
             } else {
                 let size = decimal_length_from_precision(precision);
 
@@ -633,17 +616,11 @@ fn array_to_page_nested(
             let array = array.as_any().downcast_ref().unwrap();
             boolean::nested_array_to_page(array, options, type_, nested)
         },
-        Utf8 => {
-            let array = array.as_any().downcast_ref().unwrap();
-            utf8::nested_array_to_page::<i32>(array, options, type_, nested)
-        },
         LargeUtf8 => {
+            let array =
+                arrow::compute::cast::cast(array, &LargeBinary, Default::default()).unwrap();
             let array = array.as_any().downcast_ref().unwrap();
-            utf8::nested_array_to_page::<i64>(array, options, type_, nested)
-        },
-        Binary => {
-            let array = array.as_any().downcast_ref().unwrap();
-            binary::nested_array_to_page::<i32>(array, options, type_, nested)
+            binary::nested_array_to_page::<i64>(array, options, type_, nested)
         },
         LargeBinary => {
             let array = array.as_any().downcast_ref().unwrap();
@@ -881,6 +858,7 @@ fn transverse_recursive<T, F: Fn(&ArrowDataType) -> T + Clone>(
             }
         },
         Union => todo!(),
+        BinaryView | Utf8View => todo!(),
     }
 }
 

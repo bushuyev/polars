@@ -3,11 +3,18 @@
 mod python;
 
 mod err;
+#[cfg(not(target_arch = "wasm32"))]
+mod exitable;
 #[cfg(feature = "pivot")]
 pub mod pivot;
 
 use std::borrow::Cow;
-#[cfg(any(feature = "parquet", feature = "ipc", feature = "csv"))]
+#[cfg(any(
+    feature = "parquet",
+    feature = "ipc",
+    feature = "csv",
+    feature = "json"
+))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +22,8 @@ pub use anonymous_scan::*;
 use arrow::legacy::prelude::QuantileInterpolOptions;
 #[cfg(feature = "csv")]
 pub use csv::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use exitable::*;
 pub use file_list_reader::*;
 #[cfg(feature = "ipc")]
 pub use ipc::*;
@@ -27,7 +36,12 @@ use polars_core::prelude::*;
 use polars_io::RowCount;
 pub use polars_plan::frame::{AllowedOptimizations, OptState};
 use polars_plan::global::FETCH_ROWS;
-#[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
+#[cfg(any(
+    feature = "ipc",
+    feature = "parquet",
+    feature = "csv",
+    feature = "json"
+))]
 use polars_plan::logical_plan::collect_fingerprints;
 use polars_plan::logical_plan::optimize;
 use polars_plan::utils::expr_output_name;
@@ -450,7 +464,7 @@ impl LazyFrame {
     /// with the result of the `fill_value` expression.
     ///
     /// See the method on [Series](polars_core::series::SeriesTrait::shift) for more info on the `shift` operation.
-    pub fn shift_and_fill<E: Into<Expr>>(self, n: E, fill_value: E) -> Self {
+    pub fn shift_and_fill<E: Into<Expr>, IE: Into<Expr>>(self, n: E, fill_value: IE) -> Self {
         self.select(vec![col("*").shift_and_fill(n.into(), fill_value.into())])
     }
 
@@ -597,13 +611,23 @@ impl LazyFrame {
             self.optimize_with_scratch(&mut lp_arena, &mut expr_arena, &mut scratch, false)?;
 
         let finger_prints = if file_caching {
-            #[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
+            #[cfg(any(
+                feature = "ipc",
+                feature = "parquet",
+                feature = "csv",
+                feature = "json"
+            ))]
             {
                 let mut fps = Vec::with_capacity(8);
                 collect_fingerprints(lp_top, &mut fps, &lp_arena, &expr_arena);
                 Some(fps)
             }
-            #[cfg(not(any(feature = "ipc", feature = "parquet", feature = "csv")))]
+            #[cfg(not(any(
+                feature = "ipc",
+                feature = "parquet",
+                feature = "csv",
+                feature = "json"
+            )))]
             {
                 None
             }
@@ -674,23 +698,14 @@ impl LazyFrame {
     /// into memory. This methods will return an error if the query cannot be completely done in a
     /// streaming fashion.
     #[cfg(feature = "parquet")]
-    pub fn sink_parquet(mut self, path: PathBuf, options: ParquetWriteOptions) -> PolarsResult<()> {
-        self.opt_state.streaming = true;
-        self.logical_plan = LogicalPlan::Sink {
-            input: Box::new(self.logical_plan),
-            payload: SinkType::File {
+    pub fn sink_parquet(self, path: PathBuf, options: ParquetWriteOptions) -> PolarsResult<()> {
+        self.sink(
+            SinkType::File {
                 path: Arc::new(path),
                 file_type: FileType::Parquet(options),
             },
-        };
-        let (mut state, mut physical_plan, is_streaming) = self.prepare_collect(true)?;
-        polars_ensure!(
-            is_streaming,
-            ComputeError: "cannot run the whole query in a streaming order; \
-            use `collect().write_parquet()` instead"
-        );
-        let _ = physical_plan.execute(&mut state)?;
-        Ok(())
+            "collect().write_parquet()",
+        )
     }
 
     /// Stream a query result into a parquet file on an ObjectStore-compatible cloud service. This is useful if the final result doesn't fit
@@ -699,10 +714,46 @@ impl LazyFrame {
     /// streaming fashion.
     #[cfg(all(feature = "cloud_write", feature = "parquet"))]
     pub fn sink_parquet_cloud(
-        mut self,
+        self,
         uri: String,
         cloud_options: Option<polars_io::cloud::CloudOptions>,
         parquet_options: ParquetWriteOptions,
+    ) -> PolarsResult<()> {
+        self.sink(
+            SinkType::Cloud {
+                uri: Arc::new(uri),
+                cloud_options,
+                file_type: FileType::Parquet(parquet_options),
+            },
+            "collect().write_parquet()",
+        )
+    }
+
+    /// Stream a query result into an ipc/arrow file. This is useful if the final result doesn't fit
+    /// into memory. This methods will return an error if the query cannot be completely done in a
+    /// streaming fashion.
+    #[cfg(feature = "ipc")]
+    pub fn sink_ipc(self, path: PathBuf, options: IpcWriterOptions) -> PolarsResult<()> {
+        self.sink(
+            SinkType::File {
+                path: Arc::new(path),
+                file_type: FileType::Ipc(options),
+            },
+            "collect().write_ipc()",
+        )
+    }
+
+    /// Stream a query result into an ipc/arrow file on an ObjectStore-compatible cloud service.
+    /// This is useful if the final result doesn't fit
+    /// into memory, and where you do not want to write to a local file but to a location in the cloud.
+    /// This method will return an error if the query cannot be completely done in a
+    /// streaming fashion.
+    #[cfg(all(feature = "cloud_write", feature = "ipc"))]
+    pub fn sink_ipc_cloud(
+        mut self,
+        uri: String,
+        cloud_options: Option<polars_io::cloud::CloudOptions>,
+        ipc_options: IpcWriterOptions,
     ) -> PolarsResult<()> {
         self.opt_state.streaming = true;
         self.logical_plan = LogicalPlan::Sink {
@@ -710,36 +761,14 @@ impl LazyFrame {
             payload: SinkType::Cloud {
                 uri: Arc::new(uri),
                 cloud_options,
-                file_type: FileType::Parquet(parquet_options),
-            },
-        };
-        let (mut state, mut physical_plan, is_streaming) = self.prepare_collect(true)?;
-        polars_ensure!(
-            is_streaming,
-            ComputeError: "cannot run the whole query in a streaming order"
-        );
-        let _ = physical_plan.execute(&mut state)?;
-        Ok(())
-    }
-
-    /// Stream a query result into an ipc/arrow file. This is useful if the final result doesn't fit
-    /// into memory. This methods will return an error if the query cannot be completely done in a
-    /// streaming fashion.
-    #[cfg(feature = "ipc")]
-    pub fn sink_ipc(mut self, path: PathBuf, options: IpcWriterOptions) -> PolarsResult<()> {
-        self.opt_state.streaming = true;
-        self.logical_plan = LogicalPlan::Sink {
-            input: Box::new(self.logical_plan),
-            payload: SinkType::File {
-                path: Arc::new(path),
-                file_type: FileType::Ipc(options),
+                file_type: FileType::Ipc(ipc_options),
             },
         };
         let (mut state, mut physical_plan, is_streaming) = self.prepare_collect(true)?;
         polars_ensure!(
             is_streaming,
             ComputeError: "cannot run the whole query in a streaming order; \
-            use `collect().write_ipc()` instead"
+                           use `collect().write_ipc()` instead"
         );
         let _ = physical_plan.execute(&mut state)?;
         Ok(())
@@ -749,20 +778,48 @@ impl LazyFrame {
     /// into memory. This methods will return an error if the query cannot be completely done in a
     /// streaming fashion.
     #[cfg(feature = "csv")]
-    pub fn sink_csv(mut self, path: PathBuf, options: CsvWriterOptions) -> PolarsResult<()> {
-        self.opt_state.streaming = true;
-        self.logical_plan = LogicalPlan::Sink {
-            input: Box::new(self.logical_plan),
-            payload: SinkType::File {
+    pub fn sink_csv(self, path: PathBuf, options: CsvWriterOptions) -> PolarsResult<()> {
+        self.sink(
+            SinkType::File {
                 path: Arc::new(path),
                 file_type: FileType::Csv(options),
             },
+            "collect().write_csv()",
+        )
+    }
+
+    /// Stream a query result into a json file. This is useful if the final result doesn't fit
+    /// into memory. This methods will return an error if the query cannot be completely done in a
+    /// streaming fashion.
+    #[cfg(feature = "json")]
+    pub fn sink_json(self, path: PathBuf, options: JsonWriterOptions) -> PolarsResult<()> {
+        self.sink(
+            SinkType::File {
+                path: Arc::new(path),
+                file_type: FileType::Json(options),
+            },
+            "collect().write_ndjson()` or `collect().write_json()",
+        )
+    }
+
+    #[cfg(any(
+        feature = "ipc",
+        feature = "parquet",
+        feature = "cloud_write",
+        feature = "csv",
+        feature = "json",
+    ))]
+    fn sink(mut self, payload: SinkType, msg_alternative: &str) -> Result<(), PolarsError> {
+        self.opt_state.streaming = true;
+        self.logical_plan = LogicalPlan::Sink {
+            input: Box::new(self.logical_plan),
+            payload,
         };
         let (mut state, mut physical_plan, is_streaming) = self.prepare_collect(true)?;
         polars_ensure!(
             is_streaming,
-            ComputeError: "cannot run the whole query in a streaming order; \
-            use `collect().write_csv()` instead"
+            ComputeError: format!("cannot run the whole query in a streaming order; \
+            use `{msg_alternative}` instead", msg_alternative=msg_alternative)
         );
         let _ = physical_plan.execute(&mut state)?;
         Ok(())
@@ -1022,7 +1079,7 @@ impl LazyFrame {
     /// use polars_lazy::prelude::*;
     /// fn anti_join_dataframes(ldf: LazyFrame, other: LazyFrame) -> LazyFrame {
     ///         ldf
-    ///         .anti_join(other, col("foo"), col("bar").cast(DataType::Utf8))
+    ///         .anti_join(other, col("foo"), col("bar").cast(DataType::String))
     /// }
     /// ```
     #[cfg(feature = "semi_anti_join")]
@@ -1079,7 +1136,7 @@ impl LazyFrame {
     /// use polars_lazy::prelude::*;
     /// fn inner_join_dataframes(ldf: LazyFrame, other: LazyFrame) -> LazyFrame {
     ///         ldf
-    ///         .inner_join(other, col("foo"), col("bar").cast(DataType::Utf8))
+    ///         .inner_join(other, col("foo"), col("bar").cast(DataType::String))
     /// }
     /// ```
     pub fn inner_join<E: Into<Expr>>(self, other: LazyFrame, left_on: E, right_on: E) -> LazyFrame {
@@ -1112,7 +1169,7 @@ impl LazyFrame {
             other,
             [left_on.into()],
             [right_on.into()],
-            JoinArgs::new(JoinType::Outer),
+            JoinArgs::new(JoinType::Outer { coalesce: false }),
         )
     }
 
@@ -1129,7 +1186,7 @@ impl LazyFrame {
     /// use polars_lazy::prelude::*;
     /// fn semi_join_dataframes(ldf: LazyFrame, other: LazyFrame) -> LazyFrame {
     ///         ldf
-    ///         .semi_join(other, col("foo"), col("bar").cast(DataType::Utf8))
+    ///         .semi_join(other, col("foo"), col("bar").cast(DataType::String))
     /// }
     /// ```
     #[cfg(feature = "semi_anti_join")]
@@ -1276,18 +1333,37 @@ impl LazyFrame {
         Self::from_logical_plan(lp, opt_state)
     }
 
+    fn stats_helper<F, E>(self, condition: F, expr: E) -> PolarsResult<LazyFrame>
+    where
+        F: Fn(&DataType) -> bool,
+        E: Fn(&str) -> Expr,
+    {
+        let exprs = self
+            .schema()?
+            .iter()
+            .map(|(name, dt)| {
+                if condition(dt) {
+                    expr(name)
+                } else {
+                    lit(NULL).cast(dt.clone()).alias(name)
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(self.select(exprs))
+    }
+
     /// Aggregate all the columns as their maximum values.
     ///
     /// Aggregated columns will have the same names as the original columns.
-    pub fn max(self) -> LazyFrame {
-        self.select(vec![col("*").max()])
+    pub fn max(self) -> PolarsResult<LazyFrame> {
+        self.stats_helper(|dt| dt.is_ord(), |name| col(name).max())
     }
 
     /// Aggregate all the columns as their minimum values.
     ///
     /// Aggregated columns will have the same names as the original columns.
-    pub fn min(self) -> LazyFrame {
-        self.select(vec![col("*").min()])
+    pub fn min(self) -> PolarsResult<LazyFrame> {
+        self.stats_helper(|dt| dt.is_ord(), |name| col(name).min())
     }
 
     /// Aggregate all the columns as their sum values.
@@ -1299,16 +1375,28 @@ impl LazyFrame {
     /// in `debug` mode, overflows will panic, whereas in `release` mode overflows will
     /// silently wrap.
     /// - String columns will sum to None.
-    pub fn sum(self) -> LazyFrame {
-        self.select(vec![col("*").sum()])
+    pub fn sum(self) -> PolarsResult<LazyFrame> {
+        self.stats_helper(
+            |dt| dt.is_numeric() || matches!(dt, DataType::Boolean | DataType::Duration(_)),
+            |name| col(name).sum(),
+        )
     }
 
     /// Aggregate all the columns as their mean values.
     ///
     /// - Boolean and integer columns are converted to `f64` before computing the mean.
     /// - String columns will have a mean of None.
-    pub fn mean(self) -> LazyFrame {
-        self.select(vec![col("*").mean()])
+    pub fn mean(self) -> PolarsResult<LazyFrame> {
+        self.stats_helper(
+            |dt| {
+                dt.is_numeric()
+                    || matches!(
+                        dt,
+                        DataType::Boolean | DataType::Duration(_) | DataType::Datetime(_, _)
+                    )
+            },
+            |name| col(name).mean(),
+        )
     }
 
     /// Aggregate all the columns as their median values.
@@ -1316,13 +1404,23 @@ impl LazyFrame {
     /// - Boolean and integer results are converted to `f64`. However, they are still
     ///   susceptible to overflow before this conversion occurs.
     /// - String columns will sum to None.
-    pub fn median(self) -> LazyFrame {
-        self.select(vec![col("*").median()])
+    pub fn median(self) -> PolarsResult<LazyFrame> {
+        self.stats_helper(
+            |dt| dt.is_numeric() || matches!(dt, DataType::Boolean | DataType::Datetime(_, _)),
+            |name| col(name).median(),
+        )
     }
 
     /// Aggregate all the columns as their quantile values.
-    pub fn quantile(self, quantile: Expr, interpol: QuantileInterpolOptions) -> LazyFrame {
-        self.select(vec![col("*").quantile(quantile, interpol)])
+    pub fn quantile(
+        self,
+        quantile: Expr,
+        interpol: QuantileInterpolOptions,
+    ) -> PolarsResult<LazyFrame> {
+        self.stats_helper(
+            |dt| dt.is_numeric(),
+            |name| col(name).quantile(quantile.clone(), interpol),
+        )
     }
 
     /// Aggregate all the columns as their standard deviation values.
@@ -1337,8 +1435,11 @@ impl LazyFrame {
     /// > standard deviation per se.
     ///
     /// Source: [Numpy](https://numpy.org/doc/stable/reference/generated/numpy.std.html#)
-    pub fn std(self, ddof: u8) -> LazyFrame {
-        self.select(vec![col("*").std(ddof)])
+    pub fn std(self, ddof: u8) -> PolarsResult<LazyFrame> {
+        self.stats_helper(
+            |dt| dt.is_numeric() || dt.is_bool(),
+            |name| col(name).std(ddof),
+        )
     }
 
     /// Aggregate all the columns as their variance values.
@@ -1350,8 +1451,11 @@ impl LazyFrame {
     /// > likelihood estimate of the variance for normally distributed variables.
     ///
     /// Source: [Numpy](https://numpy.org/doc/stable/reference/generated/numpy.var.html#)
-    pub fn var(self, ddof: u8) -> LazyFrame {
-        self.select(vec![col("*").var(ddof)])
+    pub fn var(self, ddof: u8) -> PolarsResult<LazyFrame> {
+        self.stats_helper(
+            |dt| dt.is_numeric() || dt.is_bool(),
+            |name| col(name).var(ddof),
+        )
     }
 
     /// Apply explode operation. [See eager explode](polars_core::frame::DataFrame::explode).
@@ -1543,7 +1647,7 @@ impl LazyFrame {
     /// # Warning
     /// This can have a negative effect on query performance. This may for instance block
     /// predicate pushdown optimization.
-    pub fn with_row_count(mut self, name: &str, offset: Option<IdxSize>) -> LazyFrame {
+    pub fn with_row_index(mut self, name: &str, offset: Option<IdxSize>) -> LazyFrame {
         let add_row_count_in_map = match &mut self.logical_plan {
             LogicalPlan::Scan {
                 file_options: options,
@@ -1580,6 +1684,11 @@ impl LazyFrame {
         } else {
             self
         }
+    }
+
+    /// Return the number of non-null elements for each column.
+    pub fn count(self) -> LazyFrame {
+        self.select(vec![col("*").count()])
     }
 
     /// Unnest the given `Struct` columns: the fields of the `Struct` type will be
@@ -1623,6 +1732,15 @@ pub struct LazyGroupBy {
     dynamic_options: Option<DynamicGroupOptions>,
     #[cfg(feature = "dynamic_group_by")]
     rolling_options: Option<RollingGroupOptions>,
+}
+
+impl From<LazyGroupBy> for LazyFrame {
+    fn from(lgb: LazyGroupBy) -> Self {
+        Self {
+            logical_plan: lgb.logical_plan,
+            opt_state: lgb.opt_state,
+        }
+    }
 }
 
 impl LazyGroupBy {
@@ -1734,6 +1852,7 @@ pub struct JoinBuilder {
     force_parallel: bool,
     suffix: Option<String>,
     validation: JoinValidation,
+    join_nulls: bool,
 }
 impl JoinBuilder {
     /// Create the `JoinBuilder` with the provided `LazyFrame` as the left table.
@@ -1746,6 +1865,7 @@ impl JoinBuilder {
             right_on: vec![],
             allow_parallel: true,
             force_parallel: false,
+            join_nulls: false,
             suffix: None,
             validation: Default::default(),
         }
@@ -1806,6 +1926,12 @@ impl JoinBuilder {
         self
     }
 
+    /// Join on null values. By default null values will never produce matches.
+    pub fn join_nulls(mut self, join_nulls: bool) -> Self {
+        self.join_nulls = join_nulls;
+        self
+    }
+
     /// Suffix to add duplicate column names in join.
     /// Defaults to `"_right"` if this method is never called.
     pub fn suffix<S: AsRef<str>>(mut self, suffix: S) -> Self {
@@ -1826,6 +1952,7 @@ impl JoinBuilder {
             validation: self.validation,
             suffix: self.suffix,
             slice: None,
+            join_nulls: self.join_nulls,
         };
 
         let lp = self

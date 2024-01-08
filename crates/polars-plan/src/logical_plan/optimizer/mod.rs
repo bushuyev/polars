@@ -13,7 +13,13 @@ mod collect_members;
 #[cfg(feature = "cse")]
 mod cse_expr;
 mod fast_projection;
-#[cfg(any(feature = "ipc", feature = "parquet", feature = "csv", feature = "cse"))]
+#[cfg(any(
+    feature = "ipc",
+    feature = "parquet",
+    feature = "csv",
+    feature = "cse",
+    feature = "json"
+))]
 pub(crate) mod file_caching;
 mod flatten_union;
 #[cfg(feature = "fused")]
@@ -21,6 +27,7 @@ mod fused;
 mod predicate_pushdown;
 mod projection_pushdown;
 mod simplify_expr;
+mod simplify_functions;
 mod slice_pushdown_expr;
 mod slice_pushdown_lp;
 mod stack_opt;

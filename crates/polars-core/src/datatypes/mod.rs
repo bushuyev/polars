@@ -12,7 +12,9 @@ mod aliases;
 mod any_value;
 mod dtype;
 mod field;
+#[cfg(feature = "object")]
 mod static_array;
+#[cfg(feature = "object")]
 mod static_array_collect;
 mod time_unit;
 
@@ -23,11 +25,10 @@ use std::ops::{Add, AddAssign, Div, Mul, Rem, Sub, SubAssign};
 
 pub use aliases::*;
 pub use any_value::*;
-use arrow::compute::comparison::Simd8;
+pub use arrow::array::{ArrayCollectIterExt, ArrayFromIter, ArrayFromIterDtype, StaticArray};
 #[cfg(feature = "dtype-categorical")]
 use arrow::datatypes::IntegerType;
 pub use arrow::datatypes::{ArrowDataType, TimeUnit as ArrowTimeUnit};
-use arrow::legacy::data_types::IsFloat;
 use arrow::types::simd::Simd;
 use arrow::types::NativeType;
 use bytemuck::Zeroable;
@@ -35,14 +36,15 @@ pub use dtype::*;
 pub use field::*;
 use num_traits::{Bounded, FromPrimitive, Num, NumCast, One, Zero};
 use polars_utils::abs_diff::AbsDiff;
+use polars_utils::float::IsFloat;
+use polars_utils::min_max::MinMax;
+use polars_utils::nulls::IsNull;
 #[cfg(feature = "serde")]
 use serde::de::{EnumAccess, Error, Unexpected, VariantAccess, Visitor};
 #[cfg(any(feature = "serde", feature = "serde-lazy"))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "serde", feature = "serde-lazy"))]
 use serde::{Deserializer, Serializer};
-pub use static_array::StaticArray;
-pub use static_array_collect::{ArrayCollectIterExt, ArrayFromIter, ArrayFromIterDtype};
 pub use time_unit::*;
 
 use crate::chunked_array::arithmetic::ArrayArithmetics;
@@ -61,7 +63,7 @@ pub struct Flat;
 ///
 /// The StaticArray and dtype return must be correct.
 pub unsafe trait PolarsDataType: Send + Sync + Sized {
-    type Physical<'a>: std::fmt::Debug;
+    type Physical<'a>: std::fmt::Debug + Clone;
     type ZeroablePhysical<'a>: Zeroable + From<Self::Physical<'a>>;
     type Array: for<'a> StaticArray<
         ValueT<'a> = Self::Physical<'a>,
@@ -150,7 +152,7 @@ impl_polars_datatype!(DatetimeType, Unknown, PrimitiveArray<i64>, 'a, i64, i64);
 impl_polars_datatype!(DurationType, Unknown, PrimitiveArray<i64>, 'a, i64, i64);
 impl_polars_datatype!(CategoricalType, Unknown, PrimitiveArray<u32>, 'a, u32, u32);
 impl_polars_datatype!(TimeType, Time, PrimitiveArray<i64>, 'a, i64, i64);
-impl_polars_datatype!(Utf8Type, Utf8, Utf8Array<i64>, 'a, &'a str, Option<&'a str>);
+impl_polars_datatype!(StringType, String, Utf8Array<i64>, 'a, &'a str, Option<&'a str>);
 impl_polars_datatype!(BinaryType, Binary, BinaryArray<i64>, 'a, &'a [u8], Option<&'a [u8]>);
 impl_polars_datatype!(BooleanType, Boolean, BooleanArray, 'a, bool, bool);
 
@@ -212,7 +214,7 @@ unsafe impl<T: PolarsObject> PolarsDataType for ObjectType<T> {
     type Structure = Nested;
 
     fn get_dtype() -> DataType {
-        DataType::Object(T::type_name())
+        DataType::Object(T::type_name(), None)
     }
 }
 
@@ -232,7 +234,7 @@ pub type Int64Chunked = ChunkedArray<Int64Type>;
 pub type Int128Chunked = ChunkedArray<Int128Type>;
 pub type Float32Chunked = ChunkedArray<Float32Type>;
 pub type Float64Chunked = ChunkedArray<Float64Type>;
-pub type Utf8Chunked = ChunkedArray<Utf8Type>;
+pub type StringChunked = ChunkedArray<StringType>;
 pub type BinaryChunked = ChunkedArray<BinaryType>;
 #[cfg(feature = "object")]
 pub type ObjectChunked<T> = ChunkedArray<ObjectType<T>>;
@@ -246,7 +248,7 @@ pub trait NumericNative:
     + Zero
     + One
     + Simd
-    + Simd8
+    // + Simd8
     + std::iter::Sum<Self>
     + Add<Output = Self>
     + Sub<Output = Self>
@@ -260,6 +262,8 @@ pub trait NumericNative:
     + FromPrimitive
     + IsFloat
     + ArrayArithmetics
+    + MinMax
+    + IsNull
 {
     type PolarsType: PolarsNumericType;
 }

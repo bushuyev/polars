@@ -5,11 +5,11 @@ from polars.testing import assert_frame_equal, assert_series_equal
 
 
 def test_empty_str_concat_lit() -> None:
-    df = pl.DataFrame({"a": [], "b": []}, schema=[("a", pl.Utf8), ("b", pl.Utf8)])
+    df = pl.DataFrame({"a": [], "b": []}, schema=[("a", pl.String), ("b", pl.String)])
     assert df.with_columns(pl.lit("asd") + pl.col("a")).schema == {
-        "a": pl.Utf8,
-        "b": pl.Utf8,
-        "literal": pl.Utf8,
+        "a": pl.String,
+        "b": pl.String,
+        "literal": pl.String,
     }
 
 
@@ -27,20 +27,20 @@ def test_empty_cross_join() -> None:
 
 
 def test_empty_string_replace() -> None:
-    s = pl.Series("", [], dtype=pl.Utf8)
-    assert s.str.replace("a", "b", literal=True).series_equal(s)
-    assert s.str.replace("a", "b").series_equal(s)
-    assert s.str.replace("ab", "b", literal=True).series_equal(s)
-    assert s.str.replace("ab", "b").series_equal(s)
+    s = pl.Series("", [], dtype=pl.String)
+    assert_series_equal(s.str.replace("a", "b", literal=True), s)
+    assert_series_equal(s.str.replace("a", "b"), s)
+    assert_series_equal(s.str.replace("ab", "b", literal=True), s)
+    assert_series_equal(s.str.replace("ab", "b"), s)
 
 
 def test_empty_window_function() -> None:
     expr = (pl.col("VAL") / pl.col("VAL").sum()).over("KEY")
 
-    df = pl.DataFrame(schema={"KEY": pl.Utf8, "VAL": pl.Float64})
+    df = pl.DataFrame(schema={"KEY": pl.String, "VAL": pl.Float64})
     df.select(expr)  # ComputeError
 
-    lf = pl.DataFrame(schema={"KEY": pl.Utf8, "VAL": pl.Float64}).lazy()
+    lf = pl.DataFrame(schema={"KEY": pl.String, "VAL": pl.Float64}).lazy()
     expected = pl.DataFrame(schema={"VAL": pl.Float64})
     assert_frame_equal(lf.select(expr).collect(), expected)
 
@@ -48,7 +48,7 @@ def test_empty_window_function() -> None:
 def test_empty_count_window() -> None:
     df = pl.DataFrame(
         {"ID": [], "DESC": [], "dataset": []},
-        schema={"ID": pl.Utf8, "DESC": pl.Utf8, "dataset": pl.Utf8},
+        schema={"ID": pl.String, "DESC": pl.String, "dataset": pl.String},
     )
 
     out = df.select(pl.col("ID").count().over(["ID", "DESC"]))
@@ -64,7 +64,10 @@ def test_empty_sort_by_args() -> None:
 
 def test_empty_9137() -> None:
     out = (
-        pl.DataFrame({"id": [], "value": []})
+        pl.DataFrame(
+            {"id": [], "value": []},
+            schema={"id": pl.Float32, "value": pl.Float32},
+        )
         .group_by("id")
         .agg(pl.col("value").pow(2).mean())
     )
@@ -72,9 +75,52 @@ def test_empty_9137() -> None:
     assert out.dtypes == [pl.Float32, pl.Float32]
 
 
+@pytest.mark.parametrize("dtype", [pl.String, pl.Binary, pl.UInt32])
+@pytest.mark.parametrize(
+    "set_operation",
+    ["set_intersection", "set_union", "set_difference", "set_symmetric_difference"],
+)
+def test_empty_df_set_operations(set_operation: str, dtype: pl.DataType) -> None:
+    expr = getattr(pl.col("list1").list, set_operation)(pl.col("list2"))
+    df = pl.DataFrame([], {"list1": pl.List(dtype), "list2": pl.List(dtype)})
+    assert df.select(expr).is_empty()
+
+
+def test_empty_set_intersection() -> None:
+    full = pl.Series("full", [[1, 2, 3]], pl.List(pl.UInt32))
+    empty = pl.Series("empty", [[]], pl.List(pl.UInt32))
+
+    assert_series_equal(empty.rename("full"), full.list.set_intersection(empty))
+    assert_series_equal(empty, empty.list.set_intersection(full))
+
+
+def test_empty_set_difference() -> None:
+    full = pl.Series("full", [[1, 2, 3]], pl.List(pl.UInt32))
+    empty = pl.Series("empty", [[]], pl.List(pl.UInt32))
+
+    assert_series_equal(full, full.list.set_difference(empty))
+    assert_series_equal(empty, empty.list.set_difference(full))
+
+
+def test_empty_set_union() -> None:
+    full = pl.Series("full", [[1, 2, 3]], pl.List(pl.UInt32))
+    empty = pl.Series("empty", [[]], pl.List(pl.UInt32))
+
+    assert_series_equal(full, full.list.set_union(empty))
+    assert_series_equal(full.rename("empty"), empty.list.set_union(full))
+
+
+def test_empty_set_symteric_difference() -> None:
+    full = pl.Series("full", [[1, 2, 3]], pl.List(pl.UInt32))
+    empty = pl.Series("empty", [[]], pl.List(pl.UInt32))
+
+    assert_series_equal(full, full.list.set_symmetric_difference(empty))
+    assert_series_equal(full.rename("empty"), empty.list.set_symmetric_difference(full))
+
+
 @pytest.mark.parametrize("name", ["sort", "unique", "head", "tail", "shift", "reverse"])
 def test_empty_list_namespace_output_9585(name: str) -> None:
-    dtype = pl.List(pl.Utf8)
+    dtype = pl.List(pl.String)
     df = pl.DataFrame([[None]], schema={"A": dtype})
 
     expr = getattr(pl.col("A").list, name)()

@@ -21,7 +21,12 @@ from polars.testing import assert_frame_equal
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from polars.type_aliases import DbReadEngine, SchemaDefinition, SchemaDict
+    from polars.type_aliases import (
+        ConnectionOrCursor,
+        DbReadEngine,
+        SchemaDefinition,
+        SchemaDict,
+    )
 
 
 def adbc_sqlite_connect(*args: Any, **kwargs: Any) -> Any:
@@ -181,7 +186,7 @@ class MockResultSet:
                 connect_using="connectorx",
                 expected_dtypes={
                     "id": pl.UInt8,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float64,
                     "date": pl.Date,
                 },
@@ -200,9 +205,9 @@ class MockResultSet:
                 connect_using="adbc",
                 expected_dtypes={
                     "id": pl.UInt8,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float64,
-                    "date": pl.Utf8,
+                    "date": pl.String,
                 },
                 expected_dates=["2020-01-01", "2021-12-31"],
                 schema_overrides={"id": pl.UInt8},
@@ -219,7 +224,7 @@ class MockResultSet:
                 connect_using=lambda path: sqlite3.connect(path, detect_types=True),
                 expected_dtypes={
                     "id": pl.UInt8,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float32,
                     "date": pl.Date,
                 },
@@ -234,7 +239,7 @@ class MockResultSet:
                 connect_using=lambda path: sqlite3.connect(path, detect_types=True),
                 expected_dtypes={
                     "id": pl.Int32,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float32,
                     "date": pl.Date,
                 },
@@ -253,7 +258,7 @@ class MockResultSet:
                 ).connect(),
                 expected_dtypes={
                     "id": pl.Int64,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float64,
                     "date": pl.Date,
                 },
@@ -267,9 +272,9 @@ class MockResultSet:
                 connect_using=adbc_sqlite_connect,
                 expected_dtypes={
                     "id": pl.Int64,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float64,
-                    "date": pl.Utf8,
+                    "date": pl.String,
                 },
                 expected_dates=["2020-01-01", "2021-12-31"],
             ),
@@ -285,9 +290,9 @@ class MockResultSet:
                 connect_using=adbc_sqlite_connect,
                 expected_dtypes={
                     "id": pl.Int64,
-                    "name": pl.Utf8,
+                    "name": pl.String,
                     "value": pl.Float64,
-                    "date": pl.Utf8,
+                    "date": pl.String,
                 },
                 expected_dates=["2020-01-01", "2021-12-31"],
                 batch_size=1,
@@ -364,11 +369,15 @@ def test_read_database_alchemy_selectable(tmp_path: Path) -> None:
     )
 
 
-def test_read_database_parameterisd(tmp_path: Path) -> None:
+def test_read_database_parameterised(tmp_path: Path) -> None:
     # setup underlying test data
     tmp_path.mkdir(exist_ok=True)
     create_temp_sqlite_db(test_db := str(tmp_path / "test.db"))
-    conn = create_engine(f"sqlite:///{test_db}")
+
+    # raw cursor "execute" only takes positional params, alchemy cursor takes kwargs
+    raw_conn: ConnectionOrCursor = sqlite3.connect(test_db)
+    alchemy_conn: ConnectionOrCursor = create_engine(f"sqlite:///{test_db}").connect()
+    test_conns = (alchemy_conn, raw_conn)
 
     # establish parameterised queries and validate usage
     query = """
@@ -381,14 +390,15 @@ def test_read_database_parameterisd(tmp_path: Path) -> None:
         ("?", (0,)),
         ("?", [0]),
     ):
-        assert_frame_equal(
-            pl.read_database(
-                query.format(n=param),
-                connection=conn.connect(),
-                execute_options={"parameters": param_value},
-            ),
-            pl.DataFrame({"year": [2021], "name": ["other"], "value": [-99.5]}),
-        )
+        for conn in test_conns:
+            assert_frame_equal(
+                pl.read_database(
+                    query.format(n=param),
+                    connection=conn,
+                    execute_options={"parameters": param_value},
+                ),
+                pl.DataFrame({"year": [2021], "name": ["other"], "value": [-99.5]}),
+            )
 
 
 @pytest.mark.parametrize(

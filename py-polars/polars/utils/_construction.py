@@ -32,14 +32,15 @@ from polars.datatypes import (
     Date,
     Datetime,
     Duration,
-    Float32,
+    Enum,
     List,
+    Null,
     Object,
+    String,
     Struct,
     Time,
     UInt32,
     Unknown,
-    Utf8,
     dtype_to_py_type,
     is_polars_dtype,
     numpy_char_code_to_dtype,
@@ -137,7 +138,9 @@ def include_unknowns(
 ) -> MutableMapping[str, PolarsDataType]:
     """Complete partial schema dict by including Unknown type."""
     return {
-        col: (schema.get(col, Unknown) or Unknown)  # type: ignore[truthy-bool]
+        col: (
+            schema.get(col, Unknown) or Unknown  # type: ignore[truthy-bool]
+        )
         for col in cols
     }
 
@@ -161,9 +164,17 @@ def nt_unpack(obj: Any) -> Any:
 ################################
 
 
-def series_to_pyseries(name: str, values: Series) -> PySeries:
+def series_to_pyseries(
+    name: str,
+    values: Series,
+    *,
+    dtype: PolarsDataType | None = None,
+    strict: bool = True,
+) -> PySeries:
     """Construct a new PySeries from a Polars Series."""
     py_s = values._s.clone()
+    if dtype is not None and dtype != py_s.dtype():
+        py_s = py_s.cast(dtype, strict=strict)
     py_s.rename(name)
     return py_s
 
@@ -225,15 +236,22 @@ def numpy_to_pyseries(
         return constructor(
             name, values, nan_to_null if dtype in (np.float32, np.float64) else strict
         )
-    elif len(values.shape) == 2:
-        pyseries_container = []
-        for row in range(values.shape[0]):
-            pyseries_container.append(
-                numpy_to_pyseries(
-                    "", values[row, :], strict=strict, nan_to_null=nan_to_null
-                )
-            )
-        return PySeries.new_series_list(name, pyseries_container, _strict=False)
+    elif len(shape := values.shape) == 2:
+        # optimise by ingesting 1D and reshaping in Rust
+        values = values.reshape(-1)
+        py_s = numpy_to_pyseries(
+            name,
+            values,
+            strict=strict,
+            nan_to_null=nan_to_null,
+        )
+        return (
+            PyDataFrame([py_s])
+            .lazy()
+            .select([F.col(name).reshape(shape)._pyexpr])
+            .collect()
+            .select_at_idx(0)
+        )
     else:
         return PySeries.new_object(name, values, strict)
 
@@ -243,7 +261,6 @@ def _get_first_non_none(values: Sequence[Any | None]) -> Any:
     Return the first value from a sequence that isn't None.
 
     If sequence doesn't contain non-None values, return None.
-
     """
     if values is not None:
         return next((v for v in values if v is not None), None)
@@ -254,7 +271,6 @@ def sequence_from_anyvalue_or_object(name: str, values: Sequence[Any]) -> PySeri
     Last resort conversion.
 
     AnyValues are most flexible and if they fail we go for object types
-
     """
     try:
         return PySeries.new_from_anyvalues(name, values, strict=True)
@@ -274,7 +290,6 @@ def sequence_from_anyvalue_and_dtype_or_object(
     Last resort conversion.
 
     AnyValues are most flexible and if they fail we go for object types
-
     """
     try:
         return PySeries.new_from_anyvalues_and_dtype(name, values, dtype, strict=True)
@@ -292,7 +307,7 @@ def iterable_to_pyseries(
     values: Iterable[Any],
     dtype: PolarsDataType | None = None,
     *,
-    dtype_if_empty: PolarsDataType | None = None,
+    dtype_if_empty: PolarsDataType = Null,
     chunk_size: int = 1_000_000,
     strict: bool = True,
 ) -> PySeries:
@@ -380,7 +395,7 @@ def sequence_to_pyseries(
     values: Sequence[Any],
     dtype: PolarsDataType | None = None,
     *,
-    dtype_if_empty: PolarsDataType | None = None,
+    dtype_if_empty: PolarsDataType = Null,
     strict: bool = True,
     nan_to_null: bool = False,
 ) -> PySeries:
@@ -390,8 +405,8 @@ def sequence_to_pyseries(
     # empty sequence
     if not values and dtype is None:
         # if dtype for empty sequence could be guessed
-        # (e.g comparisons between self and other), default to Float32
-        dtype = dtype_if_empty or Float32
+        # (e.g comparisons between self and other), default to Null
+        dtype = dtype_if_empty
 
     # lists defer to subsequent handling; identify nested type
     elif dtype == List:
@@ -437,7 +452,7 @@ def sequence_to_pyseries(
         pyseries = _construct_series_with_fallbacks(
             constructor, name, values, dtype, strict=strict
         )
-        if dtype in (Date, Datetime, Duration, Time, Categorical, Boolean):
+        if dtype in (Date, Datetime, Duration, Time, Categorical, Boolean, Enum):
             if pyseries.dtype() != dtype:
                 pyseries = pyseries.cast(dtype, strict=True)
         return pyseries
@@ -453,11 +468,9 @@ def sequence_to_pyseries(
     else:
         if python_dtype is None:
             if value is None:
-                # Create a series with a dtype_if_empty dtype (if set) or Float32
+                # Create a series with a dtype_if_empty dtype (if set) or Null
                 # (if not set) for a sequence which contains only None values.
-                constructor = polars_type_to_constructor(
-                    dtype_if_empty if dtype_if_empty else Float32
-                )
+                constructor = polars_type_to_constructor(dtype_if_empty)
                 return _construct_series_with_fallbacks(
                     constructor, name, values, dtype, strict=strict
                 )
@@ -528,14 +541,24 @@ def sequence_to_pyseries(
             and isinstance(value, np.ndarray)
             and len(value.shape) == 1
         ):
-            return PySeries.new_series_list(
-                name,
-                [
-                    numpy_to_pyseries("", v, strict=strict, nan_to_null=nan_to_null)
-                    for v in values
-                ],
-                strict,
-            )
+            n_elems = len(value)
+            if all(len(v) == n_elems for v in values):
+                # can take (much) faster path if all lists are the same length
+                return numpy_to_pyseries(
+                    name,
+                    np.vstack(values),
+                    strict=strict,
+                    nan_to_null=nan_to_null,
+                )
+            else:
+                return PySeries.new_series_list(
+                    name,
+                    [
+                        numpy_to_pyseries("", v, strict=strict, nan_to_null=nan_to_null)
+                        for v in values
+                    ],
+                    strict,
+                )
 
         elif python_dtype in (list, tuple):
             if isinstance(dtype, Object):
@@ -596,7 +619,6 @@ def _pandas_series_to_arrow(
     Returns
     -------
     :class:`pyarrow.Array`
-
     """
     dtype = getattr(values, "dtype", None)
     if dtype == "object":
@@ -686,6 +708,8 @@ def _post_apply_columns(
         pydf_dtype = pydf_dtypes[i]
         if dtype == Categorical != pydf_dtype:
             column_casts.append(F.col(col).cast(Categorical)._pyexpr)
+        elif dtype == Enum != pydf_dtype:
+            column_casts.append(F.col(col).cast(dtype)._pyexpr)
         elif structs and (struct := structs.get(col)) and struct != pydf_dtype:
             column_casts.append(F.col(col).cast(struct)._pyexpr)
         elif dtype is not None and dtype != Unknown and dtype != pydf_dtype:
@@ -796,6 +820,14 @@ def _expand_dict_scalars(
     """Expand any scalar values in dict data (propagate literal as array)."""
     updated_data = {}
     if data:
+        if any(isinstance(val, pl.Expr) for val in data.values()):
+            raise TypeError(
+                "passing Expr objects to the DataFrame constructor is not supported"
+                "\n\nHint: Try evaluating the expression first using `select`,"
+                " or if you meant to create an Object column containing expressions,"
+                " pass a list of Expr objects instead."
+            )
+
         dtypes = schema_overrides or {}
         data = _expand_dict_data(data, dtypes)
         array_len = max((arrlen(val) or 0) for val in data.values())
@@ -1062,8 +1094,8 @@ def _sequence_of_sequence_to_pydf(
 
         unpack_nested = False
         for col, tp in local_schema_override.items():
-            if tp == Categorical:
-                local_schema_override[col] = Utf8
+            if tp in (Categorical, Enum):
+                local_schema_override[col] = String
             elif not unpack_nested and (tp.base_type() in (Unknown, Struct)):
                 unpack_nested = contains_nested(
                     getattr(first_element, col, None).__class__, is_namedtuple
@@ -1254,8 +1286,8 @@ def _establish_dataclass_or_model_schema(
             schema_overrides = overrides
 
     for col, tp in overrides.items():
-        if tp == Categorical:
-            overrides[col] = Utf8
+        if tp in (Categorical, Enum):
+            overrides[col] = String
         elif not unpack_nested and (tp.base_type() in (Unknown, Struct)):
             unpack_nested = contains_nested(
                 getattr(first_element, col, None),
@@ -1312,7 +1344,7 @@ def _pydantic_models_to_pydf(
     """Initialise DataFrame from pydantic model objects."""
     import pydantic  # note: must already be available in the env here
 
-    old_pydantic = parse_version(pydantic.__version__) < parse_version("2.0")
+    old_pydantic = parse_version(pydantic.__version__) < (2, 0)
     model_fields = list(
         first_element.__fields__ if old_pydantic else first_element.model_fields
     )
@@ -1361,6 +1393,7 @@ def numpy_to_pydf(
 ) -> PyDataFrame:
     """Construct a PyDataFrame from a numpy ndarray (including structured ndarrays)."""
     shape = data.shape
+    two_d = len(shape) == 2
 
     if data.dtype.names is not None:
         structured_array, orient = True, "col"
@@ -1391,11 +1424,14 @@ def numpy_to_pydf(
 
             elif orient is None and schema is not None:
                 # infer orientation from 'schema' param; if square array
-                # we maintain the default convention where first axis = rows
+                # we check the flags to establish row/column major order
                 n_schema_cols = len(schema)
                 if n_schema_cols == shape[0] and n_schema_cols != shape[1]:
                     orient = "col"
                     n_columns = shape[0]
+                elif data.flags["F_CONTIGUOUS"] and shape[0] == shape[1]:
+                    orient = "col"
+                    n_columns = n_schema_cols
                 else:
                     orient = "row"
                     n_columns = shape[1]
@@ -1414,7 +1450,11 @@ def numpy_to_pydf(
             )
 
     if schema is not None and len(schema) != n_columns:
-        raise ValueError("dimensions of `schema` arg must match data dimensions")
+        if (n_schema_cols := len(schema)) != 1:
+            raise ValueError(
+                f"dimensions of `schema` ({n_schema_cols}) must match data dimensions ({n_columns})"
+            )
+        n_columns = n_schema_cols
 
     column_names, schema_overrides = _unpack_schema(
         schema, schema_overrides=schema_overrides, n_expected=n_columns
@@ -1448,7 +1488,11 @@ def numpy_to_pydf(
             data_series = [
                 pl.Series(
                     name=column_names[i],
-                    values=data[:, i],
+                    values=(
+                        data
+                        if two_d and n_columns == 1 and shape[1] > 1
+                        else data[:, i]
+                    ),
                     dtype=schema_overrides.get(column_names[i]),
                     nan_to_null=nan_to_null,
                 )._s
@@ -1458,7 +1502,9 @@ def numpy_to_pydf(
             data_series = [
                 pl.Series(
                     name=column_names[i],
-                    values=data[i],
+                    values=(
+                        data if two_d and n_columns == 1 and shape[1] > 1 else data[i]
+                    ),
                     dtype=schema_overrides.get(column_names[i]),
                     nan_to_null=nan_to_null,
                 )._s
@@ -1561,6 +1607,9 @@ def series_to_pydf(
     schema_overrides: SchemaDict | None = None,
 ) -> PyDataFrame:
     """Construct a PyDataFrame from a Polars Series."""
+    if schema is None and schema_overrides is None:
+        return PyDataFrame([data._s])
+
     data_series = [data._s]
     series_name = [s.name() for s in data_series]
     column_names, schema_overrides = _unpack_schema(
@@ -1573,6 +1622,29 @@ def series_to_pydf(
 
     data_series = _handle_columns_arg(data_series, columns=column_names)
     return PyDataFrame(data_series)
+
+
+def frame_to_pydf(
+    data: DataFrame,
+    schema: SchemaDefinition | None = None,
+    schema_overrides: SchemaDict | None = None,
+) -> PyDataFrame:
+    """Construct a PyDataFrame from an existing Polars DataFrame."""
+    if schema is None and schema_overrides is None:
+        return data._df.clone()
+
+    data_series = {c.name: c._s for c in data}
+    column_names, schema_overrides = _unpack_schema(
+        schema or data.columns, schema_overrides=schema_overrides
+    )
+    if schema_overrides:
+        existing_schema = data.schema
+        for name, new_dtype in schema_overrides.items():
+            if new_dtype != existing_schema[name]:
+                data_series[name] = data_series[name].cast(new_dtype, strict=True)
+
+    series_cols = _handle_columns_arg(list(data_series.values()), columns=column_names)
+    return PyDataFrame(series_cols)
 
 
 def iterable_to_pydf(

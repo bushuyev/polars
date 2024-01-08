@@ -1,6 +1,6 @@
 [package]
 name = "py-polars"
-version = "0.19.13"
+version = "0.20.3"
 edition = "2021"
 
 [lib]
@@ -8,11 +8,10 @@ name = "polars"
 crate-type = ["cdylib"]
 
 [dependencies]
-polars-algo = { workspace = true }
 polars-core = { workspace = true, features = ["python"] }
 polars-error = { workspace = true }
 polars-lazy = { workspace = true, features = ["python"] }
-polars-ops = { workspace = true, features = ["convert_index"] }
+polars-ops = { workspace = true }
 polars-parquet = { workspace = true, optional = true }
 polars-plan = { workspace = true }
 polars-utils = { workspace = true }
@@ -51,7 +50,6 @@ features = [
   "dynamic_group_by",
   "ewma",
   "fmt",
-  "horizontal_concat",
   "interpolate",
   "is_first_distinct",
   "is_last_distinct",
@@ -69,6 +67,7 @@ features = [
   "range",
   "rank",
   "reinterpret",
+  "replace",
   "rolling_window",
   "round_series",
   "row_hash",
@@ -76,6 +75,7 @@ features = [
   "semi_anti_join",
   "serde-lazy",
   "string_encoding",
+  "string_reverse",
   "string_to_integer",
   "string_pad",
   "strings",
@@ -88,12 +88,12 @@ features = [
 ]
 
 [build-dependencies]
-built = { version = "0.6", features = ["chrono", "git2"], optional = true }
+built = { version = "0.7", features = ["chrono", "git2", "cargo-lock"], optional = true }
 
-[target.'cfg(any(not(target_os = "linux"), use_mimalloc))'.dependencies]
+[target.'cfg(any(not(target_family = "unix"), use_mimalloc))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
-[target.'cfg(all(target_os = "linux", not(use_mimalloc)))'.dependencies]
+[target.'cfg(all(target_family = "unix", not(use_mimalloc)))'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
 
 # features are only there to enable building a slim binary for the benchmark in CI
@@ -139,6 +139,7 @@ list_count = ["polars/list_count"]
 binary_encoding = ["polars/binary_encoding"]
 list_sets = ["polars-lazy/list_sets"]
 list_any_all = ["polars/list_any_all"]
+array_any_all = ["polars/array_any_all", "polars/dtype-array"]
 list_drop_nulls = ["polars/list_drop_nulls"]
 list_sample = ["polars/list_sample"]
 cutqcut = ["polars/cutqcut"]
@@ -147,6 +148,8 @@ extract_groups = ["polars/extract_groups"]
 ffi_plugin = ["polars-plan/ffi_plugin"]
 cloud = ["polars/cloud", "polars/aws", "polars/gcp", "polars/azure", "polars/http"]
 peaks = ["polars/peaks"]
+hist = ["polars/hist"]
+find_many = ["polars/find_many"]
 
 dtypes = [
   "dtype-i8",
@@ -158,6 +161,7 @@ dtypes = [
 ]
 
 operations = [
+  "array_any_all",
   "is_in",
   "repeat_by",
   "trigonometry",
@@ -183,6 +187,8 @@ operations = [
   "propagate_nans",
   "timezones",
   "peaks",
+  "hist",
+  "find_many",
 ]
 
 io = [

@@ -72,19 +72,6 @@ fn test_agg_unique_first() -> PolarsResult<()> {
 }
 
 #[test]
-#[cfg(feature = "csv")]
-fn test_lazy_agg_scan() {
-    let lf = scan_foods_csv;
-    let df = lf().min().collect().unwrap();
-    assert!(df.frame_equal_missing(&lf().collect().unwrap().min()));
-    let df = lf().max().collect().unwrap();
-    assert!(df.frame_equal_missing(&lf().collect().unwrap().max()));
-    // mean is not yet aggregated at scan.
-    let df = lf().mean().collect().unwrap();
-    assert!(df.frame_equal_missing(&lf().collect().unwrap().mean()));
-}
-
-#[test]
 fn test_cum_sum_agg_as_key() -> PolarsResult<()> {
     let df = df![
         "depth" => &[0i32, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -264,7 +251,7 @@ fn test_binary_agg_context_0() -> PolarsResult<()> {
 
     let out = out.column("foo")?;
     let out = out.explode()?;
-    let out = out.utf8()?;
+    let out = out.str()?;
     assert_eq!(
         Vec::from(out),
         &[
@@ -446,9 +433,9 @@ fn take_aggregations() -> PolarsResult<()> {
         .collect()?;
 
     let s = out.column("fav_book")?;
-    assert_eq!(s.get(0)?, AnyValue::Utf8("a"));
-    assert_eq!(s.get(1)?, AnyValue::Utf8("c"));
-    assert_eq!(s.get(2)?, AnyValue::Utf8("a"));
+    assert_eq!(s.get(0)?, AnyValue::String("a"));
+    assert_eq!(s.get(1)?, AnyValue::String("c"));
+    assert_eq!(s.get(2)?, AnyValue::String("a"));
 
     let out = df
         .clone()
@@ -473,7 +460,7 @@ fn take_aggregations() -> PolarsResult<()> {
         .collect()?;
     let s = out.column("ordered")?;
     let flat = s.explode()?;
-    let flat = flat.utf8()?;
+    let flat = flat.str()?;
     let vals = flat.into_no_null_iter().collect::<Vec<_>>();
     assert_eq!(vals, ["a", "b", "c", "a", "a"]);
 
@@ -485,7 +472,7 @@ fn take_aggregations() -> PolarsResult<()> {
         .collect()?;
 
     let taken = out.column("take_lit")?;
-    let taken = taken.utf8()?;
+    let taken = taken.str()?;
     let vals = taken.into_no_null_iter().collect::<Vec<_>>();
     assert_eq!(vals, ["b", "c", "a"]);
 

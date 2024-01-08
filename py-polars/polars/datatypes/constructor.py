@@ -38,9 +38,10 @@ if not _DOCUMENTING:
         dt.Duration: PySeries.new_opt_i64,
         dt.Time: PySeries.new_opt_i64,
         dt.Boolean: PySeries.new_opt_bool,
-        dt.Utf8: PySeries.new_str,
+        dt.String: PySeries.new_str,
         dt.Object: PySeries.new_object,
         dt.Categorical: PySeries.new_str,
+        dt.Enum: PySeries.new_str,
         dt.Binary: PySeries.new_binary,
         dt.Null: PySeries.new_null,
     }
@@ -86,34 +87,39 @@ def _set_numpy_to_constructor() -> None:
     }
 
 
-def numpy_values_and_dtype(
-    values: np.ndarray[Any, Any]
-) -> tuple[np.ndarray[Any, Any], type]:
-    """Return numpy values and their associated dtype, adjusting if required."""
-    # Create new dtype object from dtype base name so architecture specific
-    # dtypes (np.longlong np.ulonglong np.intc np.uintc np.longdouble, ...)
-    # get converted to their normalized dtype (np.int*, np.uint*, np.float*).
-    dtype = (
-        np.dtype(values.dtype.base.name).type
-        if values.dtype.kind in ("i", "u", "f")
-        else values.dtype.type
-    )
-
-    if dtype == np.float16:
-        values = values.astype(np.float32)
-        dtype = values.dtype.type
-    elif dtype in [np.datetime64, np.timedelta64]:
-        time_unit = np.datetime_data(values.dtype)[0]
+@functools.lru_cache(maxsize=32)
+def _normalise_numpy_dtype(dtype: Any) -> tuple[Any, Any]:
+    normalised_dtype = (
+        np.dtype(dtype.base.name) if dtype.kind in ("i", "u", "f") else dtype
+    ).type
+    cast_as: Any = None
+    if normalised_dtype == np.float16:
+        normalised_dtype = cast_as = np.float32
+    elif normalised_dtype in (np.datetime64, np.timedelta64):
+        time_unit = np.datetime_data(dtype)[0]
         if time_unit in dt.DTYPE_TEMPORAL_UNITS or (
-            time_unit == "D" and dtype == np.datetime64
+            time_unit == "D" and normalised_dtype == np.datetime64
         ):
-            values = values.astype(np.int64)
+            cast_as = np.int64
         else:
             raise ValueError(
                 "incorrect NumPy datetime resolution"
                 "\n\n'D' (datetime only), 'ms', 'us', and 'ns' resolutions are supported when converting from numpy.{datetime64,timedelta64}."
                 " Please cast to the closest supported unit before converting."
             )
+    return normalised_dtype, cast_as
+
+
+def numpy_values_and_dtype(
+    values: np.ndarray[Any, Any],
+) -> tuple[np.ndarray[Any, Any], type]:
+    """Return numpy values and their associated dtype, adjusting if required."""
+    # Create new dtype object from dtype base name so architecture specific
+    # dtypes (np.longlong np.ulonglong np.intc np.uintc np.longdouble, ...)
+    # get converted to their normalized dtype (np.int*, np.uint*, np.float*).
+    dtype, cast_as = _normalise_numpy_dtype(values.dtype)
+    if cast_as:
+        values = values.astype(cast_as)
     return values, dtype
 
 

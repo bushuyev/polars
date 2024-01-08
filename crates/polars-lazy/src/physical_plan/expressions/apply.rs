@@ -423,7 +423,8 @@ fn apply_multiple_elementwise<'a>(
             ac.with_series(out.into_series(), true, None)?;
             Ok(ac)
         },
-        _ => {
+        first_as => {
+            let check_lengths = check_lengths && !matches!(first_as, AggState::Literal(_));
             let mut s = acs
                 .iter_mut()
                 .enumerate()
@@ -507,6 +508,12 @@ impl ApplyExpr {
                     let st = stats.get_stats(&root).ok()?;
                     let min = st.to_min()?;
                     let max = st.to_max()?;
+
+                    if max.get(0).unwrap() == min.get(0).unwrap() {
+                        let one_equals =
+                            |value: &Series| Some(ChunkCompare::equal(input, value).ok()?.any());
+                        return one_equals(min);
+                    }
 
                     let all_smaller = || Some(ChunkCompare::lt(input, min).ok()?.all());
                     let all_bigger = || Some(ChunkCompare::gt(input, max).ok()?.all());

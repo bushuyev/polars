@@ -10,7 +10,7 @@ use super::{array_to_pages, Encoding, WriteOptions};
 use crate::arrow::read::schema::is_nullable;
 use crate::parquet::page::Page;
 use crate::parquet::schema::types::{ParquetType, PrimitiveType as ParquetPrimitiveType};
-use crate::parquet::write::DynIter;
+use crate::write::DynIter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListNested<O: Offset> {
@@ -33,13 +33,18 @@ impl<O: Offset> ListNested<O> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Nested {
     /// a primitive (leaf or parquet column)
-    /// bitmap, _, length
+    /// - validity
+    /// - is_optional
+    /// - length
     Primitive(Option<Bitmap>, bool, usize),
     /// a list
     List(ListNested<i32>),
     /// a list
     LargeList(ListNested<i64>),
     /// a struct
+    /// - validity
+    /// - is_optional
+    /// - length
     Struct(Option<Bitmap>, bool, usize),
 }
 

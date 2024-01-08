@@ -94,14 +94,12 @@ class Config(contextlib.ContextDecorator):
     >>> with pl.Config() as cfg:
     ...     # set verbose for more detailed output within the scope
     ...     cfg.set_verbose(True)  # doctest: +IGNORE_RESULT
-    ...
     >>> # scope exit - no longer in verbose mode
 
     This can also be written more compactly as:
 
     >>> with pl.Config(verbose=True):
     ...     pass
-    ...
 
     (The compact format is available for all `Config` methods that take a single value).
 
@@ -111,8 +109,6 @@ class Config(contextlib.ContextDecorator):
     >>> @pl.Config(verbose=True)
     ... def test():
     ...     pass
-    ...
-
     """
 
     _original_state: str = ""
@@ -150,7 +146,6 @@ class Config(contextlib.ContextDecorator):
         | 1.0 | true  |
         | 2.5 | false |
         | 5.0 | true  |
-
         """
         # save original state _before_ any changes are made
         self._original_state = self.save()
@@ -194,7 +189,6 @@ class Config(contextlib.ContextDecorator):
         --------
         load_from_file : Load (and set) Config options from a JSON file.
         save: Save the current set of Config options as a JSON string or file.
-
         """
         try:
             options = json.loads(cfg)
@@ -223,7 +217,6 @@ class Config(contextlib.ContextDecorator):
         --------
         load : Load (and set) Config options from a JSON string.
         save: Save the current set of Config options as a JSON string or file.
-
         """
         try:
             options = Path(normalize_filepath(file)).read_text()
@@ -247,7 +240,6 @@ class Config(contextlib.ContextDecorator):
         Examples
         --------
         >>> cfg = pl.Config.restore_defaults()  # doctest: +SKIP
-
         """
         # unset all Config environment variables
         for var in _POLARS_CFG_ENV_VARS:
@@ -278,7 +270,6 @@ class Config(contextlib.ContextDecorator):
         -------
         str
             JSON string containing current Config options.
-
         """
         environment_vars = {
             key: os.environ[key]
@@ -315,7 +306,6 @@ class Config(contextlib.ContextDecorator):
         Examples
         --------
         >>> json_file = pl.Config().save("~/polars/config.json")  # doctest: +SKIP
-
         """
         file = Path(normalize_filepath(file)).resolve()
         file.write_text(cls.save())
@@ -345,7 +335,6 @@ class Config(contextlib.ContextDecorator):
         --------
         >>> set_state = pl.Config.state(if_set=True)
         >>> all_state = pl.Config.state()
-
         """
         config_state = {
             var: os.environ.get(var)
@@ -365,7 +354,6 @@ class Config(contextlib.ContextDecorator):
 
         This is a temporary setting that will be removed once the `Decimal` type
         stabilizes (`Decimal` is currently considered to be in beta testing).
-
         """
         if not active:
             os.environ.pop("POLARS_ACTIVATE_DECIMAL", None)
@@ -395,7 +383,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      | 2.5 | false |
         # │ 5.0 ┆ true  │      | 5.0 | true  |
         # └─────┴───────┘      +-----+-------+
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_FORMATTING", None)
@@ -414,7 +401,6 @@ class Config(contextlib.ContextDecorator):
         >>> df = pl.DataFrame({"v": [1, 2, 3], "v2": [4, 5, 6]})
         >>> with pl.Config(set_auto_structify=True):
         ...     out = df.select(pl.all())
-        ...
         >>> out
         shape: (3, 1)
         ┌───────────┐
@@ -426,7 +412,6 @@ class Config(contextlib.ContextDecorator):
         │ {2,5}     │
         │ {3,6}     │
         └───────────┘
-
         """
         if active is None:
             os.environ.pop("POLARS_AUTO_STRUCTIFY", None)
@@ -469,7 +454,6 @@ class Config(contextlib.ContextDecorator):
         │ 1.010.101,000 │
         │  -123.456,780 │
         └───────────────┘
-
         """
         if isinstance(separator, str) and len(separator) != 1:
             raise ValueError(
@@ -536,7 +520,6 @@ class Config(contextlib.ContextDecorator):
         │  -987.654 ┆    100.000,00 │
         │    10.101 ┆ -7.654.321,25 │
         └───────────┴───────────────┘
-
         """
         if separator is True:
             plr.set_decimal_separator(sep=".")
@@ -577,7 +560,6 @@ class Config(contextlib.ContextDecorator):
         >>> df = pl.DataFrame({"const": ["pi", "e"], "value": [pi, e]})
         >>> with pl.Config(float_precision=15):
         ...     print(df)
-        ...
         shape: (2, 2)
         ┌───────┬───────────────────┐
         │ const ┆ value             │
@@ -613,7 +595,6 @@ class Config(contextlib.ContextDecorator):
         │ xx  ┆    -11,111,111 ┆     100,000.988 │
         │ yy  ┆ 44,444,444,444 ┆ -23,456,789.000 │
         └─────┴────────────────┴─────────────────┘
-
         """
         plr.set_float_precision(precision)
         return cls
@@ -639,7 +620,6 @@ class Config(contextlib.ContextDecorator):
         >>> s = pl.Series([1.2304980958725870923, 1e6, 1e-8])
         >>> with pl.Config(set_fmt_float="mixed"):
         ...     print(s)
-        ...
         shape: (3,)
         Series: '' [f64]
         [
@@ -652,7 +632,6 @@ class Config(contextlib.ContextDecorator):
 
         >>> with pl.Config(set_fmt_float="full"):
         ...     print(s)
-        ...
         shape: (3,)
         Series: '' [f64]
         [
@@ -660,7 +639,6 @@ class Config(contextlib.ContextDecorator):
             1000000
             0.00000001
         ]
-
         """
         plr.set_float_fmt(fmt="mixed" if fmt is None else fmt)
         return cls
@@ -697,7 +675,6 @@ class Config(contextlib.ContextDecorator):
         └───────────────────────────────────┴─────┘
         >>> with pl.Config(fmt_str_lengths=50):
         ...     print(df)
-        ...
         shape: (2, 1)
         ┌──────────────────────────────────────────────────┐
         │ txt                                              │
@@ -707,7 +684,6 @@ class Config(contextlib.ContextDecorator):
         │ Play it, Sam. Play 'As Time Goes By'.            │
         │ This is the beginning of a beautiful friendship. │
         └──────────────────────────────────────────────────┘
-
         """
         if n is None:
             os.environ.pop("POLARS_FMT_STR_LEN", None)
@@ -752,7 +728,6 @@ class Config(contextlib.ContextDecorator):
         └─────────────┘
         >>> with pl.Config(fmt_table_cell_list_len=10):
         ...     print(df)
-        ...
         shape: (1, 1)
         ┌────────────────────┐
         │ nums               │
@@ -783,7 +758,6 @@ class Config(contextlib.ContextDecorator):
         size
             Number of rows per chunk. Every thread will process chunks
             of this size.
-
         """
         if size is None:
             os.environ.pop("POLARS_STREAMING_CHUNK_SIZE", None)
@@ -829,7 +803,6 @@ class Config(contextlib.ContextDecorator):
         Raises
         ------
         ValueError: if alignment string not recognised.
-
         """
         if format is None:
             os.environ.pop("POLARS_FMT_TABLE_CELL_ALIGNMENT", None)
@@ -879,7 +852,6 @@ class Config(contextlib.ContextDecorator):
         Raises
         ------
         KeyError: if alignment string not recognised.
-
         """
         if format is None:
             os.environ.pop("POLARS_FMT_TABLE_CELL_NUMERIC_ALIGNMENT", None)
@@ -907,7 +879,6 @@ class Config(contextlib.ContextDecorator):
         ...     cfg.set_tbl_cols(5)
         ...     df = pl.DataFrame({str(i): [i] for i in range(100)})
         ...     print(df)
-        ...
         <class 'polars.config.Config'>
         shape: (1, 100)
         ┌─────┬─────┬─────┬───┬─────┬─────┐
@@ -920,7 +891,6 @@ class Config(contextlib.ContextDecorator):
 
         >>> with pl.Config(tbl_cols=10):
         ...     print(df)
-        ...
         shape: (1, 100)
         ┌─────┬─────┬─────┬─────┬─────┬───┬─────┬─────┬─────┬─────┬─────┐
         │ 0   ┆ 1   ┆ 2   ┆ 3   ┆ 4   ┆ … ┆ 95  ┆ 96  ┆ 97  ┆ 98  ┆ 99  │
@@ -929,7 +899,6 @@ class Config(contextlib.ContextDecorator):
         ╞═════╪═════╪═════╪═════╪═════╪═══╪═════╪═════╪═════╪═════╪═════╡
         │ 0   ┆ 1   ┆ 2   ┆ 3   ┆ 4   ┆ … ┆ 95  ┆ 96  ┆ 97  ┆ 98  ┆ 99  │
         └─────┴─────┴─────┴─────┴─────┴───┴─────┴─────┴─────┴─────┴─────┘
-
         """
         if n is None:
             os.environ.pop("POLARS_FMT_MAX_COLS", None)
@@ -959,7 +928,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      └───────────┴────────────┘
         # │ 5.0 ┆ true  │
         # └─────┴───────┘
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_INLINE_COLUMN_DATA_TYPE", None)
@@ -987,7 +955,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      │ 5.0 ┆ true  │
         # │ 5.0 ┆ true  │      └─────┴───────┘
         # └─────┴───────┘      shape: (3, 2)
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_DATAFRAME_SHAPE_BELOW", None)
@@ -1049,7 +1016,6 @@ class Config(contextlib.ContextDecorator):
         Raises
         ------
         ValueError: if format string not recognised.
-
         """
         # note: can see what the different styles look like in the comfy-table tests
         # https://github.com/Nukesor/comfy-table/blob/main/tests/all/presets_test.rs
@@ -1090,7 +1056,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      └─────┴───────┘
         # │ 5.0 ┆ true  │
         # └─────┴───────┘
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_HIDE_COLUMN_DATA_TYPES", None)
@@ -1118,7 +1083,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      └─────┴───────┘
         # │ 5.0 ┆ true  │
         # └─────┴───────┘
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_HIDE_COLUMN_NAMES", None)
@@ -1150,7 +1114,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      │ 5.0 ┆ true  │
         # │ 5.0 ┆ true  │      └─────┴───────┘
         # └─────┴───────┘
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_HIDE_COLUMN_SEPARATOR", None)
@@ -1178,7 +1141,6 @@ class Config(contextlib.ContextDecorator):
         # │ 2.5 ┆ false │      │ 5.0 ┆ true  │
         # │ 5.0 ┆ true  │      └─────┴───────┘
         # └─────┴───────┘
-
         """
         if active is None:
             os.environ.pop("POLARS_FMT_TABLE_HIDE_DATAFRAME_SHAPE_INFORMATION", None)
@@ -1206,7 +1168,6 @@ class Config(contextlib.ContextDecorator):
         ... )
         >>> with pl.Config(tbl_rows=2):
         ...     print(df)
-        ...
         shape: (4, 2)
         ┌─────┬───────┐
         │ abc ┆ xyz   │
@@ -1217,7 +1178,6 @@ class Config(contextlib.ContextDecorator):
         │ …   ┆ …     │
         │ 5.0 ┆ false │
         └─────┴───────┘
-
         """
         if n is None:
             os.environ.pop("POLARS_FMT_MAX_ROWS", None)
@@ -1234,7 +1194,6 @@ class Config(contextlib.ContextDecorator):
         ----------
         width : int
             Maximum table width in characters.
-
         """
         if width is None:
             os.environ.pop("POLARS_TABLE_WIDTH", None)
@@ -1261,7 +1220,6 @@ class Config(contextlib.ContextDecorator):
         ... )
         >>> with pl.Config(trim_decimal_zeros=False):
         ...     print(df)
-        ...
         shape: (2, 1)
         ┌──────────────┐
         │ d            │
@@ -1273,7 +1231,6 @@ class Config(contextlib.ContextDecorator):
         └──────────────┘
         >>> with pl.Config(trim_decimal_zeros=True):
         ...     print(df)
-        ...
         shape: (2, 1)
         ┌──────────────┐
         │ d            │
@@ -1283,7 +1240,6 @@ class Config(contextlib.ContextDecorator):
         │ 1.01         │
         │ -5.6789      │
         └──────────────┘
-
         """
         plr.set_trim_decimal_zeros(active)
         return cls
@@ -1298,7 +1254,6 @@ class Config(contextlib.ContextDecorator):
         >>> pl.Config.set_verbose(True)  # doctest: +SKIP
         >>> with pl.Config(verbose=True):  # doctest: +SKIP
         ...     do_polars_operations()
-        ...
         """
         if active is None:
             os.environ.pop("POLARS_VERBOSE", None)

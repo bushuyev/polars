@@ -45,7 +45,7 @@ impl Series {
         };
 
         let mut ca = ListChunked::with_chunk(self.name(), arr);
-        ca.to_logical(inner_type.clone());
+        unsafe { ca.to_logical(inner_type.clone()) };
         ca.set_fast_explode();
         Ok(ca)
     }
@@ -137,7 +137,7 @@ mod test {
         let expected = builder.finish();
 
         let out = s.implode()?;
-        assert!(expected.into_series().series_equal(&out.into_series()));
+        assert!(expected.into_series().equals(&out.into_series()));
 
         Ok(())
     }

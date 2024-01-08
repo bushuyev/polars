@@ -78,7 +78,7 @@ class _XLFormatCache:
 
 def _adjacent_cols(df: DataFrame, cols: Iterable[str], min_max: dict[str, Any]) -> bool:
     """Indicate if the given columns are all adjacent to one another."""
-    idxs = sorted(df.find_idx_by_name(col) for col in cols)
+    idxs = sorted(df.get_column_index(col) for col in cols)
     if idxs != sorted(range(min(idxs), max(idxs) + 1)):
         return False
     else:
@@ -89,7 +89,7 @@ def _adjacent_cols(df: DataFrame, cols: Iterable[str], min_max: dict[str, Any]) 
 
 
 def _unpack_multi_column_dict(
-    d: dict[str | Sequence[str], Any] | Any
+    d: dict[str | Sequence[str], Any] | Any,
 ) -> dict[str, Any] | Any:
     """Unpack multi-col dictionary into equivalent single-col definitions."""
     if not isinstance(d, dict):
@@ -188,7 +188,7 @@ def _xl_column_range(
     """Return the excel sheet range of a named column, accounting for all offsets."""
     col_start = (
         table_start[0] + int(include_header),
-        table_start[1] + df.find_idx_by_name(col) if isinstance(col, str) else col[0],
+        table_start[1] + df.get_column_index(col) if isinstance(col, str) else col[0],
     )
     col_finish = (
         col_start[0] + len(df) - 1,
@@ -495,7 +495,7 @@ def _xl_setup_table_columns(
 
 
 def _xl_setup_table_options(
-    table_style: dict[str, Any] | str | None
+    table_style: dict[str, Any] | str | None,
 ) -> tuple[dict[str, Any] | str | None, dict[str, Any]]:
     """Setup table options, distinguishing style name from other formatting."""
     if isinstance(table_style, dict):

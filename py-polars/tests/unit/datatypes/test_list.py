@@ -18,7 +18,7 @@ def test_dtype() -> None:
     # inferred
     a = pl.Series("a", [[1, 2, 3], [2, 5], [6, 7, 8, 9]])
     assert a.dtype == pl.List
-    assert a.dtype.inner == pl.Int64  # type: ignore[union-attr]
+    assert a.dtype.inner == pl.Int64  # type: ignore[attr-defined]
     assert a.dtype.is_(pl.List(pl.Int64))
 
     # explicit
@@ -42,8 +42,8 @@ def test_dtype() -> None:
         "dt": pl.List(pl.Date),
         "dtm": pl.List(pl.Datetime),
     }
-    assert all(tp in pl.NESTED_DTYPES for tp in df.dtypes)
-    assert df.schema["i"].inner == pl.Int8  # type: ignore[union-attr]
+    assert all(tp.is_nested() for tp in df.dtypes)
+    assert df.schema["i"].inner == pl.Int8  # type: ignore[attr-defined]
     assert df.rows() == [
         (
             [1, 2, 3],
@@ -75,8 +75,8 @@ def test_categorical() -> None:
         .to_series(3)
     )
 
-    assert out.dtype.inner == pl.Categorical  # type: ignore[union-attr]
-    assert out.dtype.inner not in pl.NESTED_DTYPES  # type: ignore[union-attr]
+    assert out.dtype.inner == pl.Categorical  # type: ignore[attr-defined]
+    assert out.dtype.inner.is_nested() is False  # type: ignore[attr-defined]
 
 
 def test_cast_inner() -> None:
@@ -89,15 +89,8 @@ def test_cast_inner() -> None:
     # this creates an inner null type
     df = pl.from_pandas(pd.DataFrame(data=[[[]], [[]]], columns=["A"]))
     assert (
-        df["A"].cast(pl.List(int)).dtype.inner == pl.Int64  # type: ignore[union-attr]
+        df["A"].cast(pl.List(int)).dtype.inner == pl.Int64  # type: ignore[attr-defined]
     )
-
-
-def test_list_unique() -> None:
-    s = pl.Series("a", [[1, 2], [3], [1, 2], [4, 5], [2], [2]])
-    assert s.unique(maintain_order=True).to_list() == [[1, 2], [3], [4, 5], [2]]
-    assert s.arg_unique().to_list() == [0, 1, 3, 4]
-    assert s.n_unique() == 4
 
 
 def test_list_empty_group_by_result_3521() -> None:
@@ -182,7 +175,7 @@ def test_list_diagonal_concat() -> None:
 
 def test_inner_type_categorical_on_rechunk() -> None:
     df = pl.DataFrame({"cats": ["foo", "bar"]}).select(
-        pl.col(pl.Utf8).cast(pl.Categorical).implode()
+        pl.col(pl.String).cast(pl.Categorical).implode()
     )
 
     assert pl.concat([df, df], rechunk=True).dtypes == [pl.List(pl.Categorical)]
@@ -192,7 +185,7 @@ def test_local_categorical_list() -> None:
     values = [["a", "b"], ["c"], ["a", "d", "d"]]
     s = pl.Series(values, dtype=pl.List(pl.Categorical))
     assert s.dtype == pl.List
-    assert s.dtype.inner == pl.Categorical  # type: ignore[union-attr]
+    assert s.dtype.inner == pl.Categorical  # type: ignore[attr-defined]
     assert s.to_list() == values
 
     # Check that underlying physicals match
@@ -267,11 +260,11 @@ def test_fast_explode_on_list_struct_6208() -> None:
     df = pl.DataFrame(
         data,
         schema={
-            "label": pl.Utf8,
-            "tag": pl.Utf8,
+            "label": pl.String,
+            "tag": pl.String,
             "ref": pl.Int64,
             "parents": pl.List(
-                pl.Struct({"ref": pl.Int64, "tag": pl.Utf8, "ratio": pl.Float64})
+                pl.Struct({"ref": pl.Int64, "tag": pl.String, "ratio": pl.Float64})
             ),
         },
     )
@@ -349,6 +342,19 @@ def test_list_sum_and_dtypes() -> None:
         "a": [1, 6, 10, 15, None]
     }
 
+    # Booleans
+    assert pl.DataFrame(
+        {"a": [[True], [True, True], [True, False, True], [True, True, True, None]]},
+    ).select(pl.col("a").list.sum()).to_dict(as_series=False) == {"a": [1, 2, 2, 3]}
+
+    assert pl.DataFrame(
+        {"a": [[False], [False, False], [False, False, False]]},
+    ).select(pl.col("a").list.sum()).to_dict(as_series=False) == {"a": [0, 0, 0]}
+
+    assert pl.DataFrame(
+        {"a": [[True], [True, True], [True, True, True]]},
+    ).select(pl.col("a").list.sum()).to_dict(as_series=False) == {"a": [1, 2, 3]}
+
 
 def test_list_mean() -> None:
     assert pl.DataFrame({"a": [[1], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5]]}).select(
@@ -397,19 +403,18 @@ def test_list_any() -> None:
 
 
 def test_list_min_max() -> None:
-    for dt in pl.NUMERIC_DTYPES:
-        if dt == pl.Decimal:
-            continue
+    for dt in pl.INTEGER_DTYPES | pl.FLOAT_DTYPES:
         df = pl.DataFrame(
             {"a": [[1], [1, 2, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5]]},
             schema={"a": pl.List(dt)},
         )
-        assert df.select(pl.col("a").list.min())["a"].series_equal(
-            df.select(pl.col("a").list.first())["a"]
-        )
-        assert df.select(pl.col("a").list.max())["a"].series_equal(
-            df.select(pl.col("a").list.last())["a"]
-        )
+        result = df.select(pl.col("a").list.min())
+        expected = df.select(pl.col("a").list.first())
+        assert_frame_equal(result, expected)
+
+        result = df.select(pl.col("a").list.max())
+        expected = df.select(pl.col("a").list.last())
+        assert_frame_equal(result, expected)
 
     df = pl.DataFrame(
         {"a": [[1], [1, 5, -1, 3], [1, 2, 3, 4], [1, 2, 3, 4, 5], None]},
@@ -468,11 +473,11 @@ def test_logical_parallel_list_collect() -> None:
         .explode("Values")
         .unnest("Values")
     )
-    assert out.dtypes == [pl.Utf8, pl.Categorical, pl.UInt32]
+    assert out.dtypes == [pl.String, pl.Categorical, pl.UInt32]
     assert out.to_dict(as_series=False) == {
         "Group": ["GroupA", "GroupA"],
         "Values": ["Value1", "Value2"],
-        "counts": [2, 1],
+        "count": [2, 1],
     }
 
 
@@ -490,7 +495,7 @@ def test_list_recursive_categorical_cast() -> None:
     [
         ([None, 1, 2], [None, [1], [2]], pl.Int64),
         ([None, 1.0, 2.0], [None, [1.0], [2.0]], pl.Float64),
-        ([None, "x", "y"], [None, ["x"], ["y"]], pl.Utf8),
+        ([None, "x", "y"], [None, ["x"], ["y"]], pl.String),
         ([None, True, False], [None, [True], [False]], pl.Boolean),
     ],
 )
@@ -592,11 +597,10 @@ def test_list_inner_cast_physical_11513() -> None:
 
 
 @pytest.mark.parametrize(
-    ("dtype", "expected"), [(pl.List, True), (pl.Struct, True), (pl.Utf8, False)]
+    ("dtype", "expected"), [(pl.List, True), (pl.Struct, True), (pl.String, False)]
 )
-def test_list_is_nested_deprecated(dtype: PolarsDataType, expected: bool) -> None:
-    with pytest.deprecated_call():
-        assert dtype.is_nested is expected
+def test_datatype_is_nested(dtype: PolarsDataType, expected: bool) -> None:
+    assert dtype.is_nested() is expected
 
 
 def test_list_series_construction_with_dtype_11849_11878() -> None:
@@ -610,7 +614,7 @@ def test_list_series_construction_with_dtype_11849_11878() -> None:
     s = pl.Series(
         "groups",
         [[{"1": "A", "2": None}], [{"1": "B", "2": "C"}, {"1": "D", "2": "E"}]],
-        dtype=pl.List(pl.Struct([pl.Field("1", pl.Utf8), pl.Field("2", pl.Utf8)])),
+        dtype=pl.List(pl.Struct([pl.Field("1", pl.String), pl.Field("2", pl.String)])),
     )
 
     assert s.to_list() == [

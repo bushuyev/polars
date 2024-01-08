@@ -24,7 +24,7 @@ class ExprArrayNameSpace:
         --------
         >>> df = pl.DataFrame(
         ...     data={"a": [[1, 2], [4, 3]]},
-        ...     schema={"a": pl.Array(inner=pl.Int64, width=2)},
+        ...     schema={"a": pl.Array(pl.Int64, 2)},
         ... )
         >>> df.select(pl.col("a").arr.min())
         shape: (2, 1)
@@ -36,7 +36,6 @@ class ExprArrayNameSpace:
         │ 1   │
         │ 3   │
         └─────┘
-
         """
         return wrap_expr(self._pyexpr.arr_min())
 
@@ -48,7 +47,7 @@ class ExprArrayNameSpace:
         --------
         >>> df = pl.DataFrame(
         ...     data={"a": [[1, 2], [4, 3]]},
-        ...     schema={"a": pl.Array(inner=pl.Int64, width=2)},
+        ...     schema={"a": pl.Array(pl.Int64, 2)},
         ... )
         >>> df.select(pl.col("a").arr.max())
         shape: (2, 1)
@@ -60,7 +59,6 @@ class ExprArrayNameSpace:
         │ 2   │
         │ 4   │
         └─────┘
-
         """
         return wrap_expr(self._pyexpr.arr_max())
 
@@ -72,7 +70,7 @@ class ExprArrayNameSpace:
         --------
         >>> df = pl.DataFrame(
         ...     data={"a": [[1, 2], [4, 3]]},
-        ...     schema={"a": pl.Array(inner=pl.Int64, width=2)},
+        ...     schema={"a": pl.Array(pl.Int64, 2)},
         ... )
         >>> df.select(pl.col("a").arr.sum())
         shape: (2, 1)
@@ -84,7 +82,6 @@ class ExprArrayNameSpace:
         │ 3   │
         │ 7   │
         └─────┘
-
         """
         return wrap_expr(self._pyexpr.arr_sum())
 
@@ -103,7 +100,7 @@ class ExprArrayNameSpace:
         ...     {
         ...         "a": [[1, 1, 2]],
         ...     },
-        ...     schema={"a": pl.Array(inner=pl.Int64, width=3)},
+        ...     schema={"a": pl.Array(pl.Int64, 3)},
         ... )
         >>> df.select(pl.col("a").arr.unique())
         shape: (1, 1)
@@ -114,7 +111,6 @@ class ExprArrayNameSpace:
         ╞═══════════╡
         │ [1, 2]    │
         └───────────┘
-
         """
         return wrap_expr(self._pyexpr.arr_unique(maintain_order))
 
@@ -131,7 +127,7 @@ class ExprArrayNameSpace:
         --------
         >>> df = pl.DataFrame(
         ...     data={"a": [[1, 2], [3, 4]]},
-        ...     schema={"a": pl.Array(inner=pl.Int8, width=2)},
+        ...     schema={"a": pl.Array(pl.Int8, 2)},
         ... )
         >>> df.select(pl.col("a").arr.to_list())
         shape: (2, 1)
@@ -143,6 +139,204 @@ class ExprArrayNameSpace:
         │ [1, 2]   │
         │ [3, 4]   │
         └──────────┘
-
         """
         return wrap_expr(self._pyexpr.arr_to_list())
+
+    def any(self) -> Expr:
+        """
+        Evaluate whether any boolean value is true for every subarray.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     data={
+        ...         "a": [
+        ...             [True, True],
+        ...             [False, True],
+        ...             [False, False],
+        ...             [None, None],
+        ...             None,
+        ...         ]
+        ...     },
+        ...     schema={"a": pl.Array(pl.Boolean, 2)},
+        ... )
+        >>> df.with_columns(any=pl.col("a").arr.any())
+        shape: (5, 2)
+        ┌────────────────┬───────┐
+        │ a              ┆ any   │
+        │ ---            ┆ ---   │
+        │ array[bool, 2] ┆ bool  │
+        ╞════════════════╪═══════╡
+        │ [true, true]   ┆ true  │
+        │ [false, true]  ┆ true  │
+        │ [false, false] ┆ false │
+        │ [null, null]   ┆ false │
+        │ null           ┆ null  │
+        └────────────────┴───────┘
+        """
+        return wrap_expr(self._pyexpr.arr_any())
+
+    def all(self) -> Expr:
+        """
+        Evaluate whether all boolean values are true for every subarray.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     data={
+        ...         "a": [
+        ...             [True, True],
+        ...             [False, True],
+        ...             [False, False],
+        ...             [None, None],
+        ...             None,
+        ...         ]
+        ...     },
+        ...     schema={"a": pl.Array(pl.Boolean, 2)},
+        ... )
+        >>> df.with_columns(all=pl.col("a").arr.all())
+        shape: (5, 2)
+        ┌────────────────┬───────┐
+        │ a              ┆ all   │
+        │ ---            ┆ ---   │
+        │ array[bool, 2] ┆ bool  │
+        ╞════════════════╪═══════╡
+        │ [true, true]   ┆ true  │
+        │ [false, true]  ┆ false │
+        │ [false, false] ┆ false │
+        │ [null, null]   ┆ true  │
+        │ null           ┆ null  │
+        └────────────────┴───────┘
+        """
+        return wrap_expr(self._pyexpr.arr_all())
+
+    def sort(self, *, descending: bool = False) -> Expr:
+        """
+        Sort the arrays in this column.
+
+        Parameters
+        ----------
+        descending
+            Sort in descending order.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [[3, 2, 1], [9, 1, 2]],
+        ...     },
+        ...     schema={"a": pl.Array(pl.Int64, 3)},
+        ... )
+        >>> df.with_columns(sort=pl.col("a").arr.sort())
+        shape: (2, 2)
+        ┌───────────────┬───────────────┐
+        │ a             ┆ sort          │
+        │ ---           ┆ ---           │
+        │ array[i64, 3] ┆ array[i64, 3] │
+        ╞═══════════════╪═══════════════╡
+        │ [3, 2, 1]     ┆ [1, 2, 3]     │
+        │ [9, 1, 2]     ┆ [1, 2, 9]     │
+        └───────────────┴───────────────┘
+        >>> df.with_columns(sort=pl.col("a").arr.sort(descending=True))
+        shape: (2, 2)
+        ┌───────────────┬───────────────┐
+        │ a             ┆ sort          │
+        │ ---           ┆ ---           │
+        │ array[i64, 3] ┆ array[i64, 3] │
+        ╞═══════════════╪═══════════════╡
+        │ [3, 2, 1]     ┆ [3, 2, 1]     │
+        │ [9, 1, 2]     ┆ [9, 2, 1]     │
+        └───────────────┴───────────────┘
+
+        """
+        return wrap_expr(self._pyexpr.arr_sort(descending))
+
+    def reverse(self) -> Expr:
+        """
+        Reverse the arrays in this column.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [[3, 2, 1], [9, 1, 2]],
+        ...     },
+        ...     schema={"a": pl.Array(pl.Int64, 3)},
+        ... )
+        >>> df.with_columns(reverse=pl.col("a").arr.reverse())
+        shape: (2, 2)
+        ┌───────────────┬───────────────┐
+        │ a             ┆ reverse       │
+        │ ---           ┆ ---           │
+        │ array[i64, 3] ┆ array[i64, 3] │
+        ╞═══════════════╪═══════════════╡
+        │ [3, 2, 1]     ┆ [1, 2, 3]     │
+        │ [9, 1, 2]     ┆ [2, 1, 9]     │
+        └───────────────┴───────────────┘
+
+        """
+        return wrap_expr(self._pyexpr.arr_reverse())
+
+    def arg_min(self) -> Expr:
+        """
+        Retrieve the index of the minimal value in every sub-array.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`UInt32` or :class:`UInt64`
+            (depending on compilation).
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [[1, 2], [2, 1]],
+        ...     },
+        ...     schema={"a": pl.Array(pl.Int64, 2)},
+        ... )
+        >>> df.with_columns(arg_min=pl.col("a").arr.arg_min())
+        shape: (2, 2)
+        ┌───────────────┬─────────┐
+        │ a             ┆ arg_min │
+        │ ---           ┆ ---     │
+        │ array[i64, 2] ┆ u32     │
+        ╞═══════════════╪═════════╡
+        │ [1, 2]        ┆ 0       │
+        │ [2, 1]        ┆ 1       │
+        └───────────────┴─────────┘
+
+        """
+        return wrap_expr(self._pyexpr.arr_arg_min())
+
+    def arg_max(self) -> Expr:
+        """
+        Retrieve the index of the maximum value in every sub-array.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`UInt32` or :class:`UInt64`
+            (depending on compilation).
+
+        Examples
+        --------
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [[1, 2], [2, 1]],
+        ...     },
+        ...     schema={"a": pl.Array(pl.Int64, 2)},
+        ... )
+        >>> df.with_columns(arg_max=pl.col("a").arr.arg_max())
+        shape: (2, 2)
+        ┌───────────────┬─────────┐
+        │ a             ┆ arg_max │
+        │ ---           ┆ ---     │
+        │ array[i64, 2] ┆ u32     │
+        ╞═══════════════╪═════════╡
+        │ [1, 2]        ┆ 1       │
+        │ [2, 1]        ┆ 0       │
+        └───────────────┴─────────┘
+
+        """
+        return wrap_expr(self._pyexpr.arr_arg_max())

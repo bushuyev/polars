@@ -8,16 +8,17 @@ use polars_error::PolarsResult;
 
 use super::super::dictionary::*;
 use super::super::utils::MaybeNext;
-use super::super::Pages;
-use super::utils::{Binary, SizedBinaryIter};
+use super::super::PagesIter;
+use super::utils::Binary;
 use crate::arrow::read::deserialize::nested_utils::{InitNested, NestedState};
 use crate::parquet::page::DictPage;
+use crate::read::deserialize::binary::utils::BinaryIter;
 
-/// An iterator adapter over [`Pages`] assumed to be encoded as parquet's dictionary-encoded binary representation
+/// An iterator adapter over [`PagesIter`] assumed to be encoded as parquet's dictionary-encoded binary representation
 #[derive(Debug)]
 pub struct DictIter<K, O, I>
 where
-    I: Pages,
+    I: PagesIter,
     O: Offset,
     K: DictionaryKey,
 {
@@ -34,7 +35,7 @@ impl<K, O, I> DictIter<K, O, I>
 where
     K: DictionaryKey,
     O: Offset,
-    I: Pages,
+    I: PagesIter,
 {
     pub fn new(
         iter: I,
@@ -60,7 +61,7 @@ fn read_dict<O: Offset>(data_type: ArrowDataType, dict: &DictPage) -> Box<dyn Ar
         _ => data_type,
     };
 
-    let values = SizedBinaryIter::new(&dict.buffer, dict.num_values);
+    let values = BinaryIter::new(&dict.buffer).take(dict.num_values);
 
     let mut data = Binary::<O>::with_capacity(dict.num_values);
     data.values = Vec::with_capacity(dict.buffer.len() - 4 * dict.num_values);
@@ -81,7 +82,7 @@ fn read_dict<O: Offset>(data_type: ArrowDataType, dict: &DictPage) -> Box<dyn Ar
 
 impl<K, O, I> Iterator for DictIter<K, O, I>
 where
-    I: Pages,
+    I: PagesIter,
     O: Offset,
     K: DictionaryKey,
 {
@@ -110,7 +111,7 @@ where
 #[derive(Debug)]
 pub struct NestedDictIter<K, O, I>
 where
-    I: Pages,
+    I: PagesIter,
     O: Offset,
     K: DictionaryKey,
 {
@@ -126,7 +127,7 @@ where
 
 impl<K, O, I> NestedDictIter<K, O, I>
 where
-    I: Pages,
+    I: PagesIter,
     O: Offset,
     K: DictionaryKey,
 {
@@ -152,28 +153,30 @@ where
 
 impl<K, O, I> Iterator for NestedDictIter<K, O, I>
 where
-    I: Pages,
+    I: PagesIter,
     O: Offset,
     K: DictionaryKey,
 {
     type Item = PolarsResult<(NestedState, DictionaryArray<K>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let maybe_state = nested_next_dict(
-            &mut self.iter,
-            &mut self.items,
-            &mut self.remaining,
-            &self.init,
-            &mut self.values,
-            self.data_type.clone(),
-            self.chunk_size,
-            |dict| read_dict::<O>(self.data_type.clone(), dict),
-        );
-        match maybe_state {
-            MaybeNext::Some(Ok(dict)) => Some(Ok(dict)),
-            MaybeNext::Some(Err(e)) => Some(Err(e)),
-            MaybeNext::None => None,
-            MaybeNext::More => self.next(),
+        loop {
+            let maybe_state = nested_next_dict(
+                &mut self.iter,
+                &mut self.items,
+                &mut self.remaining,
+                &self.init,
+                &mut self.values,
+                self.data_type.clone(),
+                self.chunk_size,
+                |dict| read_dict::<O>(self.data_type.clone(), dict),
+            );
+            match maybe_state {
+                MaybeNext::Some(Ok(dict)) => return Some(Ok(dict)),
+                MaybeNext::Some(Err(e)) => return Some(Err(e)),
+                MaybeNext::None => return None,
+                MaybeNext::More => continue,
+            }
         }
     }
 }

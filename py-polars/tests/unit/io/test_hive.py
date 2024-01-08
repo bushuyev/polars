@@ -9,7 +9,7 @@ import polars as pl
 from polars.testing import assert_frame_equal
 
 
-# @pytest.mark.write_disk()
+@pytest.mark.write_disk()
 def test_hive_partitioned_predicate_pushdown(
     io_files_path: Path, tmp_path: Path, monkeypatch: Any, capfd: Any
 ) -> None:
@@ -57,6 +57,32 @@ def test_hive_partitioned_predicate_pushdown(
 
     # tests: 11536
     assert q.filter(pl.col("sugars_g") == 25).collect().shape == (1, 4)
+
+    # tests: 12570
+    assert q.filter(pl.col("fats_g") == 1225.0).select("category").collect().shape == (
+        0,
+        1,
+    )
+
+
+@pytest.mark.write_disk()
+def test_hive_partitioned_predicate_pushdown_skips_correct_number_of_files(
+    io_files_path: Path, tmp_path: Path, monkeypatch: Any, capfd: Any
+) -> None:
+    monkeypatch.setenv("POLARS_VERBOSE", "1")
+    df = pl.DataFrame({"d": pl.arange(0, 5, eager=True)}).with_columns(
+        a=pl.col("d") % 5
+    )
+    root = tmp_path / "test_int_partitions"
+    df.write_parquet(
+        root,
+        use_pyarrow=True,
+        pyarrow_options={"partition_cols": ["a"]},
+    )
+
+    q = pl.scan_parquet(root / "**/*.parquet", hive_partitioning=True)
+    assert q.filter(pl.col("a").is_in([1, 4])).collect().shape == (2, 2)
+    assert "hive partitioning: skipped 3 files" in capfd.readouterr().err
 
 
 @pytest.mark.write_disk()
@@ -123,10 +149,10 @@ def test_hive_partitioned_projection_pushdown(
             parallel=parallel,  # type: ignore[arg-type]
         )
 
-        expect = q.collect().select("category")
-        actual = q.select("category").collect()
+        expected = q.collect().select("category")
+        result = q.select("category").collect()
 
-        assert expect.frame_equal(actual)
+        assert_frame_equal(result, expected)
 
 
 @pytest.mark.write_disk()

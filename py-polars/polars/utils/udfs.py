@@ -104,11 +104,36 @@ class OpNames:
 # numpy functions that we can map to native expressions
 _NUMPY_MODULE_ALIASES = frozenset(("np", "numpy"))
 _NUMPY_FUNCTIONS = frozenset(
-    ("cbrt", "cos", "cosh", "sin", "sinh", "sqrt", "tan", "tanh")
+    (
+        # "abs",  # TODO: this one clashes with Python builtin abs
+        "arccos",
+        "arccosh",
+        "arcsin",
+        "arcsinh",
+        "arctan",
+        "arctanh",
+        "cbrt",
+        "ceil",
+        "cos",
+        "cosh",
+        "degrees",
+        "exp",
+        "floor",
+        "log",
+        "log10",
+        "log1p",
+        "radians",
+        "sign",
+        "sin",
+        "sinh",
+        "sqrt",
+        "tan",
+        "tanh",
+    )
 )
 
 # python functions that we can map to native expressions
-_PYTHON_CASTS_MAP = {"float": "Float64", "int": "Int64", "str": "Utf8"}
+_PYTHON_CASTS_MAP = {"float": "Float64", "int": "Int64", "str": "String"}
 _PYTHON_BUILTINS = frozenset(_PYTHON_CASTS_MAP) | {"abs"}
 _PYTHON_METHODS_MAP = {
     "lower": "str.to_lowercase",
@@ -116,7 +141,7 @@ _PYTHON_METHODS_MAP = {
     "upper": "str.to_uppercase",
 }
 
-FUNCTION_KINDS: list[dict[str, list[AbstractSet[str]]]] = [
+_FUNCTION_KINDS: list[dict[str, list[AbstractSet[str]]]] = [
     # lambda x: module.func(CONSTANT)
     {
         "argument_1_opname": [{"LOAD_CONST"}],
@@ -167,6 +192,15 @@ FUNCTION_KINDS: list[dict[str, list[AbstractSet[str]]]] = [
         "function_name": [{"strptime"}],
     },
 ]
+# In addition to `lambda x: func(x)`, also support cases when a unary operation
+# has been applied to `x`, like `lambda x: func(-x)` or `lambda x: func(~x)`.
+_FUNCTION_KINDS = [
+    # Dict entry 1 has incompatible type "str": "object";
+    # expected "str": "list[AbstractSet[str]]"
+    {**kind, "argument_1_unary_opname": unary}  # type: ignore[dict-item]
+    for kind in _FUNCTION_KINDS
+    for unary in [[set(OpNames.UNARY)], []]
+]
 
 
 def _get_all_caller_variables() -> dict[str, Any]:
@@ -201,7 +235,6 @@ def _get_all_caller_variables() -> dict[str, Any]:
 class BytecodeParser:
     """Introspect UDF bytecode and determine if we can rewrite as native expression."""
 
-    _can_attempt_rewrite: dict[str, bool]
     _map_target_name: str | None = None
 
     def __init__(self, function: Callable[[Any], Any], map_target: MapTarget):
@@ -212,7 +245,6 @@ class BytecodeParser:
             # unavailable, like a bare numpy ufunc that isn't in a lambda/function)
             original_instructions = iter([])
 
-        self._can_attempt_rewrite = {}
         self._function = function
         self._map_target = map_target
         self._param_name = self._get_param_name(function)
@@ -226,13 +258,13 @@ class BytecodeParser:
         try:
             # note: we do not parse/handle functions with > 1 params
             sig = signature(function)
-            return (
-                next(iter(parameters.keys()))
-                if len(parameters := sig.parameters) == 1
-                else None
-            )
         except ValueError:
             return None
+        return (
+            next(iter(parameters.keys()))
+            if len(parameters := sig.parameters) == 1
+            else None
+        )
 
     def _inject_nesting(
         self,
@@ -298,30 +330,22 @@ class BytecodeParser:
         guaranteed that using the equivalent bare constant value will return the
         same output. (Hopefully nobody is writing lambdas like that anyway...)
         """
-        if (
-            can_attempt_rewrite := self._can_attempt_rewrite.get(self._map_target, None)
-        ) is not None:
-            return can_attempt_rewrite
-        else:
-            self._can_attempt_rewrite[self._map_target] = False
-            if self._rewritten_instructions and self._param_name is not None:
-                self._can_attempt_rewrite[self._map_target] = (
-                    # check minimum number of ops, ensuring all are parseable
-                    len(self._rewritten_instructions) >= 2
-                    and all(
-                        inst.opname in OpNames.PARSEABLE_OPS
-                        for inst in self._rewritten_instructions
-                    )
-                    # exclude constructs/functions with multiple RETURN_VALUE ops
-                    and sum(
-                        1
-                        for inst in self.original_instructions
-                        if inst.opname == "RETURN_VALUE"
-                    )
-                    == 1
-                )
-
-        return self._can_attempt_rewrite[self._map_target]
+        return (
+            self._param_name is not None
+            # check minimum number of ops, ensuring all are parseable
+            and len(self._rewritten_instructions) >= 2
+            and all(
+                inst.opname in OpNames.PARSEABLE_OPS
+                for inst in self._rewritten_instructions
+            )
+            # exclude constructs/functions with multiple RETURN_VALUE ops
+            and sum(
+                1
+                for inst in self.original_instructions
+                if inst.opname == "RETURN_VALUE"
+            )
+            == 1
+        )
 
     def dis(self) -> None:
         """Print disassembled function bytecode."""
@@ -350,7 +374,7 @@ class BytecodeParser:
     def to_expression(self, col: str) -> str | None:
         """Translate postfix bytecode instructions to polars expression/string."""
         self._map_target_name = None
-        if not self.can_attempt_rewrite() or self._param_name is None:
+        if self._param_name is None:
             return None
 
         # decompose bytecode into logical 'and'/'or' expression blocks (if present)
@@ -365,8 +389,8 @@ class BytecodeParser:
                 control_flow_blocks[jump_offset].append(inst)
 
         # convert each block to a polars expression string
+        caller_variables: dict[str, Any] = {}
         try:
-            caller_variables: dict[str, Any] = {}
             expression_strings = self._inject_nesting(
                 {
                     offset: InstructionTranslator(
@@ -382,10 +406,9 @@ class BytecodeParser:
                 },
                 logical_instructions,
             )
-            polars_expr = " ".join(expr for _offset, expr in expression_strings)
         except NotImplementedError:
-            self._can_attempt_rewrite[self._map_target] = False
             return None
+        polars_expr = " ".join(expr for _offset, expr in expression_strings)
 
         # note: if no 'pl.col' in the expression, it likely represents a compound
         # constant value (e.g. `lambda x: CONST + 123`), so we don't want to warn
@@ -432,22 +455,24 @@ class BytecodeParser:
                 apitype = "series"
                 clsname = "Series"
 
-            before_after_suggestion = (
+            before, after = (
                 (
-                    f"  \033[31m- {target_name}.map_elements({func_name})\033[0m\n"
-                    f"  \033[32m+ {suggested_expression}\033[0m\n{addendum}"
+                    f"  \033[31m- {target_name}.map_elements({func_name})\033[0m\n",
+                    f"  \033[32m+ {suggested_expression}\033[0m\n{addendum}",
                 )
                 if in_terminal_that_supports_colour()
                 else (
-                    f"  - {target_name}.map_elements({func_name})\n"
-                    f"  + {suggested_expression}\n{addendum}"
+                    f"  - {target_name}.map_elements({func_name})\n",
+                    f"  + {suggested_expression}\n{addendum}",
                 )
             )
             warnings.warn(
                 f"\n{clsname}.map_elements is significantly slower than the native {apitype} API.\n"
                 "Only use if you absolutely CANNOT implement your logic otherwise.\n"
-                "In this case, you can replace your `map_elements` with the following:\n"
-                f"{before_after_suggestion}",
+                "Replace this expression...\n"
+                f"{before}"
+                "with this one instead:\n"
+                f"{after}",
                 PolarsInefficientMapWarning,
                 stacklevel=find_stacklevel(),
             )
@@ -483,7 +508,7 @@ class InstructionTranslator:
         elif inst.opname in OpNames.UNARY:
             return OpNames.UNARY[inst.opname]
         elif inst.opname == "BINARY_SUBSCR":
-            return "map_dict"
+            return "replace"
         else:
             raise AssertionError(
                 "unrecognized opname"
@@ -499,14 +524,17 @@ class InstructionTranslator:
             e1 = self._expr(value.left_operand, col, param_name, depth + 1)
             if value.operator_arity == 1:
                 if op not in OpNames.UNARY_VALUES:
-                    if not e1.startswith("pl.col("):
-                        # support use of consts as numpy/builtin params, eg:
-                        # "np.sin(3) + np.cos(x)", or "len('const_string') + len(x)"
-                        pfx = "np." if op in _NUMPY_FUNCTIONS else ""
-                        return f"{pfx}{op}({e1})"
+                    if e1.startswith("pl.col("):
+                        call = "" if op.endswith(")") else "()"
+                        return f"{e1}.{op}{call}"
+                    if e1[0] in OpNames.UNARY_VALUES and e1[1:].startswith("pl.col("):
+                        call = "" if op.endswith(")") else "()"
+                        return f"({e1}).{op}{call}"
 
-                    call = "" if op.endswith(")") else "()"
-                    return f"{e1}.{op}{call}"
+                    # support use of consts as numpy/builtin params, eg:
+                    # "np.sin(3) + np.cos(x)", or "len('const_string') + len(x)"
+                    pfx = "np." if op in _NUMPY_FUNCTIONS else ""
+                    return f"{pfx}{op}({e1})"
                 return f"{op}{e1}"
             else:
                 e2 = self._expr(value.right_operand, col, param_name, depth + 1)
@@ -520,7 +548,7 @@ class InstructionTranslator:
                         if " " in e1
                         else f"{not_}{e1}.is_in({e2})"
                     )
-                elif op == "map_dict":
+                elif op == "replace":
                     if not self._caller_variables:
                         self._caller_variables.update(_get_all_caller_variables())
                         if not isinstance(self._caller_variables.get(e1, None), dict):
@@ -706,12 +734,13 @@ class RewrittenInstructions:
         self, idx: int, updated_instructions: list[Instruction]
     ) -> int:
         """Replace function calls with a synthetic POLARS_EXPRESSION op."""
-        for function_kind in FUNCTION_KINDS:
+        for function_kind in _FUNCTION_KINDS:
             opnames: list[AbstractSet[str]] = [
                 {"LOAD_GLOBAL", "LOAD_DEREF"},
                 *function_kind["module_opname"],
                 *function_kind["attribute_opname"],
                 *function_kind["argument_1_opname"],
+                *function_kind["argument_1_unary_opname"],
                 *function_kind["argument_2_opname"],
                 OpNames.CALL,
             ]
@@ -725,11 +754,11 @@ class RewrittenInstructions:
                 ],
             ):
                 attribute_count = len(function_kind["attribute_name"])
-                inst1, inst2, *_, inst3 = matching_instructions[
+                inst1, inst2, inst3 = matching_instructions[
                     attribute_count : 3 + attribute_count
                 ]
                 if inst1.argval == "json":
-                    expr_name = "str.json_extract"
+                    expr_name = "str.json_decode"
                 elif inst1.argval == "datetime":
                     fmt = matching_instructions[attribute_count + 3].argval
                     expr_name = f'str.to_datetime(format="{fmt}")'
@@ -750,7 +779,15 @@ class RewrittenInstructions:
                 )
                 # POLARS_EXPRESSION is mapped as a unary op, so switch instruction order
                 operand = inst3._replace(offset=inst1.offset)
-                updated_instructions.extend((operand, synthetic_call))
+                updated_instructions.extend(
+                    (
+                        operand,
+                        matching_instructions[3 + attribute_count],
+                        synthetic_call,
+                    )
+                    if function_kind["argument_1_unary_opname"]
+                    else (operand, synthetic_call)
+                )
                 return len(matching_instructions)
 
         return 0
@@ -802,23 +839,22 @@ def _is_raw_function(function: Callable[[Any], Any]) -> tuple[str, str]:
     try:
         func_module = function.__class__.__module__
         func_name = function.__name__
-
-        # numpy function calls
-        if func_module == "numpy" and func_name in _NUMPY_FUNCTIONS:
-            return "np", f"{func_name}()"
-
-        # python function calls
-        elif func_module == "builtins":
-            if func_name in _PYTHON_CASTS_MAP:
-                return "builtins", f"cast(pl.{_PYTHON_CASTS_MAP[func_name]})"
-            elif func_name == "loads":
-                import json  # double-check since it is referenced via 'builtins'
-
-                if function is json.loads:
-                    return "json", "str.json_extract()"
-
     except AttributeError:
-        pass
+        return "", ""
+
+    # numpy function calls
+    if func_module == "numpy" and func_name in _NUMPY_FUNCTIONS:
+        return "np", f"{func_name}()"
+
+    # python function calls
+    elif func_module == "builtins":
+        if func_name in _PYTHON_CASTS_MAP:
+            return "builtins", f"cast(pl.{_PYTHON_CASTS_MAP[func_name]})"
+        elif func_name == "loads":
+            import json  # double-check since it is referenced via 'builtins'
+
+            if function is json.loads:
+                return "json", "str.json_decode()"
 
     return "", ""
 

@@ -16,7 +16,8 @@ libloading = { version = "0.8.0", optional = true }
 polars-core = { workspace = true, features = ["lazy", "zip_with", "random"] }
 polars-ffi = { workspace = true, optional = true }
 polars-io = { workspace = true, features = ["lazy"] }
-polars-ops = { workspace = true, features = ["zip_with"] }
+polars-json = { workspace = true, optional = true }
+polars-ops = { workspace = true, features = [] }
 polars-parquet = { workspace = true, optional = true }
 polars-time = { workspace = true, optional = true }
 polars-utils = { workspace = true }
@@ -56,9 +57,9 @@ parquet = ["polars-io/parquet", "polars-parquet"]
 async = ["polars-io/async"]
 cloud = ["async", "polars-io/cloud"]
 ipc = ["polars-io/ipc"]
-json = ["polars-io/json"]
+json = ["polars-io/json", "polars-json"]
 csv = ["polars-io/csv"]
-temporal = ["polars-core/temporal", "dtype-date", "dtype-datetime", "dtype-time"]
+temporal = ["polars-core/temporal", "dtype-date", "dtype-datetime", "dtype-time", "dtype-i8", "dtype-i16"]
 # debugging purposes
 fmt = ["polars-core/fmt"]
 strings = ["polars-core/strings", "polars-ops/strings"]
@@ -124,6 +125,7 @@ chunked_ids = ["polars-core/chunked_ids"]
 list_to_struct = ["polars-ops/list_to_struct"]
 row_hash = ["polars-core/row_hash", "polars-ops/hash"]
 string_pad = ["polars-ops/string_pad"]
+string_reverse = ["polars-ops/string_reverse"]
 string_to_integer = ["polars-ops/string_to_integer"]
 arg_where = []
 search_sorted = ["polars-ops/search_sorted"]
@@ -136,6 +138,7 @@ cse = []
 propagate_nans = ["polars-ops/propagate_nans"]
 coalesce = []
 fused = ["polars-ops/fused"]
+array_any_all = ["polars-ops/array_any_all", "dtype-array"]
 list_sets = ["polars-ops/list_sets"]
 list_any_all = ["polars-ops/list_any_all"]
 list_drop_nulls = ["polars-ops/list_drop_nulls"]
@@ -147,12 +150,106 @@ ffi_plugin = ["libloading", "polars-ffi"]
 hive_partitions = []
 peaks = ["polars-ops/peaks"]
 cov = ["polars-ops/cov"]
+hist = ["polars-ops/hist"]
+replace = ["polars-ops/replace"]
+find_many = ["polars-ops/find_many"]
 
 bigidx = ["polars-core/bigidx"]
 
 panic_on_schema = []
 
 [package.metadata.docs.rs]
-all-features = true
+features = [
+  "temporal",
+  "serde",
+  "rolling_window",
+  "timezones",
+  "dtype-date",
+  "extract_groups",
+  "dtype-datetime",
+  "asof_join",
+  "dtype-duration",
+  "is_first_distinct",
+  "pivot",
+  "dtype-array",
+  "is_last_distinct",
+  "dtype-time",
+  "array_any_all",
+  "date_offset",
+  "parquet",
+  "strings",
+  "row_hash",
+  "json",
+  "python",
+  "cloud",
+  "string_to_integer",
+  "list_any_all",
+  "pct_change",
+  "list_gather",
+  "dtype-i16",
+  "round_series",
+  "cutqcut",
+  "async",
+  "ewma",
+  "random",
+  "chunked_ids",
+  "repeat_by",
+  "is_in",
+  "log",
+  "string_reverse",
+  "list_sets",
+  "propagate_nans",
+  "mode",
+  "rank",
+  "hist",
+  "object",
+  "approx_unique",
+  "dtype-categorical",
+  "merge_sorted",
+  "bigidx",
+  "cov",
+  "list_sample",
+  "dtype-i8",
+  "fused",
+  "binary_encoding",
+  "list_drop_nulls",
+  "fmt",
+  "list_to_struct",
+  "string_pad",
+  "diff",
+  "rle",
+  "is_unique",
+  "find_many",
+  "string_encoding",
+  "ipc",
+  "search_sorted",
+  "unique_counts",
+  "dtype-u8",
+  "dtype-struct",
+  "peaks",
+  "abs",
+  "interpolate",
+  "list_count",
+  "cum_agg",
+  "top_k",
+  "moment",
+  "semi_anti_join",
+  "replace",
+  "dtype-u16",
+  "regex",
+  "ciborium",
+  "dtype-decimal",
+  "arg_where",
+  "range",
+  "meta",
+  "hive_partitions",
+  "concat_str",
+  "coalesce",
+  "dot_diagram",
+  "trigonometry",
+  "streaming",
+  "true_div",
+  "sign",
+]
 # defines the configuration attribute `docsrs`
 rustdoc-args = ["--cfg", "docsrs"]

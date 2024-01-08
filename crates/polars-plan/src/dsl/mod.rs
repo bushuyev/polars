@@ -1,9 +1,11 @@
 #![allow(ambiguous_glob_reexports)]
 //! Domain specific language for the Lazy API.
-#[cfg(feature = "rolling_window")]
-use polars_core::utils::ensure_sorted_arg;
 #[cfg(feature = "dtype-categorical")]
 pub mod cat;
+
+#[cfg(feature = "rolling_window")]
+use std::any::Any;
+
 #[cfg(feature = "dtype-categorical")]
 pub use cat::*;
 mod arithmetic;
@@ -29,11 +31,13 @@ pub mod python_udf;
 #[cfg(feature = "random")]
 mod random;
 mod selector;
+mod statistics;
 #[cfg(feature = "strings")]
 pub mod string;
 #[cfg(feature = "dtype-struct")]
 mod struct_;
 pub mod udf;
+
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -190,57 +194,6 @@ impl Expr {
         self.apply_private(FunctionExpr::DropNans)
     }
 
-    /// Reduce groups to minimal value.
-    pub fn min(self) -> Self {
-        AggExpr::Min {
-            input: Box::new(self),
-            propagate_nans: false,
-        }
-        .into()
-    }
-
-    /// Reduce groups to maximum value.
-    pub fn max(self) -> Self {
-        AggExpr::Max {
-            input: Box::new(self),
-            propagate_nans: false,
-        }
-        .into()
-    }
-
-    /// Reduce groups to minimal value.
-    pub fn nan_min(self) -> Self {
-        AggExpr::Min {
-            input: Box::new(self),
-            propagate_nans: true,
-        }
-        .into()
-    }
-
-    /// Reduce groups to maximum value.
-    pub fn nan_max(self) -> Self {
-        AggExpr::Max {
-            input: Box::new(self),
-            propagate_nans: true,
-        }
-        .into()
-    }
-
-    /// Reduce groups to the mean value.
-    pub fn mean(self) -> Self {
-        AggExpr::Mean(Box::new(self)).into()
-    }
-
-    /// Reduce groups to the median value.
-    pub fn median(self) -> Self {
-        AggExpr::Median(Box::new(self)).into()
-    }
-
-    /// Reduce groups to the sum of all the values.
-    pub fn sum(self) -> Self {
-        AggExpr::Sum(Box::new(self)).into()
-    }
-
     /// Get the number of unique values in the groups.
     pub fn n_unique(self) -> Self {
         AggExpr::NUnique(Box::new(self)).into()
@@ -281,7 +234,7 @@ impl Expr {
         self.explode()
     }
 
-    /// Explode the utf8/ list column.
+    /// Explode the String/List column.
     pub fn explode(self) -> Self {
         Expr::Explode(Box::new(self))
     }
@@ -667,7 +620,7 @@ impl Expr {
         self,
         function_expr: FunctionExpr,
         arguments: &[Expr],
-        auto_explode: bool,
+        returns_scalar: bool,
         cast_to_supertypes: bool,
     ) -> Self {
         let mut input = Vec::with_capacity(arguments.len() + 1);
@@ -679,7 +632,7 @@ impl Expr {
             function: function_expr,
             options: FunctionOptions {
                 collect_groups: ApplyOptions::GroupWise,
-                returns_scalar: auto_explode,
+                returns_scalar,
                 cast_to_supertypes,
                 ..Default::default()
             },
@@ -737,7 +690,7 @@ impl Expr {
     }
 
     /// Shift the values in the array by some period and fill the resulting empty values.
-    pub fn shift_and_fill<E: Into<Expr>>(self, n: E, fill_value: E) -> Self {
+    pub fn shift_and_fill<E: Into<Expr>, IE: Into<Expr>>(self, n: E, fill_value: IE) -> Self {
         self.apply_many_private(
             FunctionExpr::ShiftAndFill,
             &[n.into(), fill_value.into()],
@@ -1004,17 +957,11 @@ impl Expr {
     /// or
     /// Get counts of the group by operation.
     pub fn count(self) -> Self {
-        AggExpr::Count(Box::new(self)).into()
+        AggExpr::Count(Box::new(self), false).into()
     }
 
-    /// Standard deviation of the values of the Series.
-    pub fn std(self, ddof: u8) -> Self {
-        AggExpr::Std(Box::new(self), ddof).into()
-    }
-
-    /// Variance of the values of the Series.
-    pub fn var(self, ddof: u8) -> Self {
-        AggExpr::Var(Box::new(self), ddof).into()
+    pub fn len(self) -> Self {
+        AggExpr::Count(Box::new(self), true).into()
     }
 
     /// Get a mask of duplicated values.
@@ -1056,6 +1003,16 @@ impl Expr {
         binary_expr(self, Operator::Or, expr.into())
     }
 
+    /// "or" operation.
+    pub fn logical_or<E: Into<Expr>>(self, expr: E) -> Self {
+        binary_expr(self, Operator::LogicalOr, expr.into())
+    }
+
+    /// "or" operation.
+    pub fn logical_and<E: Into<Expr>>(self, expr: E) -> Self {
+        binary_expr(self, Operator::LogicalAnd, expr.into())
+    }
+
     /// Filter a single column.
     ///
     /// Should be used in aggregation context. If you want to filter on a
@@ -1078,7 +1035,7 @@ impl Expr {
         let has_literal = has_leaf_literal(&other);
 
         // lit(true).is_in() returns a scalar.
-        let returns_scalar = all_leaf_literal(&self);
+        let returns_scalar = all_return_scalar(&self);
 
         let arguments = &[other];
         // we don't have to apply on groups, so this is faster
@@ -1244,14 +1201,24 @@ impl Expr {
     /// See: [`RollingAgg::rolling_median`]
     #[cfg(feature = "rolling_window")]
     pub fn rolling_median(self, options: RollingOptions) -> Expr {
-        self.finish_rolling(options, RollingFunction::Median, RollingFunction::MedianBy)
+        self.rolling_quantile(QuantileInterpolOptions::Linear, 0.5, options)
     }
 
     /// Apply a rolling quantile.
     ///
     /// See: [`RollingAgg::rolling_quantile`]
     #[cfg(feature = "rolling_window")]
-    pub fn rolling_quantile(self, options: RollingOptions) -> Expr {
+    pub fn rolling_quantile(
+        self,
+        interpol: QuantileInterpolOptions,
+        quantile: f64,
+        mut options: RollingOptions,
+    ) -> Expr {
+        options.fn_params = Some(Arc::new(RollingQuantileParams {
+            prob: quantile,
+            interpol,
+        }) as Arc<dyn Any + Send + Sync>);
+
         self.finish_rolling(
             options,
             RollingFunction::Quantile,
@@ -1349,6 +1316,32 @@ impl Expr {
     /// Assign ranks to data, dealing with ties appropriately.
     pub fn rank(self, options: RankOptions, seed: Option<u64>) -> Expr {
         self.apply_private(FunctionExpr::Rank { options, seed })
+    }
+
+    #[cfg(feature = "replace")]
+    /// Replace the given values with other values.
+    pub fn replace<E: Into<Expr>>(
+        self,
+        old: E,
+        new: E,
+        default: Option<E>,
+        return_dtype: Option<DataType>,
+    ) -> Expr {
+        let old = old.into();
+        let new = new.into();
+        // If we search and replace by literals, we can run on batches.
+        let literal_searchers = matches!(&old, Expr::Literal(_)) & matches!(&new, Expr::Literal(_));
+
+        let mut args = vec![old, new];
+        if let Some(default) = default {
+            args.push(default.into())
+        }
+
+        if literal_searchers {
+            self.map_many_private(FunctionExpr::Replace { return_dtype }, &args, false, false)
+        } else {
+            self.apply_many_private(FunctionExpr::Replace { return_dtype }, &args, false, false)
+        }
     }
 
     #[cfg(feature = "cutqcut")]
@@ -1756,6 +1749,18 @@ where
 /// Count expression.
 pub fn count() -> Expr {
     Expr::Count
+}
+
+/// Return the cumulative count of the context.
+#[cfg(feature = "range")]
+pub fn cum_count(reverse: bool) -> Expr {
+    let start = lit(1 as IdxSize);
+    let end = count() + lit(1 as IdxSize);
+    let mut range = int_range(start, end, 1, IDX_DTYPE);
+    if reverse {
+        range = range.reverse()
+    }
+    range.alias("cum_count")
 }
 
 /// First column in DataFrame.

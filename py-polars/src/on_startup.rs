@@ -8,6 +8,7 @@ use polars_core::chunked_array::object::registry::AnonymousObjectBuilder;
 use polars_core::error::PolarsError::ComputeError;
 use polars_core::error::PolarsResult;
 use polars_core::frame::DataFrame;
+use polars_error::PolarsWarning;
 use pyo3::intern;
 use pyo3::prelude::*;
 
@@ -57,14 +58,14 @@ fn python_function_caller_df(df: DataFrame, lambda: &PyObject) -> PolarsResult<D
     })
 }
 
-fn warning_function(msg: &str) {
+fn warning_function(msg: &str, warning: PolarsWarning) {
     Python::with_gil(|py| {
         let warn_fn = UTILS
             .as_ref(py)
             .getattr(intern!(py, "_polars_warn"))
             .unwrap();
 
-        if let Err(e) = warn_fn.call1((msg,)) {
+        if let Err(e) = warn_fn.call1((msg, Wrap(warning))) {
             eprintln!("{e}")
         }
     });
@@ -86,7 +87,9 @@ pub fn __register_startup_deps() {
             Box::new(object) as Box<dyn Any>
         });
 
-        registry::register_object_builder(object_builder, object_converter);
+        let object_size = std::mem::size_of::<ObjectValue>();
+        let physical_dtype = ArrowDataType::FixedSizeBinary(object_size);
+        registry::register_object_builder(object_builder, object_converter, physical_dtype);
         // register SERIES UDF
         unsafe { python_udf::CALL_SERIES_UDF_PYTHON = Some(python_function_caller_series) }
         // register DATAFRAME UDF

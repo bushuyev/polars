@@ -119,13 +119,13 @@ def test_window_function_cache() -> None:
 def test_window_range_no_rows() -> None:
     df = pl.DataFrame({"x": [5, 5, 4, 4, 2, 2]})
     expr = pl.int_range(0, pl.count()).over("x")
-    out = df.with_columns(expr)
+    out = df.with_columns(int=expr)
     assert_frame_equal(
         out, pl.DataFrame({"x": [5, 5, 4, 4, 2, 2], "int": [0, 1, 0, 1, 0, 1]})
     )
 
-    df = pl.DataFrame({"x": []})
-    out = df.with_columns(expr)
+    df = pl.DataFrame({"x": []}, schema={"x": pl.Float32})
+    out = df.with_columns(int=expr)
 
     expected = pl.DataFrame(schema={"x": pl.Float32, "int": pl.Int64})
     assert_frame_equal(out, expected)
@@ -135,7 +135,7 @@ def test_no_panic_on_nan_3067() -> None:
     df = pl.DataFrame(
         {
             "group": ["a", "a", "a", "b", "b", "b"],
-            "total": [1.0, 2, 3, 4, 5, np.NaN],
+            "total": [1.0, 2, 3, 4, 5, np.nan],
         }
     )
 
@@ -283,7 +283,7 @@ def test_nested_aggregation_window_expression() -> None:
         {
             "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 2, 13, 4, 15, 6, None, None, 19],
             "y": [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-            "foo": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1],
+            "foo": [None, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, 1, 1, 1, 1, None, None, 1],
         },
         # Resulting column is Int32, see https://github.com/pola-rs/polars/issues/8041
         schema_overrides={"foo": pl.Int32},
@@ -330,7 +330,7 @@ def test_window_function_implode_contention_8536() -> None:
             "policy": ["a", "b", "c", "c", "d", "d", "d", "d", "e", "e"],
             "memo": ["LE", "RM", "", "", "", "LE", "", "", "", "RM"],
         },
-        schema={"policy": pl.Utf8, "memo": pl.Utf8},
+        schema={"policy": pl.String, "memo": pl.String},
     )
 
     assert df.select(
@@ -424,3 +424,21 @@ def test_window_10417() -> None:
             pl.col("c") - pl.col("c").mean().over("a"),
         ]
     ).collect().to_dict(as_series=False) == {"a": [1], "b": [0.0], "c": [0.0]}
+
+
+def test_window_13173() -> None:
+    df = pl.DataFrame(
+        data={
+            "color": ["yellow", "yellow"],
+            "color2": [None, "light"],
+            "val": ["2", "3"],
+        }
+    )
+    assert df.with_columns(
+        pl.min("val").over(["color", "color2"]).alias("min_val_per_color")
+    ).to_dict(as_series=False) == {
+        "color": ["yellow", "yellow"],
+        "color2": [None, "light"],
+        "val": ["2", "3"],
+        "min_val_per_color": ["2", "3"],
+    }

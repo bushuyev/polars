@@ -36,6 +36,7 @@ Computation
     Series.ewm_var
     Series.exp
     Series.hash
+    Series.hist
     Series.is_between
     Series.kurtosis
     Series.log
@@ -46,6 +47,7 @@ Computation
     Series.peak_max
     Series.peak_min
     Series.rank
+    Series.replace
     Series.rolling_apply
     Series.rolling_map
     Series.rolling_max

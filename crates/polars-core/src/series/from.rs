@@ -82,14 +82,15 @@ impl Series {
             },
             List(_) => ListChunked::from_chunks_and_dtype_unchecked(name, chunks, dtype.clone())
                 .into_series(),
-            Utf8 => Utf8Chunked::from_chunks(name, chunks).into_series(),
+            String => StringChunked::from_chunks(name, chunks).into_series(),
             Binary => BinaryChunked::from_chunks(name, chunks).into_series(),
             #[cfg(feature = "dtype-categorical")]
-            Categorical(rev_map) => {
+            Categorical(rev_map, ordering) => {
                 let cats = UInt32Chunked::from_chunks(name, chunks);
                 let mut ca = CategoricalChunked::from_cats_and_rev_map_unchecked(
                     cats,
                     rev_map.clone().unwrap(),
+                    *ordering,
                 );
                 ca.set_fast_unique(false);
                 ca.into_series()
@@ -102,7 +103,7 @@ impl Series {
                 Series::_try_from_arrow_unchecked(name, chunks, &dtype.to_arrow()).unwrap()
             },
             #[cfg(feature = "object")]
-            Object(_) => {
+            Object(_, _) => {
                 assert_eq!(chunks.len(), 1);
                 let arr = chunks[0]
                     .as_any()
@@ -136,10 +137,10 @@ impl Series {
         dtype: &ArrowDataType,
     ) -> PolarsResult<Self> {
         match dtype {
-            ArrowDataType::LargeUtf8 => Ok(Utf8Chunked::from_chunks(name, chunks).into_series()),
+            ArrowDataType::LargeUtf8 => Ok(StringChunked::from_chunks(name, chunks).into_series()),
             ArrowDataType::Utf8 => {
-                let chunks = cast_chunks(&chunks, &DataType::Utf8, false).unwrap();
-                Ok(Utf8Chunked::from_chunks(name, chunks).into_series())
+                let chunks = cast_chunks(&chunks, &DataType::String, false).unwrap();
+                Ok(StringChunked::from_chunks(name, chunks).into_series())
             },
             ArrowDataType::LargeBinary => {
                 Ok(BinaryChunked::from_chunks(name, chunks).into_series())
@@ -202,13 +203,14 @@ impl Series {
             #[cfg(feature = "dtype-datetime")]
             ArrowDataType::Timestamp(tu, tz) => {
                 let mut tz = tz.clone();
-                if tz.as_deref() == Some("") {
-                    tz = None;
-                } else if tz.as_deref() == Some("+00:00") {
-                    tz = Some("UTC".to_string());
-                } else if let Some(_tz) = &tz {
-                    #[cfg(feature = "timezones")]
-                    validate_time_zone(_tz)?;
+                match tz.as_deref() {
+                    Some("") => tz = None,
+                    Some("+00:00") | Some("00:00") => tz = Some("UTC".to_string()),
+                    Some(_tz) => {
+                        #[cfg(feature = "timezones")]
+                        validate_time_zone(_tz)?;
+                    },
+                    None => (),
                 }
                 let chunks = cast_chunks(&chunks, &DataType::Int64, false).unwrap();
                 let s = Int64Chunked::from_chunks(name, chunks)
@@ -317,9 +319,15 @@ impl Series {
 
                 // Safety
                 // the invariants of an Arrow Dictionary guarantee the keys are in bounds
-                let mut ca = CategoricalChunked::from_keys_and_values(name, keys, values);
-                ca.set_fast_unique(false);
-                Ok(ca.into_series())
+                Ok(
+                    CategoricalChunked::from_keys_and_values(
+                        name,
+                        keys,
+                        values,
+                        Default::default(),
+                    )
+                    .into_series(),
+                )
             },
             #[cfg(feature = "object")]
             ArrowDataType::Extension(s, _, Some(_)) if s == EXTENSION_NAME => {
@@ -496,7 +504,7 @@ unsafe fn to_physical_and_dtype(arrays: Vec<ArrayRef>) -> (Vec<ArrayRef>, DataTy
                 let arr = arr.as_any().downcast_ref::<Utf8Array<i32>>().unwrap();
                 Box::from(utf8_to_large_utf8(arr))
             }),
-            DataType::Utf8,
+            DataType::String,
         ),
         #[allow(unused_variables)]
         dt @ ArrowDataType::Dictionary(_, _, _) => {

@@ -147,7 +147,7 @@ def test_schema_row_count_cse() -> None:
     )
     csv_a.seek(0)
 
-    df_a = pl.scan_csv(csv_a.name).with_row_count("Idx")
+    df_a = pl.scan_csv(csv_a.name).with_row_index("Idx")
 
     result = (
         df_a.join(df_a, on="B")
@@ -313,7 +313,7 @@ def test_cse_mixed_window_functions() -> None:
             "c_diff": [None],
             "c_diff_by_a": [None],
         },
-    ).with_columns(pl.col(pl.Float32).cast(pl.Int64))
+    ).with_columns(pl.col(pl.Null).cast(pl.Int64))
     assert_frame_equal(result, expected)
 
 

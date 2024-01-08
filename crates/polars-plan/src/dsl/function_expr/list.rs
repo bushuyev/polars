@@ -88,7 +88,7 @@ impl ListFunction {
             Any => mapper.with_dtype(DataType::Boolean),
             #[cfg(feature = "list_any_all")]
             All => mapper.with_dtype(DataType::Boolean),
-            Join => mapper.with_dtype(DataType::Utf8),
+            Join => mapper.with_dtype(DataType::String),
             #[cfg(feature = "dtype-array")]
             ToArray(width) => mapper.try_map_dtype(|dt| map_list_dtype_to_array_dtype(dt, *width)),
         }
@@ -399,7 +399,7 @@ pub(super) fn get(s: &mut [Series]) -> PolarsResult<Option<Series>> {
             if let Some(index) = index {
                 ca.lst_get(index).map(Some)
             } else {
-                polars_bail!(ComputeError: "unexpected null index received in `arr.get`")
+                polars_bail!(ComputeError: "unexpected null index received in `list.get`")
             }
         },
         len if len == ca.len() => {
@@ -424,11 +424,13 @@ pub(super) fn get(s: &mut [Series]) -> PolarsResult<Option<Series>> {
                 })
                 .collect::<IdxCa>();
             let s = Series::try_from((ca.name(), arr.values().clone())).unwrap();
-            unsafe { Ok(Some(s.take_unchecked(&take_by))) }
+            unsafe { s.take_unchecked(&take_by) }
+                .cast(&ca.inner_dtype())
+                .map(Some)
         },
         len => polars_bail!(
             ComputeError:
-            "`arr.get` expression got an index array of length {} while the list has {} elements",
+            "`list.get` expression got an index array of length {} while the list has {} elements",
             len, ca.len()
         ),
     }
@@ -465,7 +467,7 @@ pub(super) fn count_matches(args: &[Series]) -> PolarsResult<Series> {
 }
 
 pub(super) fn sum(s: &Series) -> PolarsResult<Series> {
-    Ok(s.list()?.lst_sum())
+    s.list()?.lst_sum()
 }
 
 pub(super) fn length(s: &Series) -> PolarsResult<Series> {
@@ -473,11 +475,11 @@ pub(super) fn length(s: &Series) -> PolarsResult<Series> {
 }
 
 pub(super) fn max(s: &Series) -> PolarsResult<Series> {
-    Ok(s.list()?.lst_max())
+    s.list()?.lst_max()
 }
 
 pub(super) fn min(s: &Series) -> PolarsResult<Series> {
-    Ok(s.list()?.lst_min())
+    s.list()?.lst_min()
 }
 
 pub(super) fn mean(s: &Series) -> PolarsResult<Series> {
@@ -517,6 +519,27 @@ pub(super) fn unique(s: &Series, is_stable: bool) -> PolarsResult<Series> {
 pub(super) fn set_operation(s: &[Series], set_type: SetOperation) -> PolarsResult<Series> {
     let s0 = &s[0];
     let s1 = &s[1];
+
+    if s0.len() == 0 || s1.len() == 0 {
+        return match set_type {
+            SetOperation::Intersection => {
+                if s0.len() == 0 {
+                    Ok(s0.clone())
+                } else {
+                    Ok(s1.clone().with_name(s0.name()))
+                }
+            },
+            SetOperation::Difference => Ok(s0.clone()),
+            SetOperation::Union | SetOperation::SymmetricDifference => {
+                if s0.len() == 0 {
+                    Ok(s1.clone().with_name(s0.name()))
+                } else {
+                    Ok(s0.clone())
+                }
+            },
+        };
+    }
+
     list_set_operation(s0.list()?, s1.list()?, set_type).map(|ca| ca.into_series())
 }
 
@@ -532,7 +555,7 @@ pub(super) fn lst_all(s: &Series) -> PolarsResult<Series> {
 
 pub(super) fn join(s: &[Series]) -> PolarsResult<Series> {
     let ca = s[0].list()?;
-    let separator = s[1].utf8()?;
+    let separator = s[1].str()?;
     Ok(ca.lst_join(separator)?.into_series())
 }
 

@@ -13,7 +13,7 @@ fn map_cats(
     let cl: Vec<&str> = cutlabs.iter().map(String::as_str).collect();
 
     let out_name = format!("{}_bin", s.name());
-    let mut bld = CategoricalChunkedBuilder::new(&out_name, s.len());
+    let mut bld = CategoricalChunkedBuilder::new(&out_name, s.len(), Default::default());
     let s2 = s.cast(&DataType::Float64)?;
     // It would be nice to parallelize this
     let s_iter = s2.f64()?.into_iter();
@@ -49,11 +49,13 @@ fn map_cats(
         let outvals = vec![brk_vals.finish().into_series(), bld.finish().into_series()];
         Ok(StructChunked::new(&out_name, &outvals)?.into_series())
     } else {
-        bld.drain_iter(s_iter.map(|opt| {
-            opt.filter(|x| !x.is_nan())
-                .map(|x| unsafe { *cl.get_unchecked(sorted_breaks.partition_point(|v| op(&x, v))) })
-        }));
-        Ok(bld.finish().into_series())
+        Ok(bld
+            .drain_iter_and_finish(s_iter.map(|opt| {
+                opt.filter(|x| !x.is_nan()).map(|x| unsafe {
+                    *cl.get_unchecked(sorted_breaks.partition_point(|v| op(&x, v)))
+                })
+            }))
+            .into_series())
     }
 }
 

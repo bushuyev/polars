@@ -12,11 +12,7 @@ from polars.utils._parse_expr_input import (
     parse_as_list_of_expressions,
 )
 from polars.utils._wrap import wrap_df, wrap_expr
-from polars.utils.deprecation import (
-    deprecate_renamed_function,
-    deprecate_renamed_parameter,
-    issue_deprecation_warning,
-)
+from polars.utils.deprecation import deprecate_renamed_function
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     import polars.polars as plr
@@ -32,6 +28,7 @@ if TYPE_CHECKING:
         IntoExpr,
         PolarsDataType,
         RollingInterpolationMethod,
+        SelectorType,
     )
 
 
@@ -74,45 +71,40 @@ def element() -> Expr:
     │ 8   ┆ 5   ┆ [16, 10]    │
     │ 3   ┆ 2   ┆ [6, 4]      │
     └─────┴─────┴─────────────┘
-
     """
     return F.col("")
 
 
-@overload
-def count(column: str) -> Expr:
-    ...
-
-
-@overload
-def count(column: Series) -> int:
-    ...
-
-
-@overload
-def count(column: None = None) -> Expr:
-    ...
-
-
-def count(column: str | Series | None = None) -> Expr | int:
+def count(column: str | None = None) -> Expr:
     """
-    Count the number of values in this column/context.
+    Either return the number of rows in the context, or return the number of non-null values in the column.
 
-    .. warning::
-        `null` is deemed a value in this context.
+    If no arguments are passed, returns the number of rows in the context.
+    Rows containing null values count towards the total.
+    This is similar to `COUNT(*)` in SQL.
+
+    Otherwise, this function is syntactic sugar for `col(column).count()`.
 
     Parameters
     ----------
     column
-        If dtype is:
+        Column name.
 
-        * `pl.Series` : count the values in the Series.
-        * `str` : count the values in this column.
-        * `None` : count the number of values in this context.
+    Returns
+    -------
+    Expr
+        Expression of data type :class:`UInt32`.
+
+    See Also
+    --------
+    Expr.count
 
     Examples
     --------
-    >>> df = pl.DataFrame({"a": [1, 8, 3], "b": [4, 5, 2], "c": ["foo", "bar", "foo"]})
+    Return the number of rows in a context. Note that rows containing null values are
+    counted towards the total.
+
+    >>> df = pl.DataFrame({"a": [1, 2, None], "b": [3, None, None]})
     >>> df.select(pl.count())
     shape: (1, 1)
     ┌───────┐
@@ -122,61 +114,119 @@ def count(column: str | Series | None = None) -> Expr | int:
     ╞═══════╡
     │ 3     │
     └───────┘
-    >>> df.group_by("c", maintain_order=True).agg(pl.count())
-    shape: (2, 2)
-    ┌─────┬───────┐
-    │ c   ┆ count │
-    │ --- ┆ ---   │
-    │ str ┆ u32   │
-    ╞═════╪═══════╡
-    │ foo ┆ 2     │
-    │ bar ┆ 1     │
-    └─────┴───────┘
 
-    """
+    Return the number of non-null values in a column.
+
+    >>> df.select(pl.count("a"))
+    shape: (1, 1)
+    ┌─────┐
+    │ a   │
+    │ --- │
+    │ u32 │
+    ╞═════╡
+    │ 2   │
+    └─────┘
+
+    Generate an index column using `count` in conjunction with :func:`int_range`.
+
+    >>> df.select(
+    ...     pl.int_range(pl.count(), dtype=pl.UInt32).alias("index"),
+    ...     pl.all(),
+    ... )
+    shape: (3, 3)
+    ┌───────┬──────┬──────┐
+    │ index ┆ a    ┆ b    │
+    │ ---   ┆ ---  ┆ ---  │
+    │ u32   ┆ i64  ┆ i64  │
+    ╞═══════╪══════╪══════╡
+    │ 0     ┆ 1    ┆ 3    │
+    │ 1     ┆ 2    ┆ null │
+    │ 2     ┆ null ┆ null │
+    └───────┴──────┴──────┘
+    """  # noqa: W505
     if column is None:
         return wrap_expr(plr.count())
 
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `count` is deprecated. Use `Series.len()` instead.",
-            version="0.18.8",
-        )
-        return column.len()
     return F.col(column).count()
+
+
+def cum_count(*names: str, reverse: bool = False) -> Expr:
+    """
+    Return the cumulative count of the values in the column or of the context.
+
+    If no arguments are passed, returns the cumulative count of a context.
+    Rows containing null values count towards the result.
+
+    Otherwise, this function is syntactic sugar for `col(names).cum_count()`.
+
+    Parameters
+    ----------
+    *names
+        Name(s) of the columns to use.
+    reverse
+        Reverse the operation.
+
+    Examples
+    --------
+    Return the row numbers of a context. Note that rows containing null values are
+    counted towards the total.
+
+    >>> df = pl.DataFrame({"a": [1, 2, None], "b": [3, None, None]})
+    >>> df.select(pl.cum_count())
+    shape: (3, 1)
+    ┌───────────┐
+    │ cum_count │
+    │ ---       │
+    │ u32       │
+    ╞═══════════╡
+    │ 1         │
+    │ 2         │
+    │ 3         │
+    └───────────┘
+
+    Return the cumulative count of values in a column.
+
+    >>> df.select(pl.cum_count("a"))
+    shape: (3, 1)
+    ┌─────┐
+    │ a   │
+    │ --- │
+    │ u32 │
+    ╞═════╡
+    │ 0   │
+    │ 1   │
+    │ 2   │
+    └─────┘
+    """
+    if not names:
+        return wrap_expr(plr.cum_count(reverse=reverse))
+    return F.col(*names).cum_count(reverse=reverse)
 
 
 def implode(name: str) -> Expr:
     """
     Aggregate all column values into a list.
 
+    This function is syntactic sugar for `pl.col(name).implode()`.
+
     Parameters
     ----------
     name
-        Name of the column that should be imploded.
-
+        Column name.
     """
     return F.col(name).implode()
 
 
-@overload
 def std(column: str, ddof: int = 1) -> Expr:
-    ...
-
-
-@overload
-def std(column: Series, ddof: int = 1) -> float | None:
-    ...
-
-
-def std(column: str | Series, ddof: int = 1) -> Expr | float | None:
     """
     Get the standard deviation.
+
+    This function is syntactic sugar for `pl.col(column).std(ddof)`.
 
     Parameters
     ----------
     column
-        Column to get the standard deviation from.
+        Column name.
     ddof
         “Delta Degrees of Freedom”: the divisor used in the calculation is N - ddof,
         where N represents the number of elements.
@@ -196,35 +246,20 @@ def std(column: str | Series, ddof: int = 1) -> Expr | float | None:
     └──────────┘
     >>> df["a"].std()
     3.605551275463989
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `std` is deprecated. Use `Series.std()` instead.",
-            version="0.18.8",
-        )
-        return column.std(ddof)
     return F.col(column).std(ddof)
 
 
-@overload
 def var(column: str, ddof: int = 1) -> Expr:
-    ...
-
-
-@overload
-def var(column: Series, ddof: int = 1) -> float | None:
-    ...
-
-
-def var(column: str | Series, ddof: int = 1) -> Expr | float | None:
     """
     Get the variance.
+
+    This function is syntactic sugar for `pl.col(column).var(ddof)`.
 
     Parameters
     ----------
     column
-        Column to get the variance of.
+        Column name.
     ddof
         “Delta Degrees of Freedom”: the divisor used in the calculation is N - ddof,
         where N represents the number of elements.
@@ -244,30 +279,20 @@ def var(column: str | Series, ddof: int = 1) -> Expr | float | None:
     └──────┘
     >>> df["a"].var()
     13.0
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `var` is deprecated. Use `Series.var()` instead.",
-            version="0.18.8",
-        )
-        return column.var(ddof)
     return F.col(column).var(ddof)
 
 
-@overload
 def mean(column: str) -> Expr:
-    ...
-
-
-@overload
-def mean(column: Series) -> float:
-    ...
-
-
-def mean(column: str | Series) -> Expr | float | None:
     """
     Get the mean value.
+
+    This function is syntactic sugar for `pl.col(column).mean()`.
+
+    Parameters
+    ----------
+    column
+        Column name.
 
     Examples
     --------
@@ -281,65 +306,15 @@ def mean(column: str | Series) -> Expr | float | None:
     ╞═════╡
     │ 4.0 │
     └─────┘
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `mean` is deprecated. Use `Series.mean()` instead.",
-            version="0.18.8",
-        )
-        return column.mean()
     return F.col(column).mean()
 
 
-@overload
-def avg(column: str) -> Expr:
-    ...
-
-
-@overload
-def avg(column: Series) -> float:
-    ...
-
-
-@deprecate_renamed_function("mean", version="0.18.12")
-def avg(column: str | Series) -> Expr | float:
-    """
-    Alias for mean.
-
-    .. deprecated:: 0.18.12
-        Use `mean` instead.
-
-    Examples
-    --------
-    >>> df = pl.DataFrame({"a": [1, 8, 3], "b": [4, 5, 2], "c": ["foo", "bar", "foo"]})
-    >>> df.select(pl.avg("a"))  # doctest: +SKIP
-    shape: (1, 1)
-    ┌─────┐
-    │ a   │
-    │ --- │
-    │ f64 │
-    ╞═════╡
-    │ 4.0 │
-    └─────┘
-
-    """
-    return mean(column)
-
-
-@overload
 def median(column: str) -> Expr:
-    ...
-
-
-@overload
-def median(column: Series) -> float | int:
-    ...
-
-
-def median(column: str | Series) -> Expr | float | int | None:
     """
     Get the median value.
+
+    This function is syntactic sugar for `pl.col(column).median()`.
 
     Examples
     --------
@@ -353,30 +328,20 @@ def median(column: str | Series) -> Expr | float | int | None:
     ╞═════╡
     │ 3.0 │
     └─────┘
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `median` is deprecated. Use `Series.median()` instead.",
-            version="0.18.8",
-        )
-        return column.median()
     return F.col(column).median()
 
 
-@overload
 def n_unique(column: str) -> Expr:
-    ...
-
-
-@overload
-def n_unique(column: Series) -> int:
-    ...
-
-
-def n_unique(column: str | Series) -> Expr | int:
     """
     Count unique values.
+
+    This function is syntactic sugar for `pl.col(column).n_unique()`.
+
+    Parameters
+    ----------
+    column
+        Column name.
 
     Examples
     --------
@@ -390,14 +355,7 @@ def n_unique(column: str | Series) -> Expr | int:
     ╞═════╡
     │ 2   │
     └─────┘
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `n_unique` is deprecated. Use `Series.n_unique()` instead.",
-            version="0.18.8",
-        )
-        return column.n_unique()
     return F.col(column).n_unique()
 
 
@@ -410,7 +368,7 @@ def approx_n_unique(column: str | Expr) -> Expr:
     Parameters
     ----------
     column
-        Column name or Series.
+        Column name.
 
     Examples
     --------
@@ -424,39 +382,26 @@ def approx_n_unique(column: str | Expr) -> Expr:
     ╞═════╡
     │ 2   │
     └─────┘
-
     """
     if isinstance(column, pl.Expr):
         return column.approx_n_unique()
     return F.col(column).approx_n_unique()
 
 
-@overload
-def first(column: str) -> Expr:
-    ...
-
-
-@overload
-def first(column: Series) -> Any:
-    ...
-
-
-@overload
-def first(column: None = None) -> Expr:
-    ...
-
-
-def first(column: str | Series | None = None) -> Expr | Any:
+def first(column: str | None = None) -> Expr:
     """
     Get the first value.
 
-    Depending on the input type this function does different things:
+    This function has different behavior depending on the input type:
 
-    input:
+    - `None` -> Expression to take first column of a context.
+    - `str` -> Syntactic sugar for `pl.col(column).first()`.
 
-    - None -> expression to take first column of a context.
-    - str -> syntactic sugar for `pl.col(..).first()`
-    - Series -> Take first value in `Series`
+    Parameters
+    ----------
+    column
+        Column name. If set to `None` (default), returns an expression to take the first
+        column of the context instead.
 
     Examples
     --------
@@ -481,47 +426,27 @@ def first(column: str | Series | None = None) -> Expr | Any:
     ╞═════╡
     │ 1   │
     └─────┘
-
     """
     if column is None:
         return wrap_expr(plr.first())
 
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `first` is deprecated. Use `series[0]` instead.",
-            version="0.18.8",
-        )
-        if column.len() > 0:
-            return column[0]
-        else:
-            raise IndexError("the Series is empty, so no first value can be returned")
     return F.col(column).first()
 
 
-@overload
-def last(column: str) -> Expr:
-    ...
-
-
-@overload
-def last(column: Series) -> Any:
-    ...
-
-
-@overload
-def last(column: None = None) -> Expr:
-    ...
-
-
-def last(column: str | Series | None = None) -> Expr:
+def last(column: str | None = None) -> Expr:
     """
     Get the last value.
 
-    Depending on the input type this function does different things:
+    This function has different behavior depending on the input type:
 
-    - None -> expression to take last column of a context.
-    - str -> syntactic sugar for `pl.col(..).last()`
-    - Series -> Take last value in `Series`
+    - `None` -> Expression to take last column of a context.
+    - `str` -> Syntactic sugar for `pl.col(column).last()`.
+
+    Parameters
+    ----------
+    column
+        Column name. If set to `None` (default), returns an expression to take the last
+        column of the context instead.
 
     Examples
     --------
@@ -546,41 +471,23 @@ def last(column: str | Series | None = None) -> Expr:
     ╞═════╡
     │ 3   │
     └─────┘
-
     """
     if column is None:
         return wrap_expr(plr.last())
 
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `last` is deprecated. Use `series[-1]` instead.",
-            version="0.18.8",
-        )
-        if column.len() > 0:
-            return column[-1]
-        else:
-            raise IndexError("the Series is empty, so no last value can be returned")
     return F.col(column).last()
 
 
-@overload
-def head(column: str, n: int = ...) -> Expr:
-    ...
-
-
-@overload
-def head(column: Series, n: int = ...) -> Series:
-    ...
-
-
-def head(column: str | Series, n: int = 10) -> Expr | Series:
+def head(column: str, n: int = 10) -> Expr:
     """
     Get the first `n` rows.
+
+    This function is syntactic sugar for `pl.col(column).head(n)`.
 
     Parameters
     ----------
     column
-        Column name or Series.
+        Column name.
     n
         Number of rows to return.
 
@@ -608,35 +515,20 @@ def head(column: str | Series, n: int = 10) -> Expr | Series:
     │ 1   │
     │ 8   │
     └─────┘
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `head` is deprecated. Use `Series.head()` instead.",
-            version="0.18.8",
-        )
-        return column.head(n)
     return F.col(column).head(n)
 
 
-@overload
-def tail(column: str, n: int = ...) -> Expr:
-    ...
-
-
-@overload
-def tail(column: Series, n: int = ...) -> Series:
-    ...
-
-
-def tail(column: str | Series, n: int = 10) -> Expr | Series:
+def tail(column: str, n: int = 10) -> Expr:
     """
     Get the last `n` rows.
+
+    This function is syntactic sugar for `pl.col(column).tail(n)`.
 
     Parameters
     ----------
     column
-        Column name or Series.
+        Column name.
     n
         Number of rows to return.
 
@@ -664,14 +556,7 @@ def tail(column: str | Series, n: int = 10) -> Expr | Series:
     │ 8   │
     │ 3   │
     └─────┘
-
     """
-    if isinstance(column, pl.Series):
-        issue_deprecation_warning(
-            "passing a Series to `tail` is deprecated. Use `Series.tail()` instead.",
-            version="0.18.8",
-        )
-        return column.tail(n)
     return F.col(column).tail(n)
 
 
@@ -771,7 +656,6 @@ def cov(a: IntoExpr, b: IntoExpr, ddof: int = 1) -> Expr:
     ╞═════╡
     │ 3.0 │
     └─────┘
-
     """
     a = parse_as_expression(a)
     b = parse_as_expression(b)
@@ -806,7 +690,6 @@ def map_batches(
     --------
     >>> def test_func(a, b, c):
     ...     return a + b + c
-    ...
     >>> df = pl.DataFrame(
     ...     {
     ...         "a": [1, 2, 3, 4],
@@ -832,7 +715,6 @@ def map_batches(
     │ 3   ┆ 6   ┆ 10    │
     │ 4   ┆ 7   ┆ 12    │
     └─────┴─────┴───────┘
-
     """
     exprs = parse_as_list_of_expressions(exprs)
     return wrap_expr(
@@ -867,7 +749,6 @@ def map(
     -------
     Expr
         Expression with the data type given by `return_dtype`.
-
     """
     return map_batches(exprs, function, return_dtype)
 
@@ -989,7 +870,6 @@ def apply(
     -------
     Expr
         Expression with the data type given by `return_dtype`.
-
     """
     return map_groups(exprs, function, return_dtype, returns_scalar=returns_scalar)
 
@@ -1156,7 +1036,6 @@ def reduce(
     │ 3   │
     │ 5   │
     └─────┘
-
     """
     # in case of col("*")
     if isinstance(exprs, pl.Expr):
@@ -1218,7 +1097,6 @@ def cum_fold(
     │ 2   ┆ 4   ┆ 6   ┆ {3,7,13}  │
     │ 3   ┆ 5   ┆ 7   ┆ {4,9,16}  │
     └─────┴─────┴─────┴───────────┘
-
     """
     # in case of col("*")
     acc = parse_as_expression(acc, str_as_lit=True)
@@ -1313,7 +1191,6 @@ def arctan2(y: str | Expr, x: str | Expr) -> Expr:
     │ 135.0  ┆ 2.356194  │
     │ -135.0 ┆ -2.356194 │
     └────────┴───────────┘
-
     """
     if isinstance(y, str):
         y = F.col(y)
@@ -1360,7 +1237,6 @@ def arctan2d(y: str | Expr, x: str | Expr) -> Expr:
     │ 135.0  ┆ 2.356194  │
     │ -135.0 ┆ -2.356194 │
     └────────┴───────────┘
-
     """
     if isinstance(y, str):
         y = F.col(y)
@@ -1370,21 +1246,28 @@ def arctan2d(y: str | Expr, x: str | Expr) -> Expr:
 
 
 def exclude(
-    columns: str | PolarsDataType | Collection[str] | Collection[PolarsDataType],
-    *more_columns: str | PolarsDataType,
+    columns: (
+        str
+        | PolarsDataType
+        | SelectorType
+        | Expr
+        | Collection[str | PolarsDataType | SelectorType | Expr]
+    ),
+    *more_columns: str | PolarsDataType | SelectorType | Expr,
 ) -> Expr:
     """
-    Represent all columns except for the given columns.
+    Select all columns except those matching the given columns, datatypes, or selectors.
 
-    Syntactic sugar for `pl.all().exclude(columns)`.
+    .. versionchanged:: 0.20.3
+        This function is now a simple redirect to the `cs.exclude()` selector.
 
     Parameters
     ----------
     columns
-        The name or datatype of the column(s) to exclude. Accepts regular expression
-        input. Regular expressions should start with `^` and end with `$`.
+        One or more columns (col or name), datatypes, columns, or selectors representing
+        the columns to exclude.
     *more_columns
-        Additional names or datatypes of columns to exclude, specified as positional
+        Additional columns, datatypes, or selectors to exclude, specified as positional
         arguments.
 
     Examples
@@ -1398,7 +1281,7 @@ def exclude(
     ...         "cc": [None, 2.5, 1.5],
     ...     }
     ... )
-    >>> df.select(pl.exclude("ba"))
+    >>> df.select(pl.exclude("ba", "xx"))
     shape: (3, 2)
     ┌─────┬──────┐
     │ aa  ┆ cc   │
@@ -1426,7 +1309,7 @@ def exclude(
 
     Exclude by dtype(s), e.g. removing all columns of type Int64 or Float64:
 
-    >>> df.select(pl.exclude([pl.Int64, pl.Float64]))
+    >>> df.select(pl.exclude(pl.Int64, pl.Float64))
     shape: (3, 1)
     ┌──────┐
     │ ba   │
@@ -1438,8 +1321,24 @@ def exclude(
     │ null │
     └──────┘
 
+    Exclude column using a compound selector:
+
+    >>> import polars.selectors as cs
+    >>> df.select(pl.exclude(cs.first() | cs.last()))
+    shape: (3, 1)
+    ┌──────┐
+    │ ba   │
+    │ ---  │
+    │ str  │
+    ╞══════╡
+    │ a    │
+    │ b    │
+    │ null │
+    └──────┘
     """
-    return F.col("*").exclude(columns, *more_columns)
+    from polars.selectors import exclude
+
+    return exclude(columns, *more_columns)
 
 
 def groups(column: str) -> Expr:
@@ -1463,7 +1362,6 @@ def quantile(
         Quantile between 0.0 and 1.0.
     interpolation : {'nearest', 'higher', 'lower', 'midpoint', 'linear'}
         Interpolation method.
-
     """
     return F.col(column).quantile(quantile, interpolation)
 
@@ -1525,7 +1423,6 @@ def arg_sort_by(
     │ 0   │
     │ 3   │
     └─────┘
-
     """
     exprs = parse_as_list_of_expressions(exprs, *more_exprs)
 
@@ -1538,11 +1435,8 @@ def arg_sort_by(
     return wrap_expr(plr.arg_sort_by(exprs, descending))
 
 
-@deprecate_renamed_parameter(
-    "common_subplan_elimination", "comm_subplan_elim", version="0.18.9"
-)
 def collect_all(
-    lazy_frames: Sequence[LazyFrame],
+    lazy_frames: Iterable[LazyFrame],
     *,
     type_coercion: bool = True,
     predicate_pushdown: bool = True,
@@ -1586,7 +1480,6 @@ def collect_all(
     -------
     list of DataFrames
         The collected DataFrames, returned in the same order as the input LazyFrames.
-
     """
     if no_optimization:
         predicate_pushdown = False
@@ -1621,7 +1514,7 @@ def collect_all(
 
 @overload
 def collect_all_async(
-    lazy_frames: Sequence[LazyFrame],
+    lazy_frames: Iterable[LazyFrame],
     *,
     gevent: Literal[True],
     type_coercion: bool = True,
@@ -1639,7 +1532,7 @@ def collect_all_async(
 
 @overload
 def collect_all_async(
-    lazy_frames: Sequence[LazyFrame],
+    lazy_frames: Iterable[LazyFrame],
     *,
     gevent: Literal[False] = False,
     type_coercion: bool = True,
@@ -1656,7 +1549,7 @@ def collect_all_async(
 
 
 def collect_all_async(
-    lazy_frames: Sequence[LazyFrame],
+    lazy_frames: Iterable[LazyFrame],
     *,
     gevent: bool = False,
     type_coercion: bool = True,
@@ -1778,7 +1671,7 @@ def select(*exprs: IntoExpr | Iterable[IntoExpr], **named_exprs: IntoExpr) -> Da
     --------
     >>> foo = pl.Series("foo", [1, 2, 3])
     >>> bar = pl.Series("bar", [3, 2, 1])
-    >>> pl.select(pl.min_horizontal(foo, bar))
+    >>> pl.select(min=pl.min_horizontal(foo, bar))
     shape: (3, 1)
     ┌─────┐
     │ min │
@@ -1789,7 +1682,6 @@ def select(*exprs: IntoExpr | Iterable[IntoExpr], **named_exprs: IntoExpr) -> Da
     │ 2   │
     │ 1   │
     └─────┘
-
     """
     return pl.DataFrame().select(*exprs, **named_exprs)
 
@@ -1839,7 +1731,6 @@ def arg_where(condition: Expr | Series, *, eager: bool = False) -> Expr | Series
         1
         3
     ]
-
     """
     if eager:
         if not isinstance(condition, pl.Series):
@@ -1898,7 +1789,6 @@ def coalesce(exprs: IntoExpr | Iterable[IntoExpr], *more_exprs: IntoExpr) -> Exp
     │ null ┆ null ┆ 3    ┆ 3.0  │
     │ null ┆ null ┆ null ┆ 10.0 │
     └──────┴──────┴──────┴──────┘
-
     """
     exprs = parse_as_list_of_expressions(exprs, *more_exprs)
     return wrap_expr(plr.coalesce(exprs))
@@ -1961,7 +1851,6 @@ def from_epoch(
             2003-10-20
             2003-10-21
     ]
-
     """
     if isinstance(column, str):
         column = F.col(column)
@@ -2008,7 +1897,6 @@ def rolling_cov(
     ddof
         Delta degrees of freedom.  The divisor used in calculations
         is `N - ddof`, where `N` represents the number of elements.
-
     """
     if min_periods is None:
         min_periods = window_size
@@ -2049,7 +1937,6 @@ def rolling_corr(
     ddof
         Delta degrees of freedom.  The divisor used in calculations
         is `N - ddof`, where `N` represents the number of elements.
-
     """
     if min_periods is None:
         min_periods = window_size
@@ -2063,7 +1950,7 @@ def rolling_corr(
 
 
 @overload
-def sql_expr(sql: str) -> Expr:  # type: ignore[misc]
+def sql_expr(sql: str) -> Expr:  # type: ignore[overload-overlap]
     ...
 
 

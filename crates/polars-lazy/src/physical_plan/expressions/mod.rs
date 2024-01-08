@@ -23,6 +23,7 @@ use std::fmt::{Display, Formatter};
 pub(crate) use aggregation::*;
 pub(crate) use alias::*;
 pub(crate) use apply::*;
+use arrow::array::ArrayRef;
 use arrow::legacy::utils::CustomIterTools;
 pub(crate) use binary::*;
 pub(crate) use cast::*;
@@ -132,6 +133,14 @@ pub struct AggregationContext<'a> {
 }
 
 impl<'a> AggregationContext<'a> {
+    pub(crate) fn dtype(&self) -> DataType {
+        match &self.state {
+            AggState::Literal(s) => s.dtype().clone(),
+            AggState::AggregatedList(s) => s.list().unwrap().inner_dtype(),
+            AggState::AggregatedScalar(s) => s.dtype().clone(),
+            AggState::NotAggregated(s) => s.dtype().clone(),
+        }
+    }
     pub(crate) fn groups(&mut self) -> &Cow<'a, GroupsProxy> {
         match self.update_groups {
             UpdateGroups::No => {},
@@ -608,7 +617,6 @@ pub trait PhysicalExpr: Send + Sync {
     /// Can take &dyn Statistics and determine of a file should be
     /// read -> `true`
     /// or not -> `false`
-    #[cfg(feature = "parquet")]
     fn as_stats_evaluator(&self) -> Option<&dyn polars_io::predicates::StatsEvaluator> {
         None
     }

@@ -8,7 +8,7 @@ use std::ops::{Add, Div, Mul, Rem, Sub};
 use arrow::array::PrimitiveArray;
 use arrow::compute::arithmetics::basic;
 use arrow::compute::arity_assign;
-use arrow::legacy::utils::combine_validities_and;
+use arrow::compute::utils::combine_validities_and;
 use arrow::types::NativeType;
 use num_traits::{Num, NumCast, ToPrimitive, Zero};
 pub(super) use numeric::arithmetic_helper;
@@ -71,27 +71,27 @@ fn concat_binary_arrs(l: &[u8], r: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(r);
 }
 
-impl Add for &Utf8Chunked {
-    type Output = Utf8Chunked;
+impl Add for &StringChunked {
+    type Output = StringChunked;
 
     fn add(self, rhs: Self) -> Self::Output {
-        unsafe { (self.as_binary() + rhs.as_binary()).to_utf8() }
+        unsafe { (self.as_binary() + rhs.as_binary()).to_string() }
     }
 }
 
-impl Add for Utf8Chunked {
-    type Output = Utf8Chunked;
+impl Add for StringChunked {
+    type Output = StringChunked;
 
     fn add(self, rhs: Self) -> Self::Output {
         (&self).add(&rhs)
     }
 }
 
-impl Add<&str> for &Utf8Chunked {
-    type Output = Utf8Chunked;
+impl Add<&str> for &StringChunked {
+    type Output = StringChunked;
 
     fn add(self, rhs: &str) -> Self::Output {
-        unsafe { ((&self.as_binary()) + rhs.as_bytes()).to_utf8() }
+        unsafe { ((&self.as_binary()) + rhs.as_bytes()).to_string() }
     }
 }
 

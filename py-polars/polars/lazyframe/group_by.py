@@ -133,7 +133,6 @@ class LazyGroupBy:
         │ c   ┆ 3     ┆ 1.0            │
         │ b   ┆ 5     ┆ 10.0           │
         └─────┴───────┴────────────────┘
-
         """
         if aggs and isinstance(aggs[0], dict):
             raise TypeError(
@@ -213,7 +212,6 @@ class LazyGroupBy:
         ...     .filter(pl.int_range(0, pl.count()).shuffle().over("color") < 2)
         ...     .collect()
         ... )  # doctest: +IGNORE_RESULT
-
         """
         return wrap_ldf(self.lgb.map_groups(function, schema))
 
@@ -261,7 +259,6 @@ class LazyGroupBy:
         │ c       ┆ 1   │
         │ c       ┆ 2   │
         └─────────┴─────┘
-
         """
         return wrap_ldf(self.lgb.head(n))
 
@@ -309,7 +306,6 @@ class LazyGroupBy:
         │ c       ┆ 2   │
         │ c       ┆ 4   │
         └─────────┴─────┘
-
         """
         return wrap_ldf(self.lgb.tail(n))
 
@@ -335,39 +331,33 @@ class LazyGroupBy:
         │ one ┆ [1, 3]    │
         │ two ┆ [2, 4]    │
         └─────┴───────────┘
-
         """
         return self.agg(F.all())
 
     def count(self) -> LazyFrame:
         """
-        Count the number of values in each group.
+        Return the number of rows in each group.
 
-        .. warning::
-            `null` is deemed a value in this context.
+        Rows containing null values count towards the total.
 
         Examples
         --------
-        >>> ldf = pl.DataFrame(
+        >>> lf = pl.LazyFrame(
         ...     {
-        ...         "a": [1, 2, 2, 3, 4, 5],
-        ...         "b": [0.5, 0.5, 4, 10, 13, 14],
-        ...         "c": [True, True, True, False, False, True],
-        ...         "d": ["Apple", "Orange", "Apple", "Apple", "Banana", "Banana"],
+        ...         "a": ["apple", "apple", "orange"],
+        ...         "b": [1, None, 2],
         ...     }
-        ... ).lazy()
-        >>> ldf.group_by("d", maintain_order=True).count().collect()
-        shape: (3, 2)
+        ... )
+        >>> lf.group_by("a").count().collect()  # doctest: +SKIP
+        shape: (2, 2)
         ┌────────┬───────┐
-        │ d      ┆ count │
+        │ a      ┆ count │
         │ ---    ┆ ---   │
         │ str    ┆ u32   │
         ╞════════╪═══════╡
-        │ Apple  ┆ 3     │
-        │ Orange ┆ 1     │
-        │ Banana ┆ 2     │
+        │ apple  ┆ 2     │
+        │ orange ┆ 1     │
         └────────┴───────┘
-
         """
         return self.agg(F.count())
 
@@ -396,7 +386,6 @@ class LazyGroupBy:
         │ Orange ┆ 2   ┆ 0.5  ┆ true  │
         │ Banana ┆ 4   ┆ 13.0 ┆ false │
         └────────┴─────┴──────┴───────┘
-
         """
         return self.agg(F.all().first())
 
@@ -425,7 +414,6 @@ class LazyGroupBy:
         │ Orange ┆ 2   ┆ 0.5  ┆ true  │
         │ Banana ┆ 5   ┆ 14.0 ┆ true  │
         └────────┴─────┴──────┴───────┘
-
         """
         return self.agg(F.all().last())
 
@@ -454,7 +442,6 @@ class LazyGroupBy:
         │ Orange ┆ 2   ┆ 0.5  ┆ true │
         │ Banana ┆ 5   ┆ 14.0 ┆ true │
         └────────┴─────┴──────┴──────┘
-
         """
         return self.agg(F.all().max())
 
@@ -483,7 +470,6 @@ class LazyGroupBy:
         │ Orange ┆ 2.0 ┆ 0.5      ┆ 1.0      │
         │ Banana ┆ 4.5 ┆ 13.5     ┆ 0.5      │
         └────────┴─────┴──────────┴──────────┘
-
         """
         return self.agg(F.all().mean())
 
@@ -510,7 +496,6 @@ class LazyGroupBy:
         │ Apple  ┆ 2.0 ┆ 4.0  │
         │ Banana ┆ 4.0 ┆ 13.0 │
         └────────┴─────┴──────┘
-
         """
         return self.agg(F.all().median())
 
@@ -539,7 +524,6 @@ class LazyGroupBy:
         │ Orange ┆ 2   ┆ 0.5  ┆ true  │
         │ Banana ┆ 4   ┆ 13.0 ┆ false │
         └────────┴─────┴──────┴───────┘
-
         """
         return self.agg(F.all().min())
 
@@ -566,7 +550,6 @@ class LazyGroupBy:
         │ Apple  ┆ 2   ┆ 2   │
         │ Banana ┆ 3   ┆ 3   │
         └────────┴─────┴─────┘
-
         """
         return self.agg(F.all().n_unique())
 
@@ -603,7 +586,6 @@ class LazyGroupBy:
         │ Orange ┆ 2.0 ┆ 0.5  │
         │ Banana ┆ 5.0 ┆ 14.0 │
         └────────┴─────┴──────┘
-
         """
         return self.agg(F.all().quantile(quantile, interpolation=interpolation))
 
@@ -632,7 +614,6 @@ class LazyGroupBy:
         │ Orange ┆ 2   ┆ 0.5  ┆ 1   │
         │ Banana ┆ 9   ┆ 27.0 ┆ 1   │
         └────────┴─────┴──────┴─────┘
-
         """
         return self.agg(F.all().sum())
 
@@ -656,6 +637,5 @@ class LazyGroupBy:
             Schema of the output function. This has to be known statically. If the
             given schema is incorrect, this is a bug in the caller's query and may
             lead to errors. If set to None, polars assumes the schema is unchanged.
-
         """
         return self.map_groups(function, schema)

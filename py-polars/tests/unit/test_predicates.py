@@ -6,6 +6,7 @@ import pytest
 
 import polars as pl
 from polars.testing import assert_frame_equal
+from polars.testing.asserts.series import assert_series_equal
 
 
 def test_predicate_4906() -> None:
@@ -108,10 +109,10 @@ def test_predicate_arr_first_6573() -> None:
 def test_fast_path_comparisons() -> None:
     s = pl.Series(np.sort(np.random.randint(0, 50, 100)))
 
-    assert (s > 25).series_equal(s.set_sorted() > 25)
-    assert (s >= 25).series_equal(s.set_sorted() >= 25)
-    assert (s < 25).series_equal(s.set_sorted() < 25)
-    assert (s <= 25).series_equal(s.set_sorted() <= 25)
+    assert_series_equal(s > 25, s.set_sorted() > 25)
+    assert_series_equal(s >= 25, s.set_sorted() >= 25)
+    assert_series_equal(s < 25, s.set_sorted() < 25)
+    assert_series_equal(s <= 25, s.set_sorted() <= 25)
 
 
 def test_predicate_pushdown_block_8661() -> None:
@@ -232,13 +233,13 @@ def test_no_predicate_push_down_with_cast_and_alias_11883() -> None:
 )
 def test_invalid_filter_predicates(predicate: Any) -> None:
     df = pl.DataFrame({"colx": ["aa", "bb", "cc", "dd"]})
-    with pytest.raises(ValueError, match="invalid predicate"):
+    with pytest.raises(TypeError, match="invalid predicate"):
         df.filter(predicate)
 
 
 def test_fast_path_boolean_filter_predicates() -> None:
     df = pl.DataFrame({"colx": ["aa", "bb", "cc", "dd"]})
-    assert_frame_equal(df.filter(False), pl.DataFrame(schema={"colx": pl.Utf8}))
+    assert_frame_equal(df.filter(False), pl.DataFrame(schema={"colx": pl.String}))
     assert_frame_equal(df.filter(True), df)
 
 
@@ -252,7 +253,9 @@ def test_predicate_pushdown_boundary_12102() -> None:
         .filter(pl.col("y") > 2)
     )
 
-    assert lf.collect().frame_equal(lf.collect(predicate_pushdown=False))
+    result = lf.collect()
+    result_no_ppd = lf.collect(predicate_pushdown=False)
+    assert_frame_equal(result, result_no_ppd)
 
 
 def test_take_can_block_predicate_pushdown() -> None:
@@ -290,3 +293,176 @@ def test_literal_series_expr_predicate_pushdown() -> None:
 
     assert "FILTER" not in lf.explain()
     assert lf.collect().to_series().to_list() == [1]
+
+
+def test_multi_alias_pushdown() -> None:
+    lf = pl.LazyFrame({"a": [1], "b": [1]})
+
+    actual = lf.with_columns(m="a", n="b").filter((pl.col("m") + pl.col("n")) < 2)
+
+    plan = actual.explain()
+    assert "FILTER" not in plan
+    assert r'SELECTION: "[([(col(\"a\")) + (col(\"b\"))]) < (2)]' in plan
+
+
+def test_predicate_pushdown_with_window_projections_12637() -> None:
+    lf = pl.LazyFrame(
+        {
+            "key": [1],
+            "key_2": [1],
+            "key_3": [1],
+            "value": [1],
+            "value_2": [1],
+            "value_3": [1],
+        }
+    )
+
+    actual = lf.with_columns(
+        (pl.col("value") * 2).over("key").alias("value_2"),
+        (pl.col("value") * 2).over("key").alias("value_3"),
+    ).filter(pl.col("key") == 5)
+
+    plan = actual.explain()
+    assert "FILTER" not in plan
+    assert r'SELECTION: "[(col(\"key\")) == (5)]"' in plan
+
+    actual = (
+        lf.with_columns(
+            (pl.col("value") * 2).over("key", "key_2").alias("value_2"),
+            (pl.col("value") * 2).over("key", "key_2").alias("value_3"),
+        )
+        .filter(pl.col("key") == 5)
+        .filter(pl.col("key_2") == 5)
+    )
+
+    plan = actual.explain()
+    assert "FILTER" not in plan
+    assert (
+        # hashbrown::HashMap is unordered.
+        r'SELECTION: "[([(col(\"key\")) == (5)]) & ([(col(\"key_2\")) == (5)])]"'
+        in plan
+        or r'SELECTION: "[([(col(\"key_2\")) == (5)]) & ([(col(\"key\")) == (5)])]"'
+        in plan
+    )
+
+    actual = (
+        lf.with_columns(
+            (pl.col("value") * 2).over("key", "key_2").alias("value_2"),
+            (pl.col("value") * 2).over("key", "key_3").alias("value_3"),
+        )
+        .filter(pl.col("key") == 5)
+        .filter(pl.col("key_2") == 5)
+    )
+
+    plan = actual.explain()
+    assert "FILTER" in plan
+    assert r'SELECTION: "[(col(\"key\")) == (5)]"' in plan
+
+    actual = (
+        lf.with_columns(
+            (pl.col("value") * 2).over("key", pl.col("key_2") + 1).alias("value_2"),
+            (pl.col("value") * 2).over("key", "key_2").alias("value_3"),
+        )
+        .filter(pl.col("key") == 5)
+        .filter(pl.col("key_2") == 5)
+    )
+    plan = actual.explain()
+    assert "FILTER" in plan
+    assert r'SELECTION: "[(col(\"key\")) == (5)]"' in plan
+
+    # Should block when .over() contains groups-sensitive expr
+    actual = (
+        lf.with_columns(
+            (pl.col("value") * 2).over("key", pl.sum("key_2")).alias("value_2"),
+            (pl.col("value") * 2).over("key", "key_2").alias("value_3"),
+        )
+        .filter(pl.col("key") == 5)
+        .filter(pl.col("key_2") == 5)
+    )
+
+    plan = actual.explain()
+    assert "FILTER" in plan
+    assert 'SELECTION: "None"' in plan
+
+    # Ensure the implementation doesn't accidentally push a window expression
+    # that only refers to the common window keys.
+    actual = lf.with_columns(
+        (pl.col("value") * 2).over("key").alias("value_2"),
+    ).filter(pl.count().over("key") == 1)
+
+    plan = actual.explain()
+    assert r'FILTER [(count().over([col("key")])) == (1)]' in plan
+    assert 'SELECTION: "None"' in plan
+
+    # Test window in filter
+    actual = lf.filter(pl.count().over("key") == 1).filter(pl.col("key") == 1)
+    plan = actual.explain()
+    assert r'FILTER [(count().over([col("key")])) == (1)]' in plan
+    assert r'SELECTION: "[(col(\"key\")) == (1)]"' in plan
+
+
+def test_predicate_reduction() -> None:
+    # ensure we get clean reduction without casts
+    assert (
+        "cast"
+        not in pl.LazyFrame({"a": [1], "b": [2]})
+        .filter(
+            [
+                pl.col("a") > 1,
+                pl.col("b") > 1,
+            ]
+        )
+        .explain()
+    )
+
+
+def test_all_any_cleanup_at_single_predicate_case() -> None:
+    plan = pl.LazyFrame({"a": [1], "b": [2]}).select(["a"]).drop_nulls().explain()
+    assert "horizontal" not in plan
+    assert "all" not in plan
+
+
+def test_hconcat_predicate() -> None:
+    # Predicates shouldn't be pushed down past an hconcat as we can't filter
+    # across the different inputs
+    lf1 = pl.LazyFrame(
+        {
+            "a1": [0, 1, 2, 3, 4],
+            "a2": [5, 6, 7, 8, 9],
+        }
+    )
+    lf2 = pl.LazyFrame(
+        {
+            "b1": [0, 1, 2, 3, 4],
+            "b2": [5, 6, 7, 8, 9],
+        }
+    )
+
+    query = pl.concat(
+        [
+            lf1.filter(pl.col("a1") < 4),
+            lf2.filter(pl.col("b1") > 0),
+        ],
+        how="horizontal",
+    ).filter(pl.col("b2") < 9)
+
+    expected = pl.DataFrame(
+        {
+            "a1": [0, 1, 2],
+            "a2": [5, 6, 7],
+            "b1": [1, 2, 3],
+            "b2": [6, 7, 8],
+        }
+    )
+
+    result = query.collect(predicate_pushdown=True)
+    assert_frame_equal(result, expected)
+
+
+def test_predicate_pd_join_13300() -> None:
+    lf = pl.LazyFrame({"col3": range(10, 14), "new_col": range(11, 15)})
+    lf_other = pl.LazyFrame({"col4": [0, 11, 2, 13]})
+
+    lf = lf.join(lf_other, left_on="new_col", right_on="col4", how="left")
+    lf = lf.filter(pl.col("new_col") < 12)
+    assert lf.collect().to_dict(as_series=False) == {"col3": [10], "new_col": [11]}

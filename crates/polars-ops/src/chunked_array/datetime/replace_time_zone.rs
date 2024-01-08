@@ -5,19 +5,15 @@ use arrow::temporal_conversions::{
     timestamp_ms_to_datetime, timestamp_ns_to_datetime, timestamp_us_to_datetime,
 };
 use chrono::NaiveDateTime;
-use chrono_tz::{Tz, UTC};
+use chrono_tz::UTC;
 use polars_core::chunked_array::ops::arity::try_binary_elementwise;
+use polars_core::chunked_array::temporal::parse_time_zone;
 use polars_core::prelude::*;
-
-fn parse_time_zone(s: &str) -> PolarsResult<Tz> {
-    s.parse()
-        .map_err(|e| polars_err!(ComputeError: format!("unable to parse time zone: '{s}': {e}")))
-}
 
 pub fn replace_time_zone(
     datetime: &Logical<DatetimeType, Int64Type>,
     time_zone: Option<&str>,
-    ambiguous: &Utf8Chunked,
+    ambiguous: &StringChunked,
 ) -> PolarsResult<DatetimeChunked> {
     let from_time_zone = datetime.time_zone().as_deref().unwrap_or("UTC");
     let from_tz = parse_time_zone(from_time_zone)?;

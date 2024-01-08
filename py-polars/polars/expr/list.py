@@ -58,7 +58,6 @@ class ExprListNameSpace:
         │ []             ┆ true  │
         │ null           ┆ null  │
         └────────────────┴───────┘
-
         """
         return wrap_expr(self._pyexpr.list_all())
 
@@ -85,7 +84,6 @@ class ExprListNameSpace:
         │ []             ┆ false │
         │ null           ┆ null  │
         └────────────────┴───────┘
-
         """
         return wrap_expr(self._pyexpr.list_any())
 
@@ -93,7 +91,7 @@ class ExprListNameSpace:
         """
         Return the number of elements in each list.
 
-        Null values are treated like regular elements in this context.
+        Null values count towards the total.
 
         Returns
         -------
@@ -113,7 +111,6 @@ class ExprListNameSpace:
         │ [1, 2, null] ┆ 3   │
         │ [5]          ┆ 1   │
         └──────────────┴─────┘
-
         """
         return wrap_expr(self._pyexpr.list_len())
 
@@ -137,7 +134,6 @@ class ExprListNameSpace:
         │ [null]         ┆ []         │
         │ [3, 4]         ┆ [3, 4]     │
         └────────────────┴────────────┘
-
         """
         return wrap_expr(self._pyexpr.list_drop_nulls())
 
@@ -181,7 +177,6 @@ class ExprListNameSpace:
         │ [1, 2, 3] ┆ 2   ┆ [2, 1]    │
         │ [4, 5]    ┆ 1   ┆ [5]       │
         └───────────┴─────┴───────────┘
-
         """
         if n is not None and fraction is not None:
             raise ValueError("cannot specify both `n` and `fraction`")
@@ -216,7 +211,6 @@ class ExprListNameSpace:
         │ [1]       ┆ 1   │
         │ [2, 3]    ┆ 5   │
         └───────────┴─────┘
-
         """
         return wrap_expr(self._pyexpr.list_sum())
 
@@ -237,7 +231,6 @@ class ExprListNameSpace:
         │ [1]       ┆ 1   │
         │ [2, 3]    ┆ 3   │
         └───────────┴─────┘
-
         """
         return wrap_expr(self._pyexpr.list_max())
 
@@ -258,7 +251,6 @@ class ExprListNameSpace:
         │ [1]       ┆ 1   │
         │ [2, 3]    ┆ 2   │
         └───────────┴─────┘
-
         """
         return wrap_expr(self._pyexpr.list_min())
 
@@ -269,17 +261,16 @@ class ExprListNameSpace:
         Examples
         --------
         >>> df = pl.DataFrame({"values": [[1], [2, 3]]})
-        >>> df.with_columns(min=pl.col("values").list.mean())
+        >>> df.with_columns(mean=pl.col("values").list.mean())
         shape: (2, 2)
-        ┌───────────┬─────┐
-        │ values    ┆ min │
-        │ ---       ┆ --- │
-        │ list[i64] ┆ f64 │
-        ╞═══════════╪═════╡
-        │ [1]       ┆ 1.0 │
-        │ [2, 3]    ┆ 2.5 │
-        └───────────┴─────┘
-
+        ┌───────────┬──────┐
+        │ values    ┆ mean │
+        │ ---       ┆ ---  │
+        │ list[i64] ┆ f64  │
+        ╞═══════════╪══════╡
+        │ [1]       ┆ 1.0  │
+        │ [2, 3]    ┆ 2.5  │
+        └───────────┴──────┘
         """
         return wrap_expr(self._pyexpr.list_mean())
 
@@ -319,7 +310,6 @@ class ExprListNameSpace:
         │ [3, 2, 1] ┆ [3, 2, 1] │
         │ [9, 1, 2] ┆ [9, 2, 1] │
         └───────────┴───────────┘
-
         """
         return wrap_expr(self._pyexpr.list_sort(descending))
 
@@ -344,7 +334,6 @@ class ExprListNameSpace:
         │ [3, 2, 1] ┆ [1, 2, 3] │
         │ [9, 1, 2] ┆ [2, 1, 9] │
         └───────────┴───────────┘
-
         """
         return wrap_expr(self._pyexpr.list_reverse())
 
@@ -373,7 +362,6 @@ class ExprListNameSpace:
         ╞═══════════╪═══════════╡
         │ [1, 1, 2] ┆ [1, 2]    │
         └───────────┴───────────┘
-
         """
         return wrap_expr(self._pyexpr.list_unique(maintain_order))
 
@@ -404,7 +392,6 @@ class ExprListNameSpace:
         │ ["a"]     ┆ ["b", "c"] ┆ ["a", "b", "c"] │
         │ ["x"]     ┆ ["y", "z"] ┆ ["x", "y", "z"] │
         └───────────┴────────────┴─────────────────┘
-
         """
         if isinstance(other, list) and (
             not isinstance(other[0], (pl.Expr, str, pl.Series))
@@ -444,7 +431,6 @@ class ExprListNameSpace:
         │ []        ┆ null │
         │ [1, 2]    ┆ 1    │
         └───────────┴──────┘
-
         """
         index = parse_as_expression(index)
         return wrap_expr(self._pyexpr.list_get(index))
@@ -509,7 +495,6 @@ class ExprListNameSpace:
         │ []        ┆ null  │
         │ [1, 2]    ┆ 1     │
         └───────────┴───────┘
-
         """
         return self.get(0)
 
@@ -531,7 +516,6 @@ class ExprListNameSpace:
         │ []        ┆ null │
         │ [1, 2]    ┆ 2    │
         └───────────┴──────┘
-
         """
         return self.get(-1)
 
@@ -565,7 +549,6 @@ class ExprListNameSpace:
         │ []        ┆ false    │
         │ [1, 2]    ┆ true     │
         └───────────┴──────────┘
-
         """
         item = parse_as_expression(item, str_as_lit=True)
         return wrap_expr(self._pyexpr.list_contains(item))
@@ -574,7 +557,7 @@ class ExprListNameSpace:
         """
         Join all string items in a sublist and place a separator between them.
 
-        This errors if inner type of list `!= Utf8`.
+        This errors if inner type of list `!= String`.
 
         Parameters
         ----------
@@ -584,7 +567,7 @@ class ExprListNameSpace:
         Returns
         -------
         Expr
-            Expression of data type :class:`Utf8`.
+            Expression of data type :class:`String`.
 
         Examples
         --------
@@ -613,7 +596,6 @@ class ExprListNameSpace:
         │ ["a", "b", "c"] ┆ *         ┆ a*b*c │
         │ ["x", "y"]      ┆ _         ┆ x_y   │
         └─────────────────┴───────────┴───────┘
-
         """
         separator = parse_as_expression(separator, str_as_lit=True)
         return wrap_expr(self._pyexpr.list_join(separator))
@@ -645,7 +627,6 @@ class ExprListNameSpace:
         │ [1, 2]    ┆ 0       │
         │ [2, 1]    ┆ 1       │
         └───────────┴─────────┘
-
         """
         return wrap_expr(self._pyexpr.list_arg_min())
 
@@ -676,7 +657,6 @@ class ExprListNameSpace:
         │ [1, 2]    ┆ 1       │
         │ [2, 1]    ┆ 0       │
         └───────────┴─────────┘
-
         """
         return wrap_expr(self._pyexpr.list_arg_max())
 
@@ -726,7 +706,6 @@ class ExprListNameSpace:
         │ [1, 2, … 4] ┆ [2, 2]    │
         │ [10, 2, 1]  ┆ [-9]      │
         └─────────────┴───────────┘
-
         """
         return wrap_expr(self._pyexpr.list_diff(n, null_behavior))
 
@@ -774,7 +753,6 @@ class ExprListNameSpace:
         │ [1, 2, 3] ┆ [3, null, null] │
         │ [4, 5]    ┆ [null, null]    │
         └───────────┴─────────────────┘
-
         """
         n = parse_as_expression(n)
         return wrap_expr(self._pyexpr.list_shift(n))
@@ -806,7 +784,6 @@ class ExprListNameSpace:
         │ [1, 2, … 4] ┆ [2, 3]    │
         │ [10, 2, 1]  ┆ [2, 1]    │
         └─────────────┴───────────┘
-
         """
         offset = parse_as_expression(offset)
         length = parse_as_expression(length)
@@ -834,7 +811,6 @@ class ExprListNameSpace:
         │ [1, 2, … 4] ┆ [1, 2]    │
         │ [10, 2, 1]  ┆ [10, 2]   │
         └─────────────┴───────────┘
-
         """
         return self.slice(0, n)
 
@@ -860,7 +836,6 @@ class ExprListNameSpace:
         │ [1, 2, … 4] ┆ [3, 4]    │
         │ [10, 2, 1]  ┆ [2, 1]    │
         └─────────────┴───────────┘
-
         """
         n = parse_as_expression(n)
         return wrap_expr(self._pyexpr.list_tail(n))
@@ -895,7 +870,6 @@ class ExprListNameSpace:
         │ 5   │
         │ 6   │
         └─────┘
-
         """
         return wrap_expr(self._pyexpr.explode())
 
@@ -924,7 +898,6 @@ class ExprListNameSpace:
         │ [1, 2, 1]   ┆ 1              │
         │ [4, 4]      ┆ 0              │
         └─────────────┴────────────────┘
-
         """
         element = parse_as_expression(element, str_as_lit=True)
         return wrap_expr(self._pyexpr.list_count_matches(element))
@@ -959,7 +932,6 @@ class ExprListNameSpace:
         │ [1, 2]   ┆ [1, 2]       │
         │ [3, 4]   ┆ [3, 4]       │
         └──────────┴──────────────┘
-
         """
         return wrap_expr(self._pyexpr.list_to_array(width))
 
@@ -1051,17 +1023,14 @@ class ExprListNameSpace:
         ...     named=True
         ... )
         [{'n': {'one': 0, 'two': 1}}, {'n': {'one': 2, 'two': 3}}]
-
         """
         if isinstance(fields, Sequence):
             field_names = list(fields)
-
-            def fields(idx: int) -> str:
-                return field_names[idx]
-
-        return wrap_expr(
-            self._pyexpr.list_to_struct(n_field_strategy, fields, upper_bound)
-        )
+            pyexpr = self._pyexpr.list_to_struct(n_field_strategy, None, upper_bound)
+            return wrap_expr(pyexpr).struct.rename_fields(field_names)
+        else:
+            pyexpr = self._pyexpr.list_to_struct(n_field_strategy, fields, upper_bound)
+            return wrap_expr(pyexpr)
 
     def eval(self, expr: Expr, *, parallel: bool = False) -> Expr:
         """
@@ -1095,7 +1064,6 @@ class ExprListNameSpace:
         │ 8   ┆ 5   ┆ [2.0, 1.0] │
         │ 3   ┆ 2   ┆ [2.0, 1.0] │
         └─────┴─────┴────────────┘
-
         """
         return wrap_expr(self._pyexpr.list_eval(expr._pyexpr, parallel))
 
@@ -1130,7 +1098,6 @@ class ExprListNameSpace:
         │ [null, 3] ┆ [3, 4, null] ┆ [null, 3, 4]  │
         │ [5, 6, 7] ┆ [6, 8]       ┆ [5, 6, 7, 8]  │
         └───────────┴──────────────┴───────────────┘
-
         """  # noqa: W505.
         other = parse_as_expression(other, str_as_lit=False)
         return wrap_expr(self._pyexpr.list_set_operation(other, "union"))
@@ -1168,7 +1135,6 @@ class ExprListNameSpace:
         See Also
         --------
         polars.Expr.list.diff: Calculates the n-th discrete difference of every sublist.
-
         """  # noqa: W505.
         other = parse_as_expression(other, str_as_lit=False)
         return wrap_expr(self._pyexpr.list_set_operation(other, "difference"))
@@ -1202,7 +1168,6 @@ class ExprListNameSpace:
         │ [null, 3] ┆ [3, 4, null] ┆ [null, 3]    │
         │ [5, 6, 7] ┆ [6, 8]       ┆ [6]          │
         └───────────┴──────────────┴──────────────┘
-
         """  # noqa: W505.
         other = parse_as_expression(other, str_as_lit=False)
         return wrap_expr(self._pyexpr.list_set_operation(other, "intersection"))
@@ -1240,50 +1205,6 @@ class ExprListNameSpace:
         other = parse_as_expression(other, str_as_lit=False)
         return wrap_expr(self._pyexpr.list_set_operation(other, "symmetric_difference"))
 
-    @deprecate_renamed_function("set_union", version="0.18.10")
-    def union(self, other: IntoExpr) -> Expr:
-        """
-        Compute the SET UNION between the elements in this list and the elements of `other`.
-
-        .. deprecated:: 0.18.10
-            This method has been renamed to `Expr.list.set_union`.
-
-        """  # noqa: W505
-        return self.set_union(other)
-
-    @deprecate_renamed_function("set_difference", version="0.18.10")
-    def difference(self, other: IntoExpr) -> Expr:
-        """
-        Compute the SET DIFFERENCE between the elements in this list and the elements of `other`.
-
-        .. deprecated:: 0.18.10
-            This method has been renamed to `Expr.list.set_difference`.
-
-        """  # noqa: W505
-        return self.set_difference(other)
-
-    @deprecate_renamed_function("set_intersection", version="0.18.10")
-    def intersection(self, other: IntoExpr) -> Expr:
-        """
-        Compute the SET INTERSECTION between the elements in this list and the elements of `other`.
-
-        .. deprecated:: 0.18.10
-            This method has been renamed to `Expr.list.set_intersection`.
-
-        """  # noqa: W505
-        return self.set_intersection(other)
-
-    @deprecate_renamed_function("set_symmetric_difference", version="0.18.10")
-    def symmetric_difference(self, other: IntoExpr) -> Expr:
-        """
-        Compute the SET SYMMETRIC DIFFERENCE between the elements in this list and the elements of `other`.
-
-        .. deprecated:: 0.18.10
-            This method has been renamed to `Expr.list.set_symmetric_difference`.
-
-        """  # noqa: W505
-        return self.set_symmetric_difference(other)
-
     @deprecate_renamed_function("count_matches", version="0.19.3")
     def count_match(self, element: IntoExpr) -> Expr:
         """
@@ -1296,7 +1217,6 @@ class ExprListNameSpace:
         ----------
         element
             An expression that produces a single value
-
         """
         return self.count_matches(element)
 
@@ -1307,7 +1227,6 @@ class ExprListNameSpace:
 
         .. deprecated:: 0.19.8
             This method has been renamed to :func:`len`.
-
         """
         return self.len()
 
@@ -1324,6 +1243,9 @@ class ExprListNameSpace:
 
         The indices may be defined in a single column, or by sublists in another
         column of dtype `List`.
+
+        .. deprecated:: 0.19.14
+            This method has been renamed to :func:`gather`.
 
         Parameters
         ----------

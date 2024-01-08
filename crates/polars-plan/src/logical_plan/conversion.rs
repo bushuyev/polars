@@ -79,7 +79,9 @@ pub fn to_aexpr(expr: Expr, arena: &mut Arena<AExpr>) -> Node {
                 AggExpr::Last(expr) => AAggExpr::Last(to_aexpr(*expr, arena)),
                 AggExpr::Mean(expr) => AAggExpr::Mean(to_aexpr(*expr, arena)),
                 AggExpr::Implode(expr) => AAggExpr::Implode(to_aexpr(*expr, arena)),
-                AggExpr::Count(expr) => AAggExpr::Count(to_aexpr(*expr, arena)),
+                AggExpr::Count(expr, include_nulls) => {
+                    AAggExpr::Count(to_aexpr(*expr, arena), include_nulls)
+                },
                 AggExpr::Quantile {
                     expr,
                     quantile,
@@ -196,6 +198,21 @@ pub fn to_alp(
                 .map(|lp| to_alp(lp, expr_arena, lp_arena))
                 .collect::<PolarsResult<_>>()?;
             ALogicalPlan::Union { inputs, options }
+        },
+        LogicalPlan::HConcat {
+            inputs,
+            schema,
+            options,
+        } => {
+            let inputs = inputs
+                .into_iter()
+                .map(|lp| to_alp(lp, expr_arena, lp_arena))
+                .collect::<PolarsResult<_>>()?;
+            ALogicalPlan::HConcat {
+                inputs,
+                schema,
+                options,
+            }
         },
         LogicalPlan::Selection { input, predicate } => {
             let i = to_alp(*input, expr_arena, lp_arena)?;
@@ -519,9 +536,9 @@ pub fn node_to_expr(node: Node, expr_arena: &Arena<AExpr>) -> Expr {
                 let exp = node_to_expr(expr, expr_arena);
                 AggExpr::AggGroups(Box::new(exp)).into()
             },
-            AAggExpr::Count(expr) => {
-                let exp = node_to_expr(expr, expr_arena);
-                AggExpr::Count(Box::new(exp)).into()
+            AAggExpr::Count(expr, include_nulls) => {
+                let expr = node_to_expr(expr, expr_arena);
+                AggExpr::Count(Box::new(expr), include_nulls).into()
             },
         },
         AExpr::Ternary {
@@ -628,6 +645,21 @@ impl ALogicalPlan {
                     .map(|node| convert_to_lp(node, lp_arena))
                     .collect();
                 LogicalPlan::Union { inputs, options }
+            },
+            ALogicalPlan::HConcat {
+                inputs,
+                schema,
+                options,
+            } => {
+                let inputs = inputs
+                    .into_iter()
+                    .map(|node| convert_to_lp(node, lp_arena))
+                    .collect();
+                LogicalPlan::HConcat {
+                    inputs,
+                    schema: schema.clone(),
+                    options,
+                }
             },
             ALogicalPlan::Slice { input, offset, len } => {
                 let lp = convert_to_lp(input, lp_arena);

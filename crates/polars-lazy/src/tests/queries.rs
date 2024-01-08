@@ -82,7 +82,7 @@ fn test_lazy_drop_nulls() {
         "bar" => &[Some(1)]
     }
     .unwrap();
-    assert!(new.frame_equal(&out));
+    assert!(new.equals(&out));
 }
 
 #[test]
@@ -177,6 +177,23 @@ fn test_shift_and_fill() -> PolarsResult<()> {
 }
 
 #[test]
+fn test_shift_and_fill_non_numeric() -> PolarsResult<()> {
+    let out = df![
+        "bool" => [true, false, true],
+    ]?
+    .lazy()
+    .select([col("bool").shift_and_fill(1, true)])
+    .collect()?;
+
+    let out = out.column("bool")?;
+    assert_eq!(
+        Vec::from(out.bool()?),
+        &[Some(true), Some(true), Some(false)]
+    );
+    Ok(())
+}
+
+#[test]
 fn test_lazy_ternary_and_predicates() {
     let df = get_df();
     // test if this runs. This failed because is_not_null changes the schema name, so we
@@ -214,7 +231,7 @@ fn test_lazy_binary_ops() {
         .select([col("a").eq(lit(2)).alias("foo")])
         .collect()
         .unwrap();
-    assert_eq!(new.column("foo").unwrap().sum::<i32>(), Some(1));
+    assert_eq!(new.column("foo").unwrap().sum::<i32>().unwrap(), 1);
 }
 
 #[test]
@@ -430,7 +447,7 @@ fn test_lazy_query_10() {
         TimeUnit::Nanoseconds,
     )
     .into();
-    assert!(out.column("z").unwrap().series_equal(&z));
+    assert!(out.column("z").unwrap().equals(&z));
     let x: Series = DatetimeChunked::from_naive_datetime(
         "x",
         [
@@ -460,7 +477,7 @@ fn test_lazy_query_10() {
     assert!(out
         .column("z")
         .unwrap()
-        .series_equal(&z.cast(&DataType::Duration(TimeUnit::Milliseconds)).unwrap()));
+        .equals(&z.cast(&DataType::Duration(TimeUnit::Milliseconds)).unwrap()));
 }
 
 #[test]
@@ -581,7 +598,7 @@ fn test_lazy_reverse() {
         .reverse()
         .collect()
         .unwrap()
-        .frame_equal_missing(&df.reverse()))
+        .equals_missing(&df.reverse()))
 }
 
 #[test]
@@ -597,7 +614,7 @@ fn test_lazy_fill_null() {
         "b" => &[Some(1.0), Some(10.0)]
     }
     .unwrap();
-    assert!(out.frame_equal(&correct));
+    assert!(out.equals(&correct));
     assert_eq!(out.get_column_names(), vec!["a", "b"])
 }
 
@@ -992,7 +1009,7 @@ fn test_group_by_sort_slice() -> PolarsResult<()> {
         .sort("groups", SortOptions::default())
         .collect()?;
 
-    assert!(out1.column("foo")?.series_equal(out2.column("foo")?));
+    assert!(out1.column("foo")?.equals(out2.column("foo")?));
     Ok(())
 }
 
@@ -1091,7 +1108,7 @@ fn test_filter_and_alias() -> PolarsResult<()> {
     ]?;
     println!("{:?}", out);
     println!("{:?}", expected);
-    assert!(out.frame_equal(&expected));
+    assert!(out.equals(&expected));
     Ok(())
 }
 
@@ -1144,9 +1161,9 @@ fn test_fill_forward() -> PolarsResult<()> {
     let agg = out.column("b")?.list()?;
 
     let a: Series = agg.get_as_series(0).unwrap();
-    assert!(a.series_equal(&Series::new("b", &[1, 1])));
+    assert!(a.equals(&Series::new("b", &[1, 1])));
     let a: Series = agg.get_as_series(2).unwrap();
-    assert!(a.series_equal(&Series::new("b", &[1, 1])));
+    assert!(a.equals(&Series::new("b", &[1, 1])));
     let a: Series = agg.get_as_series(1).unwrap();
     assert_eq!(a.null_count(), 1);
     Ok(())
@@ -1363,17 +1380,17 @@ fn test_lazy_ternary_predicate_pushdown() -> PolarsResult<()> {
 fn test_categorical_addition() -> PolarsResult<()> {
     let df = fruits_cars();
 
-    // test if we can do that arithmetic operation with utf8 and categorical
+    // test if we can do that arithmetic operation with String and Categorical
     let out = df
         .lazy()
         .select([
-            col("fruits").cast(DataType::Categorical(None)),
-            col("cars").cast(DataType::Categorical(None)),
+            col("fruits").cast(DataType::Categorical(None, Default::default())),
+            col("cars").cast(DataType::Categorical(None, Default::default())),
         ])
         .select([(col("fruits") + lit(" ") + col("cars")).alias("foo")])
         .collect()?;
 
-    assert_eq!(out.column("foo")?.utf8()?.get(0).unwrap(), "banana beetle");
+    assert_eq!(out.column("foo")?.str()?.get(0).unwrap(), "banana beetle");
 
     Ok(())
 }
@@ -1462,7 +1479,7 @@ fn test_list_in_select_context() -> PolarsResult<()> {
     let out = df.lazy().select([col("a").implode()]).collect()?;
 
     let s = out.column("a")?;
-    assert!(s.series_equal(&expected));
+    assert!(s.equals(&expected));
 
     Ok(())
 }
@@ -1587,9 +1604,9 @@ pub fn test_select_by_dtypes() -> PolarsResult<()> {
     ]?;
     let out = df
         .lazy()
-        .select([dtype_cols([DataType::Float32, DataType::Utf8])])
+        .select([dtype_cols([DataType::Float32, DataType::String])])
         .collect()?;
-    assert_eq!(out.dtypes(), &[DataType::Utf8, DataType::Float32]);
+    assert_eq!(out.dtypes(), &[DataType::String, DataType::Float32]);
 
     Ok(())
 }
@@ -1771,7 +1788,7 @@ fn test_partitioned_gb_1() -> PolarsResult<()> {
     .sort("keys", Default::default())
     .collect()?;
 
-    assert!(out.frame_equal(&df![
+    assert!(out.equals(&df![
         "keys" => [1, 2],
         "eq_a" => [2 as IdxSize, 1],
         "eq_b" => [1 as IdxSize, 0],
@@ -1795,7 +1812,7 @@ fn test_partitioned_gb_count() -> PolarsResult<()> {
     ])
     .collect()?;
 
-    assert!(out.frame_equal(&df![
+    assert!(out.equals(&df![
         "col" => [0],
         "counted" => [100 as IdxSize],
         "count2" => [100 as IdxSize],
@@ -1842,7 +1859,7 @@ fn test_partitioned_gb_binary() -> PolarsResult<()> {
         .agg([(col("col") + lit(10)).sum().alias("sum")])
         .collect()?;
 
-    assert!(out.frame_equal(&df![
+    assert!(out.equals(&df![
         "col" => [0],
         "sum" => [200],
     ]?));
@@ -1855,7 +1872,7 @@ fn test_partitioned_gb_binary() -> PolarsResult<()> {
             .alias("sum")])
         .collect()?;
 
-    assert!(out.frame_equal(&df![
+    assert!(out.equals(&df![
         "col" => [0],
         "sum" => [200.0_f32],
     ]?));
@@ -1881,7 +1898,7 @@ fn test_partitioned_gb_ternary() -> PolarsResult<()> {
             .alias("sum")])
         .collect()?;
 
-    assert!(out.frame_equal(&df![
+    assert!(out.equals(&df![
         "col" => [0],
         "sum" => [9],
     ]?));
@@ -1902,7 +1919,7 @@ fn test_sort_maintain_order_true() -> PolarsResult<()> {
         .slice(0, 3)
         .collect()?;
     println!("{:?}", res);
-    assert!(res.frame_equal(&df![
+    assert!(res.equals(&df![
         "A" => [1, 1, 1],
         "B" => ["A", "B", "C"],
     ]?));

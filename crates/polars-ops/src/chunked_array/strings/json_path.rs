@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use arrow::array::ValueSize;
 use jsonpath_lib::PathCompiled;
 use serde_json::Value;
 
@@ -37,22 +38,22 @@ pub fn select_json<'a>(expr: &PathCompiled, json_str: &'a str) -> Option<Cow<'a,
     })
 }
 
-pub trait Utf8JsonPathImpl: AsUtf8 {
+pub trait Utf8JsonPathImpl: AsString {
     /// Extract json path, first match
     /// Refer to <https://goessner.net/articles/JsonPath/>
-    fn json_path_match(&self, json_path: &str) -> PolarsResult<Utf8Chunked> {
+    fn json_path_match(&self, json_path: &str) -> PolarsResult<StringChunked> {
         let pat = PathCompiled::compile(json_path)
             .map_err(|e| polars_err!(ComputeError: "error compiling JSONpath expression {}", e))?;
         Ok(self
-            .as_utf8()
+            .as_string()
             .apply(|opt_s| opt_s.and_then(|s| extract_json(&pat, s))))
     }
 
     /// Returns the inferred DataType for JSON values for each row
-    /// in the Utf8Chunked, with an optional number of rows to inspect.
+    /// in the StringChunked, with an optional number of rows to inspect.
     /// When None is passed for the number of rows, all rows are inspected.
     fn json_infer(&self, number_of_rows: Option<usize>) -> PolarsResult<DataType> {
-        let ca = self.as_utf8();
+        let ca = self.as_string();
         let values_iter = ca
             .into_iter()
             .map(|x| x.unwrap_or("null"))
@@ -63,18 +64,17 @@ pub trait Utf8JsonPathImpl: AsUtf8 {
             .map_err(|e| polars_err!(ComputeError: "error inferring JSON: {}", e))
     }
 
-    /// Extracts a typed-JSON value for each row in the Utf8Chunked
-    fn json_extract(
+    /// Extracts a typed-JSON value for each row in the StringChunked
+    fn json_decode(
         &self,
         dtype: Option<DataType>,
         infer_schema_len: Option<usize>,
     ) -> PolarsResult<Series> {
-        let ca = self.as_utf8();
+        let ca = self.as_string();
         let dtype = match dtype {
             Some(dt) => dt,
             None => ca.json_infer(infer_schema_len)?,
         };
-
         let buf_size = ca.get_values_size() + ca.null_count() * "null".len();
         let iter = ca.into_iter().map(|x| x.unwrap_or("null"));
 
@@ -88,11 +88,11 @@ pub trait Utf8JsonPathImpl: AsUtf8 {
         Series::try_from(("", array))
     }
 
-    fn json_path_select(&self, json_path: &str) -> PolarsResult<Utf8Chunked> {
+    fn json_path_select(&self, json_path: &str) -> PolarsResult<StringChunked> {
         let pat = PathCompiled::compile(json_path)
             .map_err(|e| polars_err!(ComputeError: "error compiling JSONpath expression: {}", e))?;
         Ok(self
-            .as_utf8()
+            .as_string()
             .apply(|opt_s| opt_s.and_then(|s| select_json(&pat, s))))
     }
 
@@ -102,12 +102,12 @@ pub trait Utf8JsonPathImpl: AsUtf8 {
         dtype: Option<DataType>,
         infer_schema_len: Option<usize>,
     ) -> PolarsResult<Series> {
-        let selected_json = self.as_utf8().json_path_select(json_path)?;
-        selected_json.json_extract(dtype, infer_schema_len)
+        let selected_json = self.as_string().json_path_select(json_path)?;
+        selected_json.json_decode(dtype, infer_schema_len)
     }
 }
 
-impl Utf8JsonPathImpl for Utf8Chunked {}
+impl Utf8JsonPathImpl for StringChunked {}
 
 #[cfg(test)]
 mod tests {
@@ -148,7 +148,7 @@ mod tests {
                 None,
             ],
         );
-        let ca = s.utf8().unwrap();
+        let ca = s.str().unwrap();
 
         let inner_dtype = DataType::Struct(vec![Field::new("c", DataType::Int64)]);
         let expected_dtype = DataType::Struct(vec![
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_extract() {
+    fn test_json_decode() {
         let s = Series::new(
             "json",
             [
@@ -173,7 +173,7 @@ mod tests {
                 None,
             ],
         );
-        let ca = s.utf8().unwrap();
+        let ca = s.str().unwrap();
 
         let expected_series = StructChunked::new(
             "",
@@ -187,13 +187,13 @@ mod tests {
         let expected_dtype = expected_series.dtype().clone();
 
         assert!(ca
-            .json_extract(None, None)
+            .json_decode(None, None)
             .unwrap()
-            .series_equal_missing(&expected_series));
+            .equals_missing(&expected_series));
         assert!(ca
-            .json_extract(Some(expected_dtype), None)
+            .json_decode(Some(expected_dtype), None)
             .unwrap()
-            .series_equal_missing(&expected_series));
+            .equals_missing(&expected_series));
     }
 
     #[test]
@@ -207,13 +207,13 @@ mod tests {
                 None,
             ],
         );
-        let ca = s.utf8().unwrap();
+        let ca = s.str().unwrap();
 
         assert!(ca
             .json_path_select("$")
             .unwrap()
             .into_series()
-            .series_equal_missing(&s));
+            .equals_missing(&s));
 
         let b_series = Series::new(
             "json",
@@ -228,14 +228,14 @@ mod tests {
             .json_path_select("$.b")
             .unwrap()
             .into_series()
-            .series_equal_missing(&b_series));
+            .equals_missing(&b_series));
 
         let c_series = Series::new("json", [None, Some(r#"[0,1]"#), Some(r#"[2,5]"#), None]);
         assert!(ca
             .json_path_select("$.b[:].c")
             .unwrap()
             .into_series()
-            .series_equal_missing(&c_series));
+            .equals_missing(&c_series));
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
                 None,
             ],
         );
-        let ca = s.utf8().unwrap();
+        let ca = s.str().unwrap();
 
         let c_series = Series::new(
             "",
@@ -265,6 +265,6 @@ mod tests {
             .json_path_extract("$.b[:].c", None, None)
             .unwrap()
             .into_series()
-            .series_equal_missing(&c_series));
+            .equals_missing(&c_series));
     }
 }

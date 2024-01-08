@@ -427,8 +427,8 @@ def test_timezone() -> None:
     # different timezones are not considered equal
     # we check both `null_equal=True` and `null_equal=False`
     # https://github.com/pola-rs/polars/issues/5023
-    assert not s.series_equal(tz_s, null_equal=False)
-    assert not s.series_equal(tz_s, null_equal=True)
+    assert s.equals(tz_s, null_equal=False) is False
+    assert s.equals(tz_s, null_equal=True) is False
     assert_series_not_equal(tz_s, s)
     assert_series_equal(s.cast(int), tz_s.cast(int))
 
@@ -782,7 +782,7 @@ def test_read_utc_times_parquet() -> None:
     df = pd.DataFrame(
         data={
             "Timestamp": pd.date_range(
-                "2022-01-01T00:00+00:00", "2022-01-01T10:00+00:00", freq="H"
+                "2022-01-01T00:00+00:00", "2022-01-01T10:00+00:00", freq="h"
             )
         }
     )
@@ -938,7 +938,7 @@ def test_asof_join() -> None:
     ).set_sorted("dates")
     assert trades.schema == {
         "dates": pl.Datetime("ms"),
-        "ticker": pl.Utf8,
+        "ticker": pl.String,
         "bid": pl.Float64,
     }
     out = trades.join_asof(quotes, on="dates", strategy="backward")
@@ -947,8 +947,8 @@ def test_asof_join() -> None:
         "bid": pl.Float64,
         "bid_right": pl.Float64,
         "dates": pl.Datetime("ms"),
-        "ticker": pl.Utf8,
-        "ticker_right": pl.Utf8,
+        "ticker": pl.String,
+        "ticker_right": pl.String,
     }
     assert out.columns == ["dates", "ticker", "bid", "ticker_right", "bid_right"]
     assert (out["dates"].cast(int)).to_list() == [
@@ -1252,27 +1252,6 @@ def test_datetime_instance_selection() -> None:
     assert [] == list(df.select(pl.exclude(DATETIME_DTYPES)))
 
 
-def test_unique_counts_on_dates() -> None:
-    assert pl.DataFrame(
-        {
-            "dt_ns": pl.datetime_range(
-                datetime(2020, 1, 1), datetime(2020, 3, 1), "1mo", eager=True
-            ),
-        }
-    ).with_columns(
-        [
-            pl.col("dt_ns").dt.cast_time_unit("us").alias("dt_us"),
-            pl.col("dt_ns").dt.cast_time_unit("ms").alias("dt_ms"),
-            pl.col("dt_ns").cast(pl.Date).alias("date"),
-        ]
-    ).select(pl.all().unique_counts().sum()).to_dict(as_series=False) == {
-        "dt_ns": [3],
-        "dt_us": [3],
-        "dt_ms": [3],
-        "date": [3],
-    }
-
-
 def test_rolling_by_ordering() -> None:
     # we must check that the keys still match the time labels after the rolling window
     # with a `by` argument.
@@ -1361,16 +1340,6 @@ def test_rolling_by_() -> None:
         ],
         "count": [1, 2, 3, 3, 3, 1, 2, 3, 3, 3, 1, 2, 3, 3, 3],
     }
-
-
-def test_sorted_unique() -> None:
-    assert (
-        pl.DataFrame(
-            [pl.Series("dt", [date(2015, 6, 24), date(2015, 6, 23)], dtype=pl.Date)]
-        )
-        .sort("dt")
-        .unique()
-    ).to_dict(as_series=False) == {"dt": [date(2015, 6, 23), date(2015, 6, 24)]}
 
 
 def test_date_to_time_cast_5111() -> None:
@@ -1556,7 +1525,11 @@ def test_strptime_with_tz() -> None:
     ],
 )
 def test_strptime_empty(time_unit: TimeUnit, time_zone: str | None) -> None:
-    ts = pl.Series([None]).cast(pl.Utf8).str.strptime(pl.Datetime(time_unit, time_zone))
+    ts = (
+        pl.Series([None])
+        .cast(pl.String)
+        .str.strptime(pl.Datetime(time_unit, time_zone))
+    )
     assert ts.dtype == pl.Datetime(time_unit, time_zone)
 
 
@@ -2245,7 +2218,7 @@ def test_truncate_propagate_null() -> None:
     ) == {"date": [None, None, datetime(2022, 3, 20, 5, 7, 0)]}
     assert df.select(
         pl.col("date").dt.truncate(
-            every=pl.lit(None, dtype=pl.Utf8),
+            every=pl.lit(None, dtype=pl.String),
         )
     ).to_dict(as_series=False) == {"date": [None, None, None]}
 
@@ -2312,45 +2285,78 @@ def test_truncate_by_multiple_weeks() -> None:
             ]
         )
     ).to_dict(as_series=False) == {
-        "2w": [date(2022, 4, 11), date(2022, 11, 21)],
-        "3w": [date(2022, 4, 4), date(2022, 11, 14)],
-        "4w": [date(2022, 3, 28), date(2022, 11, 7)],
-        "5w": [date(2022, 3, 21), date(2022, 10, 31)],
-        "17w": [date(2021, 12, 27), date(2022, 8, 8)],
+        "2w": [date(2022, 4, 18), date(2022, 11, 28)],
+        "3w": [date(2022, 4, 11), date(2022, 11, 28)],
+        "4w": [date(2022, 4, 18), date(2022, 11, 28)],
+        "5w": [date(2022, 3, 28), date(2022, 11, 28)],
+        "17w": [date(2022, 2, 21), date(2022, 10, 17)],
     }
 
 
+def test_truncate_by_multiple_weeks_diffs() -> None:
+    df = pl.DataFrame(
+        {
+            "ts": pl.date_range(date(2020, 1, 1), date(2020, 2, 1), eager=True),
+        }
+    )
+    result = df.select(
+        pl.col("ts").dt.truncate("1w").alias("1w"),
+        pl.col("ts").dt.truncate("2w").alias("2w"),
+        pl.col("ts").dt.truncate("3w").alias("3w"),
+    ).select(pl.all().diff().drop_nulls().unique())
+    expected = pl.DataFrame(
+        {
+            "1w": [timedelta(0), timedelta(days=7)],
+            "2w": [timedelta(0), timedelta(days=14)],
+            "3w": [timedelta(0), timedelta(days=21)],
+        }
+    ).select(pl.all().cast(pl.Duration("ms")))
+    assert_frame_equal(result, expected)
+
+
 def test_truncate_use_earliest() -> None:
-    ser = pl.datetime_range(
-        date(2020, 10, 25),
-        datetime(2020, 10, 25, 2),
-        "30m",
-        eager=True,
-        time_zone="Europe/London",
-    ).dt.offset_by("15m")
+    ser = (
+        pl.datetime_range(
+            date(2020, 10, 25),
+            datetime(2020, 10, 25, 2),
+            "30m",
+            eager=True,
+            time_zone="Europe/London",
+        )
+        .alias("datetime")
+        .dt.offset_by("15m")
+    )
     df = ser.to_frame()
     df = df.with_columns(
         use_earliest=pl.col("datetime").dt.dst_offset() == pl.duration(hours=1)
     )
     result = df.select(pl.col("datetime").dt.truncate("30m"))
-    expected = pl.datetime_range(
-        date(2020, 10, 25),
-        datetime(2020, 10, 25, 2),
-        "30m",
-        eager=True,
-        time_zone="Europe/London",
-    ).to_frame()
+    expected = (
+        pl.datetime_range(
+            date(2020, 10, 25),
+            datetime(2020, 10, 25, 2),
+            "30m",
+            eager=True,
+            time_zone="Europe/London",
+        )
+        .alias("datetime")
+        .to_frame()
+    )
     assert_frame_equal(result, expected)
 
 
 def test_truncate_ambiguous() -> None:
-    ser = pl.datetime_range(
-        date(2020, 10, 25),
-        datetime(2020, 10, 25, 2),
-        "30m",
-        eager=True,
-        time_zone="Europe/London",
-    ).dt.offset_by("15m")
+    ser = (
+        pl.datetime_range(
+            date(2020, 10, 25),
+            datetime(2020, 10, 25, 2),
+            "30m",
+            eager=True,
+            time_zone="Europe/London",
+        )
+        .alias("datetime")
+        .dt.offset_by("15m")
+    )
     result = ser.dt.truncate("30m")
     expected = (
         pl.Series(
@@ -2372,13 +2378,17 @@ def test_truncate_ambiguous() -> None:
 
 
 def test_round_ambiguous() -> None:
-    t = pl.datetime_range(
-        date(2020, 10, 25),
-        datetime(2020, 10, 25, 2),
-        "30m",
-        eager=True,
-        time_zone="Europe/London",
-    ).dt.offset_by("15m")
+    t = (
+        pl.datetime_range(
+            date(2020, 10, 25),
+            datetime(2020, 10, 25, 2),
+            "30m",
+            eager=True,
+            time_zone="Europe/London",
+        )
+        .alias("datetime")
+        .dt.offset_by("15m")
+    )
     result = t.dt.round("30m")
     expected = (
         pl.Series(
@@ -2741,6 +2751,6 @@ def test_rolling_duplicates() -> None:
             "value": [0, 1],
         }
     )
-    assert df.sort("ts").with_columns(
-        pl.col("value").rolling_max("1d", by="ts", closed="right")
-    )["value"].to_list() == [1, 1]
+    assert df.sort("ts").with_columns(pl.col("value").rolling_max("1d", by="ts"))[
+        "value"
+    ].to_list() == [1, 1]

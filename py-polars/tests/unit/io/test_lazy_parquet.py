@@ -50,7 +50,7 @@ def test_row_count(foods_parquet_path: Path) -> None:
 
     df = (
         pl.scan_parquet(foods_parquet_path, row_count_name="row_count")
-        .with_row_count("foo", 10)
+        .with_row_index("foo", 10)
         .filter(pl.col("category") == pl.lit("vegetables"))
         .collect()
     )
@@ -95,17 +95,6 @@ def test_categorical_parquet_statistics(tmp_path: Path) -> None:
             .collect()
         )
     assert df.shape == (4, 3)
-
-
-@pytest.mark.write_disk()
-def test_null_parquet(tmp_path: Path) -> None:
-    tmp_path.mkdir(exist_ok=True)
-
-    df = pl.DataFrame([pl.Series("foo", [], dtype=pl.Int8)])
-    file_path = tmp_path / "null.parquet"
-    df.write_parquet(file_path)
-    out = pl.read_parquet(file_path)
-    assert_frame_equal(out, df)
 
 
 @pytest.mark.write_disk()
@@ -209,7 +198,7 @@ def test_row_count_schema_parquet(parquet_file_path: Path) -> None:
         pl.scan_parquet(str(parquet_file_path), row_count_name="id")
         .select(["id", "b"])
         .collect()
-    ).dtypes == [pl.UInt32, pl.Utf8]
+    ).dtypes == [pl.UInt32, pl.String]
 
 
 @pytest.mark.write_disk()
@@ -353,25 +342,6 @@ def test_streaming_categorical(tmp_path: Path) -> None:
         assert_frame_equal(result, expected)
 
 
-@pytest.mark.write_disk()
-def test_parquet_struct_categorical(tmp_path: Path) -> None:
-    tmp_path.mkdir(exist_ok=True)
-
-    df = pl.DataFrame(
-        [
-            pl.Series("a", ["bob"], pl.Categorical),
-            pl.Series("b", ["foo"], pl.Categorical),
-        ]
-    )
-
-    file_path = tmp_path / "categorical.parquet"
-    df.write_parquet(file_path)
-
-    with pl.StringCache():
-        out = pl.read_parquet(file_path).select(pl.col("b").value_counts())
-    assert out.to_dict(as_series=False) == {"b": [{"b": "foo", "counts": 1}]}
-
-
 def test_glob_n_rows(io_files_path: Path) -> None:
     file_path = io_files_path / "foods*.parquet"
     df = pl.scan_parquet(file_path, n_rows=40).collect()
@@ -435,10 +405,10 @@ def test_parquet_many_row_groups_12297(tmp_path: Path) -> None:
 def test_row_count_empty_file(tmp_path: Path) -> None:
     tmp_path.mkdir(exist_ok=True)
     file_path = tmp_path / "test.parquet"
-    pl.DataFrame({"a": []}).write_parquet(file_path)
-    assert pl.scan_parquet(file_path).with_row_count(
-        "idx"
-    ).collect().schema == OrderedDict([("idx", pl.UInt32), ("a", pl.Float32)])
+    df = pl.DataFrame({"a": []}, schema={"a": pl.Float32})
+    df.write_parquet(file_path)
+    result = pl.scan_parquet(file_path).with_row_index("idx").collect()
+    assert result.schema == OrderedDict([("idx", pl.UInt32), ("a", pl.Float32)])
 
 
 @pytest.mark.write_disk()
@@ -467,3 +437,13 @@ def test_parquet_different_schema(tmp_path: Path) -> None:
     a.write_parquet(f1)
     b.write_parquet(f2)
     assert pl.scan_parquet([f1, f2]).select("b").collect().columns == ["b"]
+
+
+@pytest.mark.write_disk()
+def test_nested_slice_12480(tmp_path: Path) -> None:
+    path = tmp_path / "data.parquet"
+    df = pl.select(pl.lit(1).repeat_by(10_000).explode().cast(pl.List(pl.Int32)))
+
+    df.write_parquet(path, use_pyarrow=True, pyarrow_options={"data_page_size": 1})
+
+    assert pl.scan_parquet(path).slice(0, 1).collect().height == 1

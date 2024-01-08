@@ -1,10 +1,15 @@
-use std::ops::Add;
-
-use arrow::compute;
-use arrow::types::simd::Simd;
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 use polars_core::prelude::*;
 use polars_core::utils::align_chunks_binary;
+
+const COV_BUF_SIZE: usize = 64;
+
+/// Calculates the sum of x[i] * y[i] from 0..k.
+fn multiply_sum(x: &[f64; COV_BUF_SIZE], y: &[f64; COV_BUF_SIZE], k: usize) -> f64 {
+    assert!(k <= COV_BUF_SIZE);
+    let tmp: [f64; COV_BUF_SIZE] = std::array::from_fn(|i| x[i] * y[i]);
+    float_sum::f64::sum(&tmp[..k])
+}
 
 /// Compute the covariance between two columns.
 pub fn cov<T>(a: &ChunkedArray<T>, b: &ChunkedArray<T>, ddof: u8) -> Option<f64>
@@ -44,54 +49,51 @@ where
     J: IntoIterator<Item = (T, T)> + Clone,
     T: ToPrimitive,
 {
+    // The algorithm is derived from
+    // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_batched_version
+    // We simply set the weights to 1.0. This allows us to simplify the expressions
+    // a lot, and move out subtractions out of sums.
     let mut mean_x = 0.0;
     let mut mean_y = 0.0;
-    let mut c = 0.0;
+    let mut cxy = 0.0;
     let mut n = 0.0;
 
-    const BUF_SIZE: usize = 64;
-
-    let mut x_vec = [0.0; BUF_SIZE];
-    let mut y_vec = [0.0; BUF_SIZE];
-    let mut dx_vec = [0.0; BUF_SIZE];
-    let mut dy_vec = [0.0; BUF_SIZE];
-    let mut c_vec = [0.0; BUF_SIZE];
+    let mut x_tmp = [0.0; COV_BUF_SIZE];
+    let mut y_tmp = [0.0; COV_BUF_SIZE];
 
     for iter in iters {
         let mut iter = iter.clone().into_iter();
 
         loop {
-            let mut offset = BUF_SIZE;
-            for i in 0..BUF_SIZE {
-                if let Some((x, y)) = iter.next() {
-                    let x = x.to_f64().unwrap();
-                    let y = y.to_f64().unwrap();
+            let mut k = 0;
+            for (x, y) in iter.by_ref().take(COV_BUF_SIZE) {
+                let x = x.to_f64().unwrap();
+                let y = y.to_f64().unwrap();
 
-                    x_vec[i] = x;
-                    y_vec[i] = y;
-                    dx_vec[i] = x - mean_x;
-                    dy_vec[i] = y - mean_y;
-                } else {
-                    offset = i;
-                    break;
-                }
+                x_tmp[k] = x;
+                y_tmp[k] = y;
+                k += 1;
             }
-            if offset == 0 {
+            if k == 0 {
                 break;
             }
-            n += offset as f64;
 
-            mean_x += sum_f64::sum(&dx_vec[..offset]) / n;
-            mean_y += sum_f64::sum(&dy_vec[..offset]) / n;
+            // TODO: combine these all in one SIMD'ized pass.
+            let xsum = float_sum::f64::sum(&x_tmp[..k]);
+            let ysum = float_sum::f64::sum(&y_tmp[..k]);
+            let xysum = multiply_sum(&x_tmp, &y_tmp, k);
 
-            for i in 0..BUF_SIZE {
-                c_vec[i] = (x_vec[i] - mean_x) * (y_vec[i] - mean_y)
-            }
-            c += sum_f64::sum(&c_vec[..offset]);
+            let old_mean_x = mean_x;
+            let old_mean_y = mean_y;
+            n += k as f64;
+            mean_x += (xsum - k as f64 * old_mean_x) / n;
+            mean_y += (ysum - k as f64 * old_mean_y) / n;
+
+            cxy += xysum - xsum * old_mean_y - ysum * mean_x + mean_x * old_mean_y * (k as f64);
         }
     }
 
-    c / (n - ddof as f64)
+    cxy / (n - ddof as f64)
 }
 
 /// Compute the pearson correlation between two columns.
@@ -99,9 +101,6 @@ pub fn pearson_corr<T>(a: &ChunkedArray<T>, b: &ChunkedArray<T>, ddof: u8) -> Op
 where
     T: PolarsNumericType,
     T::Native: ToPrimitive,
-    <T::Native as Simd>::Simd: Add<Output = <T::Native as Simd>::Simd>
-        + compute::aggregate::Sum<T::Native>
-        + compute::aggregate::SimdOrd<T::Native>,
     ChunkedArray<T>: ChunkVar,
 {
     let (a, b) = align_chunks_binary(a, b);
@@ -132,67 +131,65 @@ where
     J: IntoIterator<Item = (T, T)> + Clone,
     T: ToPrimitive,
 {
+    // Algorithm is same as cov, we just maintain cov(X, X), cov(X, Y), and
+    // cov(Y, Y), noting that var(X) = cov(X, X).
+    // Then corr(X, Y) = cov(X, Y)/(std(X) * std(Y)).
     let mut mean_x = 0.0;
     let mut mean_y = 0.0;
-    let mut c = 0.0;
+    let mut cxy = 0.0;
+    let mut cxx = 0.0;
+    let mut cyy = 0.0;
     let mut n = 0.0;
 
-    let mut m2x = 0.0;
-    let mut m2y = 0.0;
-
-    const BUF_SIZE: usize = 64;
-
-    let mut x_vec = [0.0; BUF_SIZE];
-    let mut y_vec = [0.0; BUF_SIZE];
-    let mut dx_vec = [0.0; BUF_SIZE];
-    let mut dy_vec = [0.0; BUF_SIZE];
-    let mut c_vec = [0.0; BUF_SIZE];
+    let mut x_tmp = [0.0; COV_BUF_SIZE];
+    let mut y_tmp = [0.0; COV_BUF_SIZE];
 
     for iter in iters {
         let mut iter = iter.clone().into_iter();
 
         loop {
-            let mut offset = BUF_SIZE;
-            for i in 0..BUF_SIZE {
-                if let Some((x, y)) = iter.next() {
-                    let x = x.to_f64().unwrap();
-                    let y = y.to_f64().unwrap();
+            let mut k = 0;
+            for (x, y) in iter.by_ref().take(COV_BUF_SIZE) {
+                let x = x.to_f64().unwrap();
+                let y = y.to_f64().unwrap();
 
-                    x_vec[i] = x;
-                    y_vec[i] = y;
-                    dx_vec[i] = x - mean_x;
-                    dy_vec[i] = y - mean_y;
-                } else {
-                    offset = i;
-                    break;
-                }
+                x_tmp[k] = x;
+                y_tmp[k] = y;
+                k += 1;
             }
-            if offset == 0 {
+            if k == 0 {
                 break;
             }
-            n += offset as f64;
-            let mean_x_old = mean_x;
-            let mean_y_old = mean_y;
-            mean_x += sum_f64::sum(&dx_vec[..offset]) / n;
-            mean_y += sum_f64::sum(&dy_vec[..offset]) / n;
 
-            for i in 0..BUF_SIZE {
-                let dx_new = x_vec[i] - mean_x;
-                let dy_new = y_vec[i] - mean_y;
-                c_vec[i] = dx_new * dy_new;
-                x_vec[i] = (x_vec[i] - mean_x_old) * dx_new;
-                y_vec[i] = (y_vec[i] - mean_y_old) * dy_new;
-            }
-            c += sum_f64::sum(&c_vec[..offset]);
-            m2x += sum_f64::sum(&x_vec[..offset]);
-            m2y += sum_f64::sum(&y_vec[..offset]);
+            // TODO: combine these all in one SIMD'ized pass.
+            let xsum = float_sum::f64::sum(&x_tmp[..k]);
+            let ysum = float_sum::f64::sum(&y_tmp[..k]);
+            let xxsum = multiply_sum(&x_tmp, &x_tmp, k);
+            let xysum = multiply_sum(&x_tmp, &y_tmp, k);
+            let yysum = multiply_sum(&y_tmp, &y_tmp, k);
+
+            let old_mean_x = mean_x;
+            let old_mean_y = mean_y;
+            n += k as f64;
+            mean_x += (xsum - k as f64 * old_mean_x) / n;
+            mean_y += (ysum - k as f64 * old_mean_y) / n;
+
+            cxx += xxsum - xsum * old_mean_x - xsum * mean_x + mean_x * old_mean_x * (k as f64);
+            cxy += xysum - xsum * old_mean_y - ysum * mean_x + mean_x * old_mean_y * (k as f64);
+            cyy += yysum - ysum * old_mean_y - ysum * mean_y + mean_y * old_mean_y * (k as f64);
         }
     }
 
     let sample_n = n - ddof as f64;
-    let sample_cov = c / sample_n;
-    let sample_std_x = (m2x / sample_n).sqrt();
-    let sample_std_y = (m2y / sample_n).sqrt();
+    let sample_cov = cxy / sample_n;
+    let sample_std_x = (cxx / sample_n).sqrt();
+    let sample_std_y = (cyy / sample_n).sqrt();
 
-    sample_cov / (sample_std_x * sample_std_y)
+    let denom = sample_std_x * sample_std_y;
+    let result = sample_cov / denom;
+    if denom.is_zero() {
+        f64::NAN
+    } else {
+        result
+    }
 }

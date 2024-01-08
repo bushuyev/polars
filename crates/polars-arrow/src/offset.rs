@@ -1,5 +1,6 @@
 //! Contains the declaration of [`Offset`]
 use std::hint::unreachable_unchecked;
+use std::ops::Deref;
 
 use polars_error::{polars_bail, polars_err, PolarsError, PolarsResult};
 
@@ -17,6 +18,14 @@ impl<O: Offset> Default for Offsets<O> {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<O: Offset> Deref for Offsets<O> {
+    type Target = [O];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
     }
 }
 
@@ -119,12 +128,13 @@ impl<O: Offset> Offsets<O> {
             self.0.push(new_length);
             Ok(())
         } else {
-            let length = O::from_usize(length).ok_or(polars_err!(ComputeError: "overflow"))?;
+            let length =
+                O::from_usize(length).ok_or_else(|| polars_err!(ComputeError: "overflow"))?;
 
             let old_length = self.last();
             let new_length = old_length
                 .checked_add(&length)
-                .ok_or(polars_err!(ComputeError: "overflow"))?;
+                .ok_or_else(|| polars_err!(ComputeError: "overflow"))?;
             self.0.push(new_length);
             Ok(())
         }

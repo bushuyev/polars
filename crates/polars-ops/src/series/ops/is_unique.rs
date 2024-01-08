@@ -1,8 +1,8 @@
 use arrow::array::BooleanArray;
 use arrow::bitmap::MutableBitmap;
-use arrow::util::total_ord::{TotalEq, TotalHash, TotalOrdWrap};
 use polars_core::prelude::*;
 use polars_core::with_match_physical_integer_polars_type;
+use polars_utils::total_ord::{TotalEq, TotalHash, TotalOrdWrap};
 
 // If invert is true then this is an `is_duplicated`.
 fn is_unique_ca<'a, T>(ca: &'a ChunkedArray<T>, invert: bool) -> BooleanChunked
@@ -49,7 +49,7 @@ fn dispatcher(s: &Series, invert: bool) -> PolarsResult<BooleanChunked> {
             let ca = s.binary().unwrap();
             is_unique_ca(ca, invert)
         },
-        Utf8 => {
+        String => {
             let s = s.cast(&Binary).unwrap();
             let ca = s.binary().unwrap();
             is_unique_ca(ca, invert)
@@ -71,6 +71,11 @@ fn dispatcher(s: &Series, invert: bool) -> PolarsResult<BooleanChunked> {
             } else {
                 df.is_unique()
             };
+        },
+        Null => match s.len() {
+            0 => BooleanChunked::new(s.name(), [] as [bool; 0]),
+            1 => BooleanChunked::new(s.name(), [!invert]),
+            len => BooleanChunked::full(s.name(), invert, len),
         },
         dt if dt.is_numeric() => {
             with_match_physical_integer_polars_type!(s.dtype(), |$T| {

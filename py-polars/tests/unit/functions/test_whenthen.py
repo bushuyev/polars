@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 import polars as pl
-from polars.testing import assert_frame_equal, assert_series_equal
+from polars.testing import assert_frame_equal
 
 
 def test_when_then() -> None:
@@ -242,22 +242,6 @@ def test_comp_categorical_lit_dtype() -> None:
     ).dtypes == [pl.Categorical, pl.Int32]
 
 
-def test_when_then_deprecated_string_input() -> None:
-    df = pl.DataFrame(
-        {
-            "a": [True, False],
-            "b": [1, 2],
-            "c": [3, 4],
-        }
-    )
-
-    with pytest.deprecated_call():
-        result = df.select(pl.when("a").then("b").otherwise("c").alias("when"))
-
-    expected = pl.Series("when", ["b", "c"])
-    assert_series_equal(result.to_series(), expected)
-
-
 def test_predicate_broadcast() -> None:
     df = pl.DataFrame(
         {
@@ -445,7 +429,7 @@ def test_when_then_nested_non_unit_literal_predicate_agg_broadcast_12242() -> No
 
     expect = pl.DataFrame(
         [
-            pl.Series("array_name", ["A", "B"], dtype=pl.Utf8),
+            pl.Series("array_name", ["A", "B"], dtype=pl.String),
             pl.Series(
                 "array_val",
                 [[1, None, None, 2, None, 3], [4, None, None, None, None, 5]],
@@ -479,14 +463,20 @@ def test_when_then_binary_op_predicate_agg_12526() -> None:
     )
 
     expect = pl.DataFrame(
-        {"a": [1], "col": [None]}, schema={"a": pl.Int64, "col": pl.Utf8}
+        {"a": [1], "col": [None]}, schema={"a": pl.Int64, "col": pl.String}
     )
 
     actual = df.group_by("a").agg(
         col=(
-            pl.when(pl.col("a").shift(1) > 2)
+            pl.when(
+                pl.col("a").shift(1) > 2,
+                pl.col("b").is_not_null(),
+            )
             .then(pl.lit("abc"))
-            .when(pl.col("a").shift(1) > 1)
+            .when(
+                pl.col("a").shift(1) > 1,
+                pl.col("b").is_not_null(),
+            )
             .then(pl.lit("def"))
             .otherwise(pl.lit(None))
             .first()
@@ -494,3 +484,33 @@ def test_when_then_binary_op_predicate_agg_12526() -> None:
     )
 
     assert_frame_equal(expect, actual)
+
+
+def test_when_predicates_kwargs() -> None:
+    df = pl.DataFrame(
+        {
+            "x": [10, 20, 30, 40],
+            "y": [15, -20, None, 1],
+            "z": ["a", "b", "c", "d"],
+        }
+    )
+    assert_frame_equal(  # kwargs only
+        df.select(matched=pl.when(x=30, z="c").then(True).otherwise(False)),
+        pl.DataFrame({"matched": [False, False, True, False]}),
+    )
+    assert_frame_equal(  # mixed predicates & kwargs
+        df.select(matched=pl.when(pl.col("x") < 30, z="b").then(True).otherwise(False)),
+        pl.DataFrame({"matched": [False, True, False, False]}),
+    )
+    assert_frame_equal(  # chained when/then with mixed predicates/kwargs
+        df.select(
+            misc=pl.when(pl.col("x") > 50)
+            .then(pl.lit("x>50"))
+            .when(y=1)
+            .then(pl.lit("y=1"))
+            .when(pl.col("z").is_in(["a", "b"]), pl.col("y") < 0)
+            .then(pl.lit("z in (a|b), y<0"))
+            .otherwise(pl.lit("?"))
+        ),
+        pl.DataFrame({"misc": ["?", "z in (a|b), y<0", "?", "y=1"]}),
+    )

@@ -5,6 +5,7 @@ use polars_core::prelude::*;
 use super::buffer::*;
 use crate::csv::read::NullValuesCompiled;
 use crate::csv::splitfields::SplitFields;
+use crate::csv::CommentPrefix;
 
 /// Skip the utf-8 Byte Order Mark.
 /// credits to csv-core
@@ -13,6 +14,17 @@ pub(crate) fn skip_bom(input: &[u8]) -> &[u8] {
         &input[3..]
     } else {
         input
+    }
+}
+
+/// Checks if a line in a CSV file is a comment based on the given comment prefix configuration.
+///
+/// This function is used during CSV parsing to determine whether a line should be ignored based on its starting characters.
+pub(crate) fn is_comment_line(line: &[u8], comment_prefix: Option<&CommentPrefix>) -> bool {
+    match comment_prefix {
+        Some(CommentPrefix::Single(c)) => line.starts_with(&[*c]),
+        Some(CommentPrefix::Multi(s)) => line.starts_with(s.as_bytes()),
+        None => false,
     }
 }
 
@@ -145,15 +157,11 @@ where
     &input[read..]
 }
 
+/// Remove whitespace from the start of buffer.
 /// Makes sure that the bytes stream starts with
 ///     'field_1,field_2'
 /// and not with
 ///     '\nfield_1,field_1'
-pub(crate) fn skip_header(input: &[u8], quote: Option<u8>, eol_char: u8) -> &[u8] {
-    skip_this_line(input, quote, eol_char)
-}
-
-/// Remove whitespace from the start of buffer.
 #[inline]
 pub(crate) fn skip_whitespace(input: &[u8]) -> &[u8] {
     skip_condition(input, is_whitespace)
@@ -284,9 +292,9 @@ impl<'a> Iterator for SplitLines<'a> {
                     }
                 },
                 None => {
-                    // no new line found we are done
-                    // the rest will be done by last line specific code.
-                    return None;
+                    let remainder = self.v;
+                    self.v = &[];
+                    return Some(remainder);
                 },
             }
         }
@@ -326,7 +334,7 @@ fn find_quoted(bytes: &[u8], quote_char: u8, needle: u8) -> Option<usize> {
 }
 
 #[inline]
-fn skip_this_line(bytes: &[u8], quote: Option<u8>, eol_char: u8) -> &[u8] {
+pub(crate) fn skip_this_line(bytes: &[u8], quote: Option<u8>, eol_char: u8) -> &[u8] {
     let pos = match quote {
         Some(quote) => find_quoted(bytes, quote, eol_char),
         None => bytes.iter().position(|x| *x == eol_char),
@@ -347,11 +355,11 @@ fn skip_this_line(bytes: &[u8], quote: Option<u8>, eol_char: u8) -> &[u8] {
 /// * `buffers` - Parsed output will be written to these buffers. Except for UTF8 data. The offsets of the
 ///               fields are written to the buffers. The UTF8 data will be parsed later.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn parse_lines<'a>(
-    mut bytes: &'a [u8],
+pub(super) fn parse_lines(
+    mut bytes: &[u8],
     offset: usize,
     separator: u8,
-    comment_char: Option<u8>,
+    comment_prefix: Option<&CommentPrefix>,
     quote_char: Option<u8>,
     eol_char: u8,
     missing_is_null: bool,
@@ -359,7 +367,7 @@ pub(super) fn parse_lines<'a>(
     mut truncate_ragged_lines: bool,
     null_values: Option<&NullValuesCompiled>,
     projection: &[usize],
-    buffers: &mut [Buffer<'a>],
+    buffers: &mut [Buffer],
     n_lines: usize,
     // length of original schema
     schema_len: usize,
@@ -400,13 +408,10 @@ pub(super) fn parse_lines<'a>(
         }
 
         // deal with comments
-        if let Some(c) = comment_char {
-            // line is a comment -> skip
-            if bytes[0] == c {
-                let bytes_rem = skip_this_line(bytes, quote_char, eol_char);
-                bytes = bytes_rem;
-                continue;
-            }
+        if is_comment_line(bytes, comment_prefix) {
+            let bytes_rem = skip_this_line(bytes, quote_char, eol_char);
+            bytes = bytes_rem;
+            continue;
         }
 
         // Every line we only need to parse the columns that are projected.
@@ -462,26 +467,28 @@ pub(super) fn parse_lines<'a>(
                             buf.add_null(!missing_is_null && field.is_empty())
                         } else {
                             buf.add(field, ignore_errors, needs_escaping, missing_is_null)
-                                .map_err(|_| {
+                                .map_err(|e| {
                                     let bytes_offset = offset + field.as_ptr() as usize - start;
                                     let unparsable = String::from_utf8_lossy(field);
                                     let column_name = schema.get_at_index(idx as usize).unwrap().0;
                                     polars_err!(
                                         ComputeError:
-                                        "Could not parse `{}` as dtype `{}` at column '{}' (column number {}).\n\
+                                        "could not parse `{}` as dtype `{}` at column '{}' (column number {})\n\n\
                                         The current offset in the file is {} bytes.\n\
                                         \n\
                                         You might want to try:\n\
                                         - increasing `infer_schema_length` (e.g. `infer_schema_length=10000`),\n\
                                         - specifying correct dtype with the `dtypes` argument\n\
                                         - setting `ignore_errors` to `True`,\n\
-                                        - adding `{}` to the `null_values` list.",
+                                        - adding `{}` to the `null_values` list.\n\n\
+                                        Original error: ```{}```",
                                         &unparsable,
                                         buf.dtype(),
                                         column_name,
                                         idx + 1,
                                         bytes_offset,
                                         &unparsable,
+                                        e
                                     )
                                 })?;
                         }

@@ -26,7 +26,7 @@ from polars.datatypes import (
 
 if TYPE_CHECKING:
     from polars.datatypes import PolarsDataType
-    from polars.type_aliases import TimeUnit
+    from polars.type_aliases import PolarsIntegerType, PolarsTemporalType, TimeUnit
 
 
 DTYPE_TEMPORAL_UNITS: frozenset[TimeUnit] = frozenset(["ns", "us", "ms"])
@@ -36,9 +36,6 @@ DATETIME_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
         Datetime("ms"),
         Datetime("us"),
         Datetime("ns"),
-        Datetime("ms", "*"),
-        Datetime("us", "*"),
-        Datetime("ns", "*"),
     ]
 )
 DURATION_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
@@ -49,10 +46,10 @@ DURATION_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
         Duration("ns"),
     ]
 )
-TEMPORAL_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
+TEMPORAL_DTYPES: frozenset[PolarsTemporalType] = DataTypeGroup(
     frozenset([Date, Time]) | DATETIME_DTYPES | DURATION_DTYPES
 )
-SIGNED_INTEGER_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
+SIGNED_INTEGER_DTYPES: frozenset[PolarsIntegerType] = DataTypeGroup(
     [
         Int8,
         Int16,
@@ -60,7 +57,7 @@ SIGNED_INTEGER_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
         Int64,
     ]
 )
-UNSIGNED_INTEGER_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
+UNSIGNED_INTEGER_DTYPES: frozenset[PolarsIntegerType] = DataTypeGroup(
     [
         UInt8,
         UInt16,
@@ -68,7 +65,7 @@ UNSIGNED_INTEGER_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
         UInt64,
     ]
 )
-INTEGER_DTYPES: frozenset[PolarsDataType] = (
+INTEGER_DTYPES: frozenset[PolarsIntegerType] = (
     SIGNED_INTEGER_DTYPES | UNSIGNED_INTEGER_DTYPES
 )
 FLOAT_DTYPES: frozenset[PolarsDataType] = DataTypeGroup([Float32, Float64])

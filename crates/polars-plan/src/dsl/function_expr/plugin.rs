@@ -1,5 +1,4 @@
-use std::ffi::CString;
-use std::process::abort;
+use std::ffi::CStr;
 use std::sync::RwLock;
 
 use arrow::ffi::{import_field_from_c, ArrowSchema};
@@ -41,11 +40,11 @@ fn get_lib(lib: &str) -> PolarsResult<&'static PluginAndVersion> {
     }
 }
 
-unsafe fn retrieve_error_msg(lib: &Library) -> CString {
+unsafe fn retrieve_error_msg(lib: &Library) -> &CStr {
     let symbol: libloading::Symbol<unsafe extern "C" fn() -> *mut std::os::raw::c_char> =
         lib.get(b"_polars_plugin_get_last_error_message\0").unwrap();
     let msg_ptr = symbol();
-    CString::from_raw(msg_ptr)
+    CStr::from_ptr(msg_ptr)
 }
 
 pub(super) unsafe fn call_plugin(
@@ -109,7 +108,7 @@ pub(super) unsafe fn call_plugin(
         } else {
             let msg = retrieve_error_msg(lib);
             let msg = msg.to_string_lossy();
-            check_panic(msg.as_ref());
+            check_panic(msg.as_ref())?;
             polars_bail!(ComputeError: "the plugin failed with message: {}", msg)
         }
     } else {
@@ -156,7 +155,7 @@ pub(super) unsafe fn plugin_field(
         } else {
             let msg = retrieve_error_msg(lib);
             let msg = msg.to_string_lossy();
-            check_panic(msg.as_ref());
+            check_panic(msg.as_ref())?;
             polars_bail!(ComputeError: "the plugin failed with message: {}", msg)
         }
     } else {
@@ -164,9 +163,7 @@ pub(super) unsafe fn plugin_field(
     }
 }
 
-fn check_panic(msg: &str) {
-    if msg == "PANIC" {
-        eprintln!("The plugin panicked which is unrecoverable. Polars will abort");
-        abort()
-    }
+fn check_panic(msg: &str) -> PolarsResult<()> {
+    polars_ensure!(msg != "PANIC", ComputeError: "the plugin panicked\n\nThe message is suppressed. Set POLARS_VERBOSE=1 to send the panic message to stderr.");
+    Ok(())
 }

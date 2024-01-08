@@ -10,11 +10,9 @@ from decimal import Decimal as PyDecimal
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Collection,
     ForwardRef,
     Optional,
-    TypeVar,
     Union,
     get_args,
     overload,
@@ -41,6 +39,7 @@ from polars.datatypes import (
     List,
     Null,
     Object,
+    String,
     Struct,
     Time,
     UInt8,
@@ -48,7 +47,6 @@ from polars.datatypes import (
     UInt32,
     UInt64,
     Unknown,
-    Utf8,
 )
 from polars.dependencies import numpy as np
 from polars.dependencies import pyarrow as pa
@@ -71,19 +69,10 @@ if TYPE_CHECKING:
     from polars.type_aliases import PolarsDataType, PythonDataType, SchemaDict
 
 
-T = TypeVar("T")
-
-
-def cache(function: Callable[..., T]) -> T:  # noqa: D103
-    # need this to satisfy mypy issue with "@property/@cache combination"
-    # See: https://github.com/python/mypy/issues/5858
-    return functools.lru_cache()(function)  # type: ignore[return-value]
-
-
 PY_STR_TO_DTYPE: SchemaDict = {
     "float": Float64,
     "int": Int64,
-    "str": Utf8,
+    "str": String,
     "bool": Boolean,
     "date": Date,
     "datetime": Datetime("us"),
@@ -108,7 +97,7 @@ def _map_py_type_to_dtype(
     if python_dtype is int:
         return Int64
     if python_dtype is str:
-        return Utf8
+        return String
     if python_dtype is bool:
         return Boolean
     if issubclass(python_dtype, datetime):
@@ -183,17 +172,16 @@ def unpack_dtypes(
     >>> struct_dtype = pl.Struct(
     ...     [
     ...         pl.Field("a", pl.Int64),
-    ...         pl.Field("b", pl.Utf8),
+    ...         pl.Field("b", pl.String),
     ...         pl.Field("c", pl.List(pl.Float64)),
     ...     ]
     ... )
     >>> unpack_dtypes([struct_dtype, list_dtype])  # doctest: +IGNORE_RESULT
-    {Float64, Int64, Utf8}
+    {Float64, Int64, String}
     >>> unpack_dtypes(
     ...     [struct_dtype, list_dtype], include_compound=True
     ... )  # doctest: +IGNORE_RESULT
-    {Float64, Int64, Utf8, List(Float64), Struct([Field('a', Int64), Field('b', Utf8), Field('c', List(Float64))])}
-
+    {Float64, Int64, String, List(Float64), Struct([Field('a', Int64), Field('b', String), Field('c', List(Float64))])}
     """  # noqa: W505
     if not dtypes:
         return set()
@@ -219,7 +207,7 @@ def unpack_dtypes(
 
 class _DataTypeMappings:
     @property
-    @cache
+    @functools.lru_cache  # noqa: B019
     def DTYPE_TO_FFINAME(self) -> dict[PolarsDataType, str]:
         return {
             Int8: "i8",
@@ -234,7 +222,7 @@ class _DataTypeMappings:
             Float64: "f64",
             Decimal: "decimal",
             Boolean: "bool",
-            Utf8: "str",
+            String: "str",
             List: "list",
             Date: "date",
             Datetime: "datetime",
@@ -247,7 +235,7 @@ class _DataTypeMappings:
         }
 
     @property
-    @cache
+    @functools.lru_cache  # noqa: B019
     def DTYPE_TO_CTYPE(self) -> dict[PolarsDataType, Any]:
         return {
             UInt8: ctypes.c_uint8,
@@ -267,7 +255,7 @@ class _DataTypeMappings:
         }
 
     @property
-    @cache
+    @functools.lru_cache  # noqa: B019
     def DTYPE_TO_PY_TYPE(self) -> dict[PolarsDataType, PythonDataType]:
         return {
             Float64: float,
@@ -276,7 +264,7 @@ class _DataTypeMappings:
             Int32: int,
             Int16: int,
             Int8: int,
-            Utf8: str,
+            String: str,
             UInt8: int,
             UInt16: int,
             UInt32: int,
@@ -289,11 +277,12 @@ class _DataTypeMappings:
             Time: time,
             Binary: bytes,
             List: list,
+            Array: list,
             Null: None.__class__,
         }
 
     @property
-    @cache
+    @functools.lru_cache  # noqa: B019
     def NUMPY_KIND_AND_ITEMSIZE_TO_DTYPE(self) -> dict[tuple[str, int], PolarsDataType]:
         return {
             # (np.dtype().kind, np.dtype().itemsize)
@@ -311,7 +300,7 @@ class _DataTypeMappings:
         }
 
     @property
-    @cache
+    @functools.lru_cache  # noqa: B019
     def PY_TYPE_TO_ARROW_TYPE(self) -> dict[PythonDataType, pa.lib.DataType]:
         return {
             float: pa.float64(),
@@ -326,12 +315,12 @@ class _DataTypeMappings:
         }
 
     @property
-    @cache
+    @functools.lru_cache  # noqa: B019
     def REPR_TO_DTYPE(self) -> dict[str, PolarsDataType]:
         def _dtype_str_repr_safe(o: Any) -> PolarsDataType | None:
             try:
                 return _dtype_str_repr(o.base_type()).split("[")[0]
-            except ValueError:
+            except TypeError:
                 return None
 
         return {
@@ -483,7 +472,7 @@ def numpy_char_code_to_dtype(dtype_char: str) -> PolarsDataType:
     """Convert a numpy character dtype to a Polars dtype."""
     dtype = np.dtype(dtype_char)
     if dtype.kind == "U":
-        return Utf8
+        return String
     try:
         return DataTypeMappings.NUMPY_KIND_AND_ITEMSIZE_TO_DTYPE[
             (dtype.kind, dtype.itemsize)
@@ -502,11 +491,7 @@ def maybe_cast(el: Any, dtype: PolarsDataType) -> Any:
         _timedelta_to_pl_timedelta,
     )
 
-    try:
-        time_unit = dtype.time_unit  # type: ignore[union-attr]
-    except AttributeError:
-        time_unit = None
-
+    time_unit = getattr(dtype, "time_unit", None)
     if isinstance(el, datetime):
         return _datetime_to_pl_timestamp(el, time_unit)
     elif isinstance(el, timedelta):

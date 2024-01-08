@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, time, timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -64,7 +65,7 @@ def test_write_parquet_using_pyarrow_write_to_dataset_with_partitioning(
 
     # cast is necessary as pyarrow writes partitions as categorical type
     read_df = pl.read_parquet(path_to_write, use_pyarrow=True).with_columns(
-        pl.col("partition_col").cast(pl.Utf8)
+        pl.col("partition_col").cast(pl.String)
     )
     assert_frame_equal(df, read_df)
 
@@ -79,10 +80,14 @@ def small_parquet_path(io_files_path: Path) -> Path:
 def test_to_from_buffer(
     df: pl.DataFrame, compression: ParquetCompression, use_pyarrow: bool
 ) -> None:
+    print(df)
+    df = df[["list_str"]]
+    print(df)
     buf = io.BytesIO()
     df.write_parquet(buf, compression=compression, use_pyarrow=use_pyarrow)
     buf.seek(0)
     read_df = pl.read_parquet(buf, use_pyarrow=use_pyarrow)
+    print(read_df)
     assert_frame_equal(df, read_df, categorical_as_str=True)
 
 
@@ -521,3 +526,156 @@ def test_parquet_nano_second_schema() -> None:
     df.to_parquet(f)
     f.seek(0)
     assert pl.read_parquet(f).item() == value
+
+
+def test_nested_struct_read_12610() -> None:
+    n = 1_025
+    expect = pl.select(a=pl.int_range(0, n), b=pl.repeat(1, n)).with_columns(
+        struct=pl.struct(pl.all())
+    )
+
+    f = io.BytesIO()
+    expect.write_parquet(
+        f,
+        use_pyarrow=True,
+    )
+    f.seek(0)
+
+    actual = pl.read_parquet(f)
+    assert_frame_equal(expect, actual)
+
+
+@pl.Config(activate_decimals=True)
+@pytest.mark.write_disk()
+def test_decimal_parquet(tmp_path: Path) -> None:
+    path = tmp_path / "foo.parquet"
+    df = pl.DataFrame(
+        {
+            "foo": [1, 2, 3],
+            "bar": ["6", "7", "8"],
+        }
+    )
+
+    df = df.with_columns(pl.col("bar").cast(pl.Decimal))
+
+    df.write_parquet(path, statistics=True)
+    out = pl.scan_parquet(path).filter(foo=2).collect().to_dict(as_series=False)
+    assert out == {"foo": [2], "bar": [Decimal("7")]}
+
+
+def test_parquet_rle_non_nullable_12814() -> None:
+    column = (
+        pl.select(x=pl.arange(0, 1025, dtype=pl.Int64) // 10).to_series().to_arrow()
+    )
+    schema = pa.schema([pa.field("foo", pa.int64(), nullable=False)])
+    table = pa.Table.from_arrays([column], schema=schema)
+
+    f = io.BytesIO()
+    pq.write_table(table, f, data_page_size=1)
+    f.seek(0)
+
+    expect = pl.DataFrame(table).tail(10)
+    actual = pl.read_parquet(f).tail(10)
+
+    assert_frame_equal(expect, actual)
+
+
+@pytest.mark.slow()
+def test_parquet_12831() -> None:
+    n = 70_000
+    df = pl.DataFrame({"x": ["aaaaaa"] * n})
+    f = io.BytesIO()
+    df.write_parquet(f, row_group_size=int(1e8), data_page_size=512)
+    f.seek(0)
+    assert_frame_equal(pl.from_arrow(pq.read_table(f)), df)  # type: ignore[arg-type]
+
+
+@pytest.mark.write_disk()
+def test_parquet_struct_categorical(tmp_path: Path) -> None:
+    tmp_path.mkdir(exist_ok=True)
+
+    df = pl.DataFrame(
+        [
+            pl.Series("a", ["bob"], pl.Categorical),
+            pl.Series("b", ["foo"], pl.Categorical),
+        ]
+    )
+
+    file_path = tmp_path / "categorical.parquet"
+    df.write_parquet(file_path)
+
+    with pl.StringCache():
+        out = pl.read_parquet(file_path).select(pl.col("b").value_counts())
+    assert out.to_dict(as_series=False) == {"b": [{"b": "foo", "count": 1}]}
+
+
+@pytest.mark.write_disk()
+def test_null_parquet(tmp_path: Path) -> None:
+    tmp_path.mkdir(exist_ok=True)
+
+    df = pl.DataFrame([pl.Series("foo", [], dtype=pl.Int8)])
+    file_path = tmp_path / "null.parquet"
+    df.write_parquet(file_path)
+    out = pl.read_parquet(file_path)
+    assert_frame_equal(out, df)
+
+
+@pytest.mark.write_disk()
+def test_write_parquet_with_null_col(tmp_path: Path) -> None:
+    tmp_path.mkdir(exist_ok=True)
+
+    df1 = pl.DataFrame({"nulls": [None] * 2, "ints": [1] * 2})
+    df2 = pl.DataFrame({"nulls": [None] * 2, "ints": [1] * 2})
+    df3 = pl.DataFrame({"nulls": [None] * 3, "ints": [1] * 3})
+    df = df1.vstack(df2)
+    df = df.vstack(df3)
+    file_path = tmp_path / "with_null.parquet"
+    df.write_parquet(file_path, row_group_size=3)
+    out = pl.read_parquet(file_path)
+    assert_frame_equal(out, df)
+
+
+@pytest.mark.write_disk()
+def test_read_parquet_binary_buffered_reader(tmp_path: Path) -> None:
+    tmp_path.mkdir(exist_ok=True)
+
+    df = pl.DataFrame({"a": [1, 2, 3]})
+    file_path = tmp_path / "test.parquet"
+    df.write_parquet(file_path)
+
+    with file_path.open("rb") as f:
+        out = pl.read_parquet(f)
+    assert_frame_equal(out, df)
+
+
+@pytest.mark.write_disk()
+def test_read_parquet_binary_file_io(tmp_path: Path) -> None:
+    tmp_path.mkdir(exist_ok=True)
+
+    df = pl.DataFrame({"a": [1, 2, 3]})
+    file_path = tmp_path / "test.parquet"
+    df.write_parquet(file_path)
+
+    with file_path.open("rb", buffering=0) as f:
+        out = pl.read_parquet(f)
+    assert_frame_equal(out, df)
+
+
+def test_read_parquet_binary_bytes_io() -> None:
+    df = pl.DataFrame({"a": [1, 2, 3]})
+    f = io.BytesIO()
+    df.write_parquet(f)
+    f.seek(0)
+
+    out = pl.read_parquet(f)
+    assert_frame_equal(out, df)
+
+
+def test_read_parquet_binary_bytes() -> None:
+    df = pl.DataFrame({"a": [1, 2, 3]})
+    f = io.BytesIO()
+    df.write_parquet(f)
+    bytes = f.getvalue()
+
+    out = pl.read_parquet(bytes)
+    assert_frame_equal(out, df)

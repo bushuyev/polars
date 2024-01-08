@@ -1,6 +1,6 @@
 # Casting
 
-Casting converts the underlying [`DataType`](../concepts/data-types.md) of a column to a new one. Polars uses Arrow to manage the data in memory and relies on the compute kernels in the [Rust implementation](https://github.com/jorgecarleitao/arrow2) to do the conversion. Casting is available with the `cast()` method.
+Casting converts the underlying [`DataType`](../concepts/data-types/overview.md) of a column to a new one. Polars uses Arrow to manage the data in memory and relies on the compute kernels in the [Rust implementation](https://github.com/jorgecarleitao/arrow2) to do the conversion. Casting is available with the `cast()` method.
 
 The `cast` method includes a `strict` parameter that determines how Polars behaves when it encounters a value that can't be converted from the source `DataType` to the target `DataType`. By default, `strict=True`, which means that Polars will throw an error to notify the user of the failed conversion and provide details on the values that couldn't be cast. On the other hand, if `strict=False`, any values that can't be converted to the target `DataType` will be quietly converted to `null`.
 
@@ -73,7 +73,7 @@ In case the column contains a non-numerical value, Polars will throw a `ComputeE
 
 ## Booleans
 
-Booleans can be expressed as either 1 (`True`) or 0 (`False`). It's possible to perform casting operations between a numerical `DataType` and a boolean, and vice versa. However, keep in mind that casting from a string (`Utf8`) to a boolean is not permitted.
+Booleans can be expressed as either 1 (`True`) or 0 (`False`). It's possible to perform casting operations between a numerical `DataType` and a boolean, and vice versa. However, keep in mind that casting from a string (`String`) to a boolean is not permitted.
 
 {{code_block('user-guide/expressions/casting','bool',['cast'])}}
 

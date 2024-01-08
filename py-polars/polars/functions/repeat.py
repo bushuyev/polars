@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, overload
+from decimal import Decimal as D
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, overload
 
 from polars import functions as F
-from polars.datatypes import Float64
+from polars.datatypes import (
+    FLOAT_DTYPES,
+    INTEGER_DTYPES,
+    Array,
+    Boolean,
+    Decimal,
+    Float64,
+    List,
+    Utf8,
+)
 from polars.utils._parse_expr_input import parse_as_expression
 from polars.utils._wrap import wrap_expr
-from polars.utils.deprecation import issue_deprecation_warning
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     import polars.polars as plr
@@ -20,6 +30,26 @@ if TYPE_CHECKING:
     from polars.type_aliases import IntoExpr, PolarsDataType
 
 
+# create a lookup of dtypes that have a reasonable one/zero mapping; for
+# anything more elaborate should use `repeat`
+@lru_cache(16)
+def _one_or_zero_by_dtype(value: int, dtype: PolarsDataType) -> Any:
+    if dtype in INTEGER_DTYPES:
+        return value
+    elif dtype in FLOAT_DTYPES:
+        return float(value)
+    elif dtype == Boolean:
+        return bool(value)
+    elif dtype == Utf8:
+        return str(value)
+    elif isinstance(dtype, Decimal):
+        return D(value)
+    elif isinstance(dtype, (List, Array)):
+        arr_width = getattr(dtype, "width", 1)
+        return [_one_or_zero_by_dtype(value, dtype.inner)] * arr_width
+    return None
+
+
 @overload
 def repeat(
     value: IntoExpr | None,
@@ -27,7 +57,6 @@ def repeat(
     *,
     dtype: PolarsDataType | None = ...,
     eager: Literal[False] = ...,
-    name: str | None = ...,
 ) -> Expr:
     ...
 
@@ -39,7 +68,6 @@ def repeat(
     *,
     dtype: PolarsDataType | None = ...,
     eager: Literal[True],
-    name: str | None = ...,
 ) -> Series:
     ...
 
@@ -51,7 +79,6 @@ def repeat(
     *,
     dtype: PolarsDataType | None = ...,
     eager: bool,
-    name: str | None = ...,
 ) -> Expr | Series:
     ...
 
@@ -62,7 +89,6 @@ def repeat(
     *,
     dtype: PolarsDataType | None = None,
     eager: bool = False,
-    name: str | None = None,
 ) -> Expr | Series:
     """
     Construct a column of length `n` filled with the given value.
@@ -80,11 +106,6 @@ def repeat(
     eager
         Evaluate immediately and return a `Series`. If set to `False` (default),
         return an expression instead.
-    name
-        Name of the resulting column.
-
-        .. deprecated:: 0.17.15
-            This argument is deprecated. Use the `alias` method instead.
 
     Notes
     -----
@@ -118,20 +139,11 @@ def repeat(
             3
             3
     ]
-
     """
-    if name is not None:
-        issue_deprecation_warning(
-            "the `name` argument is deprecated. Use the `alias` method instead.",
-            version="0.18.0",
-        )
-
     if isinstance(n, int):
         n = F.lit(n)
-    value = parse_as_expression(value, str_as_lit=True)
+    value = parse_as_expression(value, str_as_lit=True, list_as_lit=True, dtype=dtype)
     expr = wrap_expr(plr.repeat(value, n._pyexpr, dtype))
-    if name is not None:
-        expr = expr.alias(name)
     if eager:
         return F.select(expr).to_series()
     return expr
@@ -176,7 +188,7 @@ def ones(
     """
     Construct a column of length `n` filled with ones.
 
-    Syntactic sugar for `repeat(1.0, ...)`.
+    This is syntactic sugar for the `repeat` function.
 
     Parameters
     ----------
@@ -208,9 +220,11 @@ def ones(
         1
         1
     ]
-
     """
-    return repeat(1.0, n=n, dtype=dtype, eager=eager).alias("ones")
+    if (one := _one_or_zero_by_dtype(1, dtype)) is None:
+        raise TypeError(f"invalid dtype for `ones`; found {dtype}")
+
+    return repeat(one, n=n, dtype=dtype, eager=eager).alias("ones")
 
 
 @overload
@@ -252,7 +266,7 @@ def zeros(
     """
     Construct a column of length `n` filled with zeros.
 
-    Syntactic sugar for `repeat(0.0, ...)`.
+    This is syntactic sugar for the `repeat` function.
 
     Parameters
     ----------
@@ -284,6 +298,8 @@ def zeros(
         0
         0
     ]
-
     """
-    return repeat(0.0, n=n, dtype=dtype, eager=eager).alias("zeros")
+    if (zero := _one_or_zero_by_dtype(0, dtype)) is None:
+        raise TypeError(f"invalid dtype for `zeros`; found {dtype}")
+
+    return repeat(zero, n=n, dtype=dtype, eager=eager).alias("zeros")

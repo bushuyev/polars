@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use bitflags::bitflags;
@@ -8,10 +8,20 @@ use polars_core::config::verbose;
 use polars_core::frame::group_by::GroupsProxy;
 use polars_core::prelude::*;
 use polars_ops::prelude::ChunkJoinOptIds;
-#[cfg(any(feature = "parquet", feature = "csv", feature = "ipc"))]
+#[cfg(any(
+    feature = "parquet",
+    feature = "csv",
+    feature = "ipc",
+    feature = "json"
+))]
 use polars_plan::logical_plan::FileFingerPrint;
 
-#[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
+#[cfg(any(
+    feature = "ipc",
+    feature = "parquet",
+    feature = "csv",
+    feature = "json"
+))]
 use super::file_cache::FileCache;
 use crate::physical_plan::node_timer::NodeTimer;
 
@@ -65,7 +75,12 @@ pub struct ExecutionState {
     // cached by a `.cache` call and kept in memory for the duration of the plan.
     df_cache: Arc<Mutex<PlHashMap<usize, Arc<OnceCell<DataFrame>>>>>,
     // cache file reads until all branches got there file, then we delete it
-    #[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
+    #[cfg(any(
+        feature = "ipc",
+        feature = "parquet",
+        feature = "csv",
+        feature = "json"
+    ))]
     pub(crate) file_cache: FileCache,
     pub(super) schema_cache: RwLock<Option<SchemaRef>>,
     /// Used by Window Expression to prevent redundant grouping
@@ -77,9 +92,35 @@ pub struct ExecutionState {
     pub(super) flags: AtomicU8,
     pub(super) ext_contexts: Arc<Vec<DataFrame>>,
     node_timer: Option<NodeTimer>,
+    stop: Arc<AtomicBool>,
 }
 
 impl ExecutionState {
+    pub fn new() -> Self {
+        let mut flags: StateFlags = Default::default();
+        if verbose() {
+            flags |= StateFlags::VERBOSE;
+        }
+        Self {
+            df_cache: Default::default(),
+            schema_cache: Default::default(),
+            #[cfg(any(
+                feature = "ipc",
+                feature = "parquet",
+                feature = "csv",
+                feature = "json"
+            ))]
+            file_cache: FileCache::new(None),
+            group_tuples: Default::default(),
+            join_tuples: Default::default(),
+            branch_idx: 0,
+            flags: AtomicU8::new(StateFlags::init().as_u8()),
+            ext_contexts: Default::default(),
+            node_timer: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Toggle this to measure execution times.
     pub(crate) fn time_nodes(&mut self) {
         self.node_timer = Some(NodeTimer::new())
@@ -90,6 +131,16 @@ impl ExecutionState {
 
     pub(crate) fn finish_timer(self) -> PolarsResult<DataFrame> {
         self.node_timer.unwrap().finish()
+    }
+
+    // This is wrong when the U64 overflows which will never happen.
+    pub(super) fn should_stop(&self) -> PolarsResult<()> {
+        polars_ensure!(!self.stop.load(Ordering::Relaxed), ComputeError: "query interrupted");
+        Ok(())
+    }
+
+    pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
     }
 
     pub(super) fn record<T, F: FnOnce() -> T>(&self, func: F, name: Cow<'static, str>) -> T {
@@ -107,10 +158,16 @@ impl ExecutionState {
     }
 
     /// Partially clones and partially clears state
+    /// This should be used when splitting a node, like a join or union
     pub(super) fn split(&self) -> Self {
         Self {
             df_cache: self.df_cache.clone(),
-            #[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
+            #[cfg(any(
+                feature = "ipc",
+                feature = "parquet",
+                feature = "csv",
+                feature = "json"
+            ))]
             file_cache: self.file_cache.clone(),
             schema_cache: Default::default(),
             group_tuples: Default::default(),
@@ -119,14 +176,20 @@ impl ExecutionState {
             flags: AtomicU8::new(self.flags.load(Ordering::Relaxed)),
             ext_contexts: self.ext_contexts.clone(),
             node_timer: self.node_timer.clone(),
+            stop: self.stop.clone(),
         }
     }
 
-    /// clones and partially clears state
+    /// clones, but clears no state.
     pub(super) fn clone(&self) -> Self {
         Self {
             df_cache: self.df_cache.clone(),
-            #[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
+            #[cfg(any(
+                feature = "ipc",
+                feature = "parquet",
+                feature = "csv",
+                feature = "json"
+            ))]
             file_cache: self.file_cache.clone(),
             schema_cache: self.schema_cache.read().unwrap().clone().into(),
             group_tuples: self.group_tuples.clone(),
@@ -135,47 +198,31 @@ impl ExecutionState {
             flags: AtomicU8::new(self.flags.load(Ordering::Relaxed)),
             ext_contexts: self.ext_contexts.clone(),
             node_timer: self.node_timer.clone(),
+            stop: self.stop.clone(),
         }
     }
 
-    #[cfg(not(any(feature = "parquet", feature = "csv", feature = "ipc")))]
+    #[cfg(not(any(
+        feature = "parquet",
+        feature = "csv",
+        feature = "ipc",
+        feature = "json"
+    )))]
     pub(crate) fn with_finger_prints(_finger_prints: Option<usize>) -> Self {
         Self::new()
     }
-    #[cfg(any(feature = "parquet", feature = "csv", feature = "ipc"))]
+    #[cfg(any(
+        feature = "parquet",
+        feature = "csv",
+        feature = "ipc",
+        feature = "json"
+    ))]
     pub(crate) fn with_finger_prints(finger_prints: Option<Vec<FileFingerPrint>>) -> Self {
-        Self {
-            df_cache: Arc::new(Mutex::new(PlHashMap::default())),
-            schema_cache: Default::default(),
-            #[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
-            file_cache: FileCache::new(finger_prints),
-            group_tuples: Arc::new(RwLock::new(PlHashMap::default())),
-            join_tuples: Arc::new(Mutex::new(PlHashMap::default())),
-            branch_idx: 0,
-            flags: AtomicU8::new(StateFlags::init().as_u8()),
-            ext_contexts: Default::default(),
-            node_timer: None,
-        }
+        let mut new = Self::new();
+        new.file_cache = FileCache::new(finger_prints);
+        new
     }
 
-    pub fn new() -> Self {
-        let mut flags: StateFlags = Default::default();
-        if verbose() {
-            flags |= StateFlags::VERBOSE;
-        }
-        Self {
-            df_cache: Default::default(),
-            schema_cache: Default::default(),
-            #[cfg(any(feature = "ipc", feature = "parquet", feature = "csv"))]
-            file_cache: FileCache::new(None),
-            group_tuples: Default::default(),
-            join_tuples: Default::default(),
-            branch_idx: 0,
-            flags: AtomicU8::new(StateFlags::init().as_u8()),
-            ext_contexts: Default::default(),
-            node_timer: None,
-        }
-    }
     pub(crate) fn set_schema(&self, schema: SchemaRef) {
         let mut lock = self.schema_cache.write().unwrap();
         *lock = Some(schema);

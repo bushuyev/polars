@@ -23,6 +23,7 @@ use polars_io::RowCount;
 #[cfg(feature = "csv")]
 use polars_io::{
     csv::utils::{infer_file_schema, is_compressed},
+    csv::CommentPrefix,
     csv::CsvEncoding,
     csv::NullValues,
     utils::get_reader_bytes,
@@ -285,7 +286,7 @@ impl LogicalPlanBuilder {
         mut schema: Option<Arc<Schema>>,
         schema_overwrite: Option<&Schema>,
         low_memory: bool,
-        comment_char: Option<u8>,
+        comment_prefix: Option<CommentPrefix>,
         quote_char: Option<u8>,
         eol_char: u8,
         null_values: Option<NullValues>,
@@ -303,15 +304,19 @@ impl LogicalPlanBuilder {
 
         let paths = Arc::new([path]);
 
-        let mut magic_nr = [0u8; 2];
-        let res = file.read_exact(&mut magic_nr);
-        if raise_if_empty {
-            res.map_err(|_| polars_err!(NoData: "empty CSV"))?;
-        };
-        polars_ensure!(
+        let mut magic_nr = [0u8; 4];
+        let res_len = file.read(&mut magic_nr)?;
+        if res_len < 2 {
+            if raise_if_empty {
+                polars_bail!(NoData: "empty CSV")
+            }
+        } else {
+            polars_ensure!(
             !is_compressed(&magic_nr),
             ComputeError: "cannot scan compressed csv; use `read_csv` for compressed data",
-        );
+            );
+        }
+
         file.rewind()?;
         let reader_bytes = get_reader_bytes(&mut file).expect("could not mmap file");
 
@@ -325,7 +330,7 @@ impl LogicalPlanBuilder {
             schema_overwrite,
             &mut skip_rows,
             skip_rows_after_header,
-            comment_char,
+            comment_prefix.as_ref(),
             quote_char,
             eol_char,
             null_values.as_ref(),
@@ -377,7 +382,7 @@ impl LogicalPlanBuilder {
                     ignore_errors,
                     skip_rows,
                     low_memory,
-                    comment_char,
+                    comment_prefix,
                     quote_char,
                     eol_char,
                     null_values,
@@ -528,6 +533,7 @@ impl LogicalPlanBuilder {
             let field = e
                 .to_field_amortized(&schema, Context::Default, &mut arena)
                 .unwrap();
+
             if !output_names.insert(field.name().clone()) {
                 let msg = format!(
                     "The name: '{}' passed to `LazyFrame.with_columns` is duplicate",
@@ -683,19 +689,42 @@ impl LogicalPlanBuilder {
             into
         );
 
+        // Initialize schema from keys
         let mut schema = try_delayed!(
             expressions_to_schema(&keys, current_schema, Context::Default),
             &self.0,
             into
         );
-        let other = try_delayed!(
+
+        // Add dynamic groupby index column(s)
+        #[cfg(feature = "dynamic_group_by")]
+        {
+            if let Some(options) = rolling_options.as_ref() {
+                let name = &options.index_column;
+                let dtype = try_delayed!(current_schema.try_get(name), self.0, into);
+                schema.with_column(name.clone(), dtype.clone());
+            } else if let Some(options) = dynamic_options.as_ref() {
+                let name = &options.index_column;
+                let dtype = try_delayed!(current_schema.try_get(name), self.0, into);
+                if options.include_boundaries {
+                    schema.with_column("_lower_boundary".into(), dtype.clone());
+                    schema.with_column("_upper_boundary".into(), dtype.clone());
+                }
+                schema.with_column(name.clone(), dtype.clone());
+            }
+        }
+        let keys_index_len = schema.len();
+
+        // Add aggregation column(s)
+        let aggs_schema = try_delayed!(
             expressions_to_schema(&aggs, current_schema, Context::Aggregation),
             &self.0,
             into
         );
-        schema.merge(other);
+        schema.merge(aggs_schema);
 
-        if schema.len() < keys.len() + aggs.len() {
+        // Make sure aggregation columns do not contain keys or index columns
+        if schema.len() < (keys_index_len + aggs.len()) {
             let check_names = || {
                 let mut names = PlHashSet::with_capacity(schema.len());
                 for expr in aggs.iter().chain(keys.iter()) {
@@ -709,37 +738,13 @@ impl LogicalPlanBuilder {
             try_delayed!(check_names(), &self.0, into)
         }
 
-        #[cfg(feature = "dynamic_group_by")]
-        {
-            let index_columns = &[
-                rolling_options
-                    .as_ref()
-                    .map(|options| &options.index_column),
-                dynamic_options
-                    .as_ref()
-                    .map(|options| &options.index_column),
-            ];
-            for &name in index_columns.iter().flatten() {
-                let dtype = try_delayed!(
-                    current_schema
-                        .get(name)
-                        .ok_or_else(|| polars_err!(ColumnNotFound: "{}", name)),
-                    self.0,
-                    into
-                );
-                schema.with_column(name.clone(), dtype.clone());
-            }
-        }
-
-        #[cfg(feature = "dynamic_group_by")]
         let options = GroupbyOptions {
+            #[cfg(feature = "dynamic_group_by")]
             dynamic: dynamic_options,
+            #[cfg(feature = "dynamic_group_by")]
             rolling: rolling_options,
             slice: None,
         };
-
-        #[cfg(not(feature = "dynamic_group_by"))]
-        let options = GroupbyOptions { slice: None };
 
         LogicalPlan::Aggregate {
             input: Box::new(self.0),

@@ -2,6 +2,7 @@ use either::Either;
 
 use super::specification::try_check_offsets_bounds;
 use super::{Array, GenericBinaryArray};
+use crate::array::iterator::NonNullValuesIter;
 use crate::bitmap::utils::{BitmapIter, ZipValidity};
 use crate::bitmap::Bitmap;
 use crate::buffer::Buffer;
@@ -98,6 +99,25 @@ impl<O: Offset> BinaryArray<O> {
         })
     }
 
+    /// Creates a new [`BinaryArray`] without checking invariants.
+    ///
+    /// # Safety
+    ///
+    /// The invariants must be valid (see try_new).
+    pub unsafe fn new_unchecked(
+        data_type: ArrowDataType,
+        offsets: OffsetsBuffer<O>,
+        values: Buffer<u8>,
+        validity: Option<Bitmap>,
+    ) -> Self {
+        Self {
+            data_type,
+            offsets,
+            values,
+            validity,
+        }
+    }
+
     /// Creates a new [`BinaryArray`] from slices of `&[u8]`.
     pub fn from_slice<T: AsRef<[u8]>, P: AsRef<[T]>>(slice: P) -> Self {
         Self::from_trusted_len_values_iter(slice.as_ref().iter())
@@ -117,6 +137,12 @@ impl<O: Offset> BinaryArray<O> {
     /// Returns an iterator of `&[u8]` over every element of this array, ignoring the validity
     pub fn values_iter(&self) -> BinaryValueIter<O> {
         BinaryValueIter::new(self)
+    }
+
+    /// Returns an iterator of the non-null values.
+    #[inline]
+    pub fn non_null_values_iter(&self) -> NonNullValuesIter<'_, BinaryArray<O>> {
+        NonNullValuesIter::new(self, self.validity())
     }
 
     /// Returns the length of this array
@@ -301,12 +327,14 @@ impl<O: Offset> BinaryArray<O> {
     /// Creates an null [`BinaryArray`], i.e. whose `.null_count() == .len()`.
     #[inline]
     pub fn new_null(data_type: ArrowDataType, length: usize) -> Self {
-        Self::new(
-            data_type,
-            Offsets::new_zeroed(length).into(),
-            Buffer::new(),
-            Some(Bitmap::new_zeroed(length)),
-        )
+        unsafe {
+            Self::new_unchecked(
+                data_type,
+                Offsets::new_zeroed(length).into(),
+                Buffer::new(),
+                Some(Bitmap::new_zeroed(length)),
+            )
+        }
     }
 
     /// Returns the default [`ArrowDataType`], `DataType::Binary` or `DataType::LargeBinary`

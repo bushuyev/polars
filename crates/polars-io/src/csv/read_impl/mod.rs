@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use arrow::legacy::array::*;
+use arrow::array::ValueSize;
 pub use batched_mmap::*;
 pub use batched_read::*;
 use polars_core::config::verbose;
@@ -20,7 +20,7 @@ use rayon::prelude::*;
 
 use crate::csv::buffer::*;
 use crate::csv::parser::*;
-use crate::csv::read::NullValuesCompiled;
+use crate::csv::read::{CommentPrefix, NullValuesCompiled};
 use crate::csv::utils::*;
 use crate::csv::{CsvEncoding, NullValues};
 use crate::mmap::ReaderBytes;
@@ -37,14 +37,14 @@ pub(crate) fn cast_columns(
     let cast_fn = |s: &Series, fld: &Field| {
         let out = match (s.dtype(), fld.data_type()) {
             #[cfg(feature = "temporal")]
-            (DataType::Utf8, DataType::Date) => s
-                .utf8()
+            (DataType::String, DataType::Date) => s
+                .str()
                 .unwrap()
                 .as_date(None, false)
                 .map(|ca| ca.into_series()),
             #[cfg(feature = "temporal")]
-            (DataType::Utf8, DataType::Datetime(tu, _)) => s
-                .utf8()
+            (DataType::String, DataType::Datetime(tu, _)) => s
+                .str()
                 .unwrap()
                 .as_datetime(
                     None,
@@ -52,7 +52,7 @@ pub(crate) fn cast_columns(
                     false,
                     false,
                     None,
-                    &Utf8Chunked::from_iter(std::iter::once("raise")),
+                    &StringChunked::from_iter(std::iter::once("raise")),
                 )
                 .map(|ca| ca.into_series()),
             (_, dt) => s.cast(dt),
@@ -80,7 +80,7 @@ pub(crate) fn cast_columns(
         // cast to the original dtypes in the schema
         for fld in to_cast {
             // field may not be projected
-            if let Some(idx) = df.find_idx_by_name(fld.name()) {
+            if let Some(idx) = df.get_column_index(fld.name()) {
                 df.try_apply_at_idx(idx, |s| cast_fn(s, fld))?;
             }
         }
@@ -109,7 +109,7 @@ pub(crate) struct CoreReader<'a> {
     sample_size: usize,
     chunk_size: usize,
     low_memory: bool,
-    comment_char: Option<u8>,
+    comment_prefix: Option<CommentPrefix>,
     quote_char: Option<u8>,
     eol_char: u8,
     null_values: Option<NullValuesCompiled>,
@@ -198,7 +198,7 @@ impl<'a> CoreReader<'a> {
         sample_size: usize,
         chunk_size: usize,
         low_memory: bool,
-        comment_char: Option<u8>,
+        comment_prefix: Option<CommentPrefix>,
         quote_char: Option<u8>,
         eol_char: u8,
         null_values: Option<NullValues>,
@@ -247,7 +247,7 @@ impl<'a> CoreReader<'a> {
                         schema_overwrite.as_deref(),
                         &mut skip_rows,
                         skip_rows_after_header,
-                        comment_char,
+                        comment_prefix.as_ref(),
                         quote_char,
                         eol_char,
                         null_values.as_ref(),
@@ -299,7 +299,7 @@ impl<'a> CoreReader<'a> {
             sample_size,
             chunk_size,
             low_memory,
-            comment_char,
+            comment_prefix,
             quote_char,
             eol_char,
             null_values,
@@ -327,11 +327,7 @@ impl<'a> CoreReader<'a> {
             bytes = skip_line_ending(bytes, eol_char)
         }
 
-        // If there is a header we skip it.
-        if self.has_header {
-            bytes = skip_header(bytes, quote_char, eol_char);
-        }
-
+        // skip 'n' leading rows
         if self.skip_rows_before_header > 0 {
             for _ in 0..self.skip_rows_before_header {
                 let pos = next_line_position_naive(bytes, eol_char)
@@ -339,17 +335,20 @@ impl<'a> CoreReader<'a> {
                 bytes = &bytes[pos..];
             }
         }
-
+        // skip header row
+        if self.has_header {
+            bytes = skip_this_line(bytes, quote_char, eol_char);
+        }
+        // skip 'n' rows following the header
         if self.skip_rows_after_header > 0 {
             for _ in 0..self.skip_rows_after_header {
-                let pos = match bytes.first() {
-                    Some(first) if Some(*first) == self.comment_char => {
-                        next_line_position_naive(bytes, eol_char)
-                    },
+                let pos = if is_comment_line(bytes, self.comment_prefix.as_ref()) {
+                    next_line_position_naive(bytes, eol_char)
+                } else {
                     // we don't pass expected fields
                     // as we want to skip all rows
                     // no matter the no. of fields
-                    _ => next_line_position(bytes, None, self.separator, self.quote_char, eol_char),
+                    next_line_position(bytes, None, self.separator, self.quote_char, eol_char)
                 }
                 .ok_or_else(|| polars_err!(NoData: "not enough lines to skip"))?;
 
@@ -516,7 +515,7 @@ impl<'a> CoreReader<'a> {
                 )
             })?;
 
-            if dtype == &DataType::Utf8 {
+            if dtype == &DataType::String {
                 new_projection.push(*i)
             }
         }
@@ -554,7 +553,7 @@ impl<'a> CoreReader<'a> {
         if bytes.is_empty() {
             let mut df = DataFrame::from(self.schema.as_ref());
             if let Some(ref row_count) = self.row_count {
-                df.insert_at_idx(0, Series::new_empty(&row_count.name, &IDX_DTYPE))?;
+                df.insert_column(0, Series::new_empty(&row_count.name, &IDX_DTYPE))?;
             }
             return Ok(df);
         }
@@ -598,7 +597,7 @@ impl<'a> CoreReader<'a> {
                                 local_bytes,
                                 offset,
                                 self.separator,
-                                self.comment_char,
+                                self.comment_prefix.as_ref(),
                                 self.quote_char,
                                 self.eol_char,
                                 self.missing_is_null,
@@ -670,7 +669,7 @@ impl<'a> CoreReader<'a> {
                             bytes_offset_thread,
                             self.quote_char,
                             self.eol_char,
-                            self.comment_char,
+                            self.comment_prefix.as_ref(),
                             capacity,
                             &str_capacities,
                             self.encoding,
@@ -716,7 +715,7 @@ impl<'a> CoreReader<'a> {
                                 remaining_bytes,
                                 0,
                                 self.separator,
-                                self.comment_char,
+                                self.comment_prefix.as_ref(),
                                 self.quote_char,
                                 self.eol_char,
                                 self.missing_is_null,
@@ -781,7 +780,7 @@ fn update_string_stats(
 ) -> PolarsResult<()> {
     // update the running str bytes statistics
     for (str_index, name) in str_columns.iter().enumerate() {
-        let ca = local_df.column(name)?.utf8()?;
+        let ca = local_df.column(name)?.str()?;
         let str_bytes_len = ca.get_values_size();
 
         let _ = str_capacities[str_index].update(str_bytes_len);
@@ -800,7 +799,7 @@ fn read_chunk(
     bytes_offset_thread: usize,
     quote_char: Option<u8>,
     eol_char: u8,
-    comment_char: Option<u8>,
+    comment_prefix: Option<&CommentPrefix>,
     capacity: usize,
     str_capacities: &[RunningSize],
     encoding: CsvEncoding,
@@ -835,7 +834,7 @@ fn read_chunk(
             local_bytes,
             offset,
             separator,
-            comment_char,
+            comment_prefix,
             quote_char,
             eol_char,
             missing_is_null,

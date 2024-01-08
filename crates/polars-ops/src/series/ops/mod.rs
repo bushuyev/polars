@@ -19,7 +19,6 @@ mod floor_divide;
 #[cfg(feature = "fused")]
 mod fused;
 mod horizontal;
-#[cfg(feature = "convert_index")]
 mod index;
 #[cfg(feature = "is_first_distinct")]
 mod is_first_distinct;
@@ -37,6 +36,8 @@ mod moment;
 mod pct_change;
 #[cfg(feature = "rank")]
 mod rank;
+#[cfg(feature = "replace")]
+mod replace;
 #[cfg(feature = "rle")]
 mod rle;
 #[cfg(feature = "rolling_window")]
@@ -72,7 +73,6 @@ pub use floor_divide::*;
 #[cfg(feature = "fused")]
 pub use fused::*;
 pub use horizontal::*;
-#[cfg(feature = "convert_index")]
 pub use index::*;
 #[cfg(feature = "is_first_distinct")]
 pub use is_first_distinct::*;
@@ -91,6 +91,8 @@ pub use pct_change::*;
 use polars_core::prelude::*;
 #[cfg(feature = "rank")]
 pub use rank::*;
+#[cfg(feature = "replace")]
+pub use replace::*;
 #[cfg(feature = "rle")]
 pub use rle::*;
 #[cfg(feature = "rolling_window")]

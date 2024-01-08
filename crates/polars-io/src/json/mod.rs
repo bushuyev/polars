@@ -61,16 +61,18 @@
 //! +-----+--------+-------+--------+
 //! ```
 //!
+pub(crate) mod infer;
+
 use std::convert::TryFrom;
 use std::io::Write;
 use std::ops::Deref;
 
-use arrow::array::StructArray;
+use arrow::array::{ArrayRef, StructArray};
 use arrow::legacy::conversion::chunk_to_struct;
 use polars_core::error::to_compute_err;
 use polars_core::prelude::*;
 use polars_core::utils::try_get_supertype;
-use polars_json::json::infer;
+use polars_json::json::write::FallibleStreamingIterator;
 use simd_json::BorrowedValue;
 
 use crate::mmap::{MmapBytesReader, ReaderBytes};
@@ -153,6 +155,34 @@ where
     }
 }
 
+pub struct BatchedWriter<W: Write> {
+    writer: W,
+}
+
+impl<W> BatchedWriter<W>
+where
+    W: Write,
+{
+    pub fn new(writer: W) -> Self {
+        BatchedWriter { writer }
+    }
+    /// Write a batch to the json writer.
+    ///
+    /// # Panics
+    /// The caller must ensure the chunks in the given [`DataFrame`] are aligned.
+    pub fn write_batch(&mut self, df: &DataFrame) -> PolarsResult<()> {
+        let fields = df.iter().map(|s| s.field().to_arrow()).collect::<Vec<_>>();
+        let chunks = df.iter_chunks();
+        let batches =
+            chunks.map(|chunk| Ok(Box::new(chunk_to_struct(chunk, fields.clone())) as ArrayRef));
+        let mut serializer = polars_json::ndjson::write::Serializer::new(batches, vec![]);
+        while let Some(block) = serializer.next()? {
+            self.writer.write_all(block)?;
+        }
+        Ok(())
+    }
+}
+
 /// Reads JSON in one of the formats in [`JsonFormat`] into a DataFrame.
 #[must_use]
 pub struct JsonReader<'a, R>
@@ -219,20 +249,13 @@ where
                 } else {
                     // infer
                     let inner_dtype = if let BorrowedValue::Array(values) = &json_value {
-                        // struct types may have missing fields so find supertype
-                        values
-                            .iter()
-                            .take(self.infer_schema_len.unwrap_or(usize::MAX))
-                            .map(|value| infer(value).map(|dt| DataType::from(&dt)))
-                            .reduce(|l, r| {
-                                let l = l?;
-                                let r = r?;
-                                try_get_supertype(&l, &r)
-                            })
-                            .unwrap()?
-                            .to_arrow()
+                        infer::json_values_to_supertype(
+                            values,
+                            self.infer_schema_len.unwrap_or(usize::MAX),
+                        )?
+                        .to_arrow()
                     } else {
-                        infer(&json_value)?
+                        polars_json::json::infer(&json_value)?
                     };
 
                     if let Some(overwrite) = self.schema_overwrite {

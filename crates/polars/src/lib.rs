@@ -147,7 +147,7 @@
 //! (Note that within an expression there may be more parallelization going on).
 //!
 //! Understanding polars expressions is most important when starting with the polars library. Read more
-//! about them in the [User Guide](https://pola-rs.github.io/polars/user-guide/concepts/expressions).
+//! about them in the [User Guide](https://docs.pola.rs/user-guide/concepts/expressions).
 //! Though the examples given there are in python. The expressions API is almost identical and the
 //! the read should certainly be valuable to rust users as well.
 //!
@@ -188,7 +188,7 @@
 //! * `ndarray`- Convert from [`DataFrame`] to [ndarray](https://docs.rs/ndarray/)
 //! * `temporal` - Conversions between [Chrono](https://docs.rs/chrono/) and Polars for temporal data types
 //! * `timezones` - Activate timezone support.
-//! * `strings` - Extra string utilities for [`Utf8Chunked`] //!     - `string_pad` - `zfill`, `ljust`, `rjust`
+//! * `strings` - Extra string utilities for [`StringChunked`] //!     - `string_pad` - `zfill`, `ljust`, `rjust`
 //!     - `string_to_integer` - `parse_int`
 //! * `object` - Support for generic ChunkedArrays called [`ObjectChunked<T>`] (generic over `T`).
 //!              These are downcastable from Series through the [Any](https://doc.rust-lang.org/std/any/index.html) trait.
@@ -213,7 +213,7 @@
 //!                         * zip
 //!                         * gzip
 //!
-//! [`Utf8Chunked`]: crate::datatypes::Utf8Chunked
+//! [`StringChunked`]: crate::datatypes::StringChunked
 //! [column selection]: polars_lazy::dsl::col
 //! [`ObjectChunked<T>`]: polars_core::datatypes::ObjectChunked
 //!
@@ -249,7 +249,7 @@
 //!     - `cum_agg` - [`cum_sum`], [`cum_min`], [`cum_max`] aggregation.
 //!     - `rolling_window` - rolling window functions, like [`rolling_mean`]
 //!     - `interpolate` [interpolate None values](polars_ops::chunked_array::interpolate)
-//!     - `extract_jsonpath` - [Run jsonpath queries on Utf8Chunked](https://goessner.net/articles/JsonPath/)
+//!     - `extract_jsonpath` - [Run jsonpath queries on StringChunked](https://goessner.net/articles/JsonPath/)
 //!     - `list` - List utils.
 //!         - `list_gather` take sublist by multiple indices
 //!     - `rank` - Ranking algorithms.
@@ -275,6 +275,7 @@
 //!     - `propagate_nans` - NaN propagating min/max aggregations.
 //!     - `extract_groups` - Extract multiple regex groups from strings.
 //!     - `cov` - Covariance and correlation functions.
+//!     - `find_many` - Find/replace multiple string patterns at once.
 //! * [`DataFrame`] pretty printing
 //!     - `fmt` - Activate [`DataFrame`] formatting
 //!
@@ -324,18 +325,11 @@
 //! ### Custom allocator
 //! A DataFrame library naturally does a lot of heap allocations. It is recommended to use a custom
 //! allocator.
-//! [Mimalloc](https://crates.io/crates/mimalloc) and
-//! [JeMalloc](https://crates.io/crates/jemallocator) for instance, show a significant
+//! [JeMalloc](https://crates.io/crates/jemallocator) and
+//! [Mimalloc](https://crates.io/crates/mimalloc) for instance, show a significant
 //! performance gain in runtime as well as memory usage.
 //!
-//! #### Usage
-//! ```ignore
-//! use mimalloc::MiMalloc;
-//!
-//! #[global_allocator]
-//! static GLOBAL: MiMalloc = MiMalloc;
-//! ```
-//!
+//! #### Jemalloc Usage
 //! ```ignore
 //! use jemallocator::Jemalloc;
 //!
@@ -343,15 +337,30 @@
 //! static GLOBAL: Jemalloc = Jemalloc;
 //! ```
 //!
-//! #### Notes
-//! [Benchmarks](https://github.com/pola-rs/polars/pull/3108) have shown that on Linux JeMalloc
-//! outperforms Mimalloc on all tasks and is therefore the default Linux allocator used for the Python bindings.
+//! #### Cargo.toml
+//! ```toml
+//! [dependencies]
+//! jemallocator = { version = "*" }
+//! ```
+//!
+//! #### Mimalloc Usage
+//!
+//! ```ignore
+//! use mimalloc::MiMalloc;
+//!
+//! #[global_allocator]
+//! static GLOBAL: MiMalloc = MiMalloc;
+//! ```
 //!
 //! #### Cargo.toml
 //! ```toml
 //! [dependencies]
 //! mimalloc = { version = "*", default-features = false }
 //! ```
+//!
+//! #### Notes
+//! [Benchmarks](https://github.com/pola-rs/polars/pull/3108) have shown that on Linux and macOS JeMalloc
+//! outperforms Mimalloc on all tasks and is therefore the default allocator used for the Python bindings on Unix platforms.
 //!
 //! ## Config with ENV vars
 //!
@@ -398,7 +407,7 @@
 //! * `POLARS_NO_CHUNKED_JOIN` -> force rechunk before joins.
 //!
 //! ## User Guide
-//! If you want to read more, [check the User Guide](https://pola-rs.github.io/polars/).
+//! If you want to read more, [check the User Guide](https://docs.pola.rs/).
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![allow(ambiguous_glob_reexports)]
 pub mod docs;

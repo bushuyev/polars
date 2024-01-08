@@ -19,7 +19,7 @@ def test_str_concat() -> None:
     s = pl.Series(["1", None, "2", None])
     # propagate null
     assert_series_equal(
-        s.str.concat(ignore_nulls=False), pl.Series([None], dtype=pl.Utf8)
+        s.str.concat(ignore_nulls=False), pl.Series([None], dtype=pl.String)
     )
     # ignore null
     assert_series_equal(s.str.concat(), pl.Series(["1-2"]))
@@ -41,21 +41,21 @@ def test_str_concat2() -> None:
 
 
 def test_str_concat_all_null() -> None:
-    s = pl.Series([None, None, None], dtype=pl.Utf8)
+    s = pl.Series([None, None, None], dtype=pl.String)
     assert_series_equal(
-        s.str.concat(ignore_nulls=False), pl.Series([None], dtype=pl.Utf8)
+        s.str.concat(ignore_nulls=False), pl.Series([None], dtype=pl.String)
     )
     assert_series_equal(s.str.concat(ignore_nulls=True), pl.Series([""]))
 
 
 def test_str_concat_empty_list() -> None:
-    s = pl.Series([], dtype=pl.Utf8)
+    s = pl.Series([], dtype=pl.String)
     assert_series_equal(s.str.concat(ignore_nulls=False), pl.Series([""]))
     assert_series_equal(s.str.concat(ignore_nulls=True), pl.Series([""]))
 
 
 def test_str_concat_empty_list2() -> None:
-    s = pl.Series([], dtype=pl.Utf8)
+    s = pl.Series([], dtype=pl.String)
     df = pl.DataFrame({"foo": s})
     result = df.select(pl.col("foo").str.concat()).item()
     expected = ""
@@ -63,7 +63,7 @@ def test_str_concat_empty_list2() -> None:
 
 
 def test_str_concat_empty_list_agg_context() -> None:
-    df = pl.DataFrame(data={"i": [1], "v": [None]}, schema_overrides={"v": pl.Utf8})
+    df = pl.DataFrame(data={"i": [1], "v": [None]}, schema_overrides={"v": pl.String})
     result = df.group_by("i").agg(pl.col("v").drop_nulls().str.concat())["v"].item()
     expected = ""
     assert result == expected
@@ -244,11 +244,9 @@ def test_str_to_integer_df() -> None:
             "hex": ["fa1e", "ff00", "cafe", "invalid", None],
         }
     )
-    out = df.with_columns(
-        [
-            pl.col("bin").str.to_integer(base=2, strict=False),
-            pl.col("hex").str.to_integer(base=16, strict=False),
-        ]
+    result = df.with_columns(
+        pl.col("bin").str.to_integer(base=2, strict=False),
+        pl.col("hex").str.to_integer(base=16, strict=False),
     )
 
     expected = pl.DataFrame(
@@ -257,7 +255,7 @@ def test_str_to_integer_df() -> None:
             "hex": [64030, 65280, 51966, None, None],
         }
     )
-    assert out.frame_equal(expected)
+    assert_frame_equal(result, expected)
 
     with pytest.raises(pl.ComputeError):
         df.with_columns(
@@ -389,8 +387,8 @@ def test_str_strip_prefix_literal() -> None:
     expected = pl.Series([":bar", "foo:bar", "bar:bar", "", "", None])
     assert_series_equal(s.str.strip_prefix("foo"), expected)
     # test null literal
-    expected = pl.Series([None, None, None, None, None, None], dtype=pl.Utf8)
-    assert_series_equal(s.str.strip_prefix(pl.lit(None, dtype=pl.Utf8)), expected)
+    expected = pl.Series([None, None, None, None, None, None], dtype=pl.String)
+    assert_series_equal(s.str.strip_prefix(pl.lit(None, dtype=pl.String)), expected)
 
 
 def test_str_strip_prefix_suffix_expr() -> None:
@@ -416,8 +414,8 @@ def test_str_strip_suffix() -> None:
     expected = pl.Series(["foo:", "foo:bar", "foo:foo", "", "", None])
     assert_series_equal(s.str.strip_suffix("bar"), expected)
     # test null literal
-    expected = pl.Series([None, None, None, None, None, None], dtype=pl.Utf8)
-    assert_series_equal(s.str.strip_suffix(pl.lit(None, dtype=pl.Utf8)), expected)
+    expected = pl.Series([None, None, None, None, None, None], dtype=pl.String)
+    assert_series_equal(s.str.strip_suffix(pl.lit(None, dtype=pl.String)), expected)
 
 
 def test_str_split() -> None:
@@ -436,35 +434,35 @@ def test_str_split() -> None:
         assert out[2].to_list() == ["ab,", "c,", "de"]
 
 
-def test_json_extract_series() -> None:
+def test_json_decode_series() -> None:
     s = pl.Series(["[1, 2, 3]", None, "[4, 5, 6]"])
     expected = pl.Series([[1, 2, 3], None, [4, 5, 6]])
     dtype = pl.List(pl.Int64)
-    assert_series_equal(s.str.json_extract(None), expected)
-    assert_series_equal(s.str.json_extract(dtype), expected)
+    assert_series_equal(s.str.json_decode(None), expected)
+    assert_series_equal(s.str.json_decode(dtype), expected)
 
     s = pl.Series(['{"a": 1, "b": true}', None, '{"a": 2, "b": false}'])
     expected = pl.Series([{"a": 1, "b": True}, None, {"a": 2, "b": False}])
     dtype2 = pl.Struct([pl.Field("a", pl.Int64), pl.Field("b", pl.Boolean)])
-    assert_series_equal(s.str.json_extract(None), expected)
-    assert_series_equal(s.str.json_extract(dtype2), expected)
+    assert_series_equal(s.str.json_decode(None), expected)
+    assert_series_equal(s.str.json_decode(dtype2), expected)
 
     expected = pl.Series([{"a": 1}, None, {"a": 2}])
     dtype2 = pl.Struct([pl.Field("a", pl.Int64)])
-    assert_series_equal(s.str.json_extract(dtype2), expected)
+    assert_series_equal(s.str.json_decode(dtype2), expected)
 
-    s = pl.Series([], dtype=pl.Utf8)
+    s = pl.Series([], dtype=pl.String)
     expected = pl.Series([], dtype=pl.List(pl.Int64))
     dtype = pl.List(pl.Int64)
-    assert_series_equal(s.str.json_extract(dtype), expected)
+    assert_series_equal(s.str.json_decode(dtype), expected)
 
 
-def test_json_extract_lazy_expr() -> None:
+def test_json_decode_lazy_expr() -> None:
     dtype = pl.Struct([pl.Field("a", pl.Int64), pl.Field("b", pl.Boolean)])
     ldf = (
         pl.DataFrame({"json": ['{"a": 1, "b": true}', None, '{"a": 2, "b": false}']})
         .lazy()
-        .select(pl.col("json").str.json_extract(dtype))
+        .select(pl.col("json").str.json_decode(dtype))
     )
     expected = pl.DataFrame(
         {"json": [{"a": 1, "b": True}, None, {"a": 2, "b": False}]}
@@ -473,7 +471,47 @@ def test_json_extract_lazy_expr() -> None:
     assert_frame_equal(ldf, expected)
 
 
-def test_json_extract_primitive_to_list_11053() -> None:
+def test_json_decode_nested_struct() -> None:
+    json = [
+        '[{"key_1": "a"}]',
+        '[{"key_1": "a2", "key_2": 2}]',
+        '[{"key_1": "a3", "key_2": 3, "key_3": "c"}]',
+    ]
+    df = pl.DataFrame({"json_str": json})
+    df_parsed = df.with_columns(
+        pl.col("json_str").str.json_decode().alias("parsed_list_json")
+    )
+
+    expected_dtype = pl.List(
+        pl.Struct(
+            [
+                pl.Field("key_1", pl.String),
+                pl.Field("key_2", pl.Int64),
+                pl.Field("key_3", pl.String),
+            ]
+        )
+    )
+    assert df_parsed.get_column("parsed_list_json").dtype == expected_dtype
+
+    key_1_values = df_parsed.select(
+        pl.col("parsed_list_json")
+        .list.get(0)
+        .struct.field("key_1")
+        .alias("key_1_values")
+    )
+    expected_values = pl.Series("key_1_values", ["a", "a2", "a3"])
+    assert_series_equal(key_1_values.get_column("key_1_values"), expected_values)
+
+
+def test_json_extract_deprecated() -> None:
+    s = pl.Series(['{"a": 1, "b": true}', None, '{"a": 2, "b": false}'])
+    expected = pl.Series([{"a": 1, "b": True}, None, {"a": 2, "b": False}])
+    with pytest.deprecated_call():
+        result = s.str.json_extract()
+    assert_series_equal(result, expected)
+
+
+def test_json_decode_primitive_to_list_11053() -> None:
     df = pl.DataFrame(
         {
             "json": [
@@ -484,13 +522,13 @@ def test_json_extract_primitive_to_list_11053() -> None:
     )
     schema = pl.Struct(
         {
-            "col1": pl.List(pl.Utf8),
-            "col2": pl.List(pl.Utf8),
+            "col1": pl.List(pl.String),
+            "col2": pl.List(pl.String),
         }
     )
 
     output = df.select(
-        pl.col("json").str.json_extract(schema).alias("casted_json")
+        pl.col("json").str.json_decode(schema).alias("casted_json")
     ).unnest("casted_json")
     expected = pl.DataFrame({"col1": [["123"], ["xyz"]], "col2": [["123"], None]})
     assert_frame_equal(output, expected)
@@ -520,17 +558,16 @@ def test_extract_binary() -> None:
     assert out[0] == "aron"
 
 
-def test_auto_explode() -> None:
+def test_str_concat_returns_scalar() -> None:
     df = pl.DataFrame(
         [pl.Series("val", ["A", "B", "C", "D"]), pl.Series("id", [1, 1, 2, 2])]
     )
-    pl.col("val").str.concat(delimiter=",")
     grouped = (
         df.group_by("id")
         .agg(pl.col("val").str.concat(delimiter=",").alias("grouped"))
         .get_column("grouped")
     )
-    assert grouped.dtype == pl.Utf8
+    assert grouped.dtype == pl.String
 
 
 def test_contains() -> None:
@@ -806,7 +843,7 @@ def test_extract_all_many() -> None:
         "a": [["a"], ["a"], ["a"], [], None, []],
         "null": [None] * 6,
     }
-    assert broad.schema == {"a": pl.List(pl.Utf8), "null": pl.List(pl.Utf8)}
+    assert broad.schema == {"a": pl.List(pl.String), "null": pl.List(pl.String)}
 
 
 def test_extract_groups() -> None:
@@ -999,7 +1036,7 @@ def test_split_exact() -> None:
         {
             "field_0": ["a", None, "b", "c"],
             "field_1": ["a", None, None, "c"],
-            "field_2": pl.Series([None, None, None, None], dtype=pl.Utf8),
+            "field_2": pl.Series([None, None, None, None], dtype=pl.String),
         }
     )
 
@@ -1030,7 +1067,7 @@ def test_split_exact_expr() -> None:
         {
             "field_0": ["a", None, "b", "c", None],
             "field_1": ["a", None, None, "c", None],
-            "field_2": pl.Series([None, None, None, "c", None], dtype=pl.Utf8),
+            "field_2": pl.Series([None, None, None, "c", None], dtype=pl.String),
         }
     )
 
@@ -1044,7 +1081,7 @@ def test_split_exact_expr() -> None:
         {
             "field_0": ["a_", None, "b", "c^", None],
             "field_1": ["a", None, None, "c^", None],
-            "field_2": pl.Series([None, None, None, "c", None], dtype=pl.Utf8),
+            "field_2": pl.Series([None, None, None, "c", None], dtype=pl.String),
         }
     )
     assert_frame_equal(out2, expected2)
@@ -1130,4 +1167,43 @@ def test_string_extract_groups_lazy_schema_10305() -> None:
         "captures"
     )
 
-    assert df.schema == {"candidate": pl.Utf8, "ref": pl.Utf8}
+    assert df.schema == {"candidate": pl.String, "ref": pl.String}
+
+
+def test_string_reverse() -> None:
+    df = pl.DataFrame(
+        {
+            "text": [None, "foo", "bar", "i like pizza&#", None, "man\u0303ana"],
+        }
+    )
+    expected = pl.DataFrame(
+        [
+            pl.Series(
+                "text",
+                [None, "oof", "rab", "#&azzip ekil i", None, "anan\u0303am"],
+                dtype=pl.String,
+            ),
+        ]
+    )
+
+    result = df.select(pl.col("text").str.reverse())
+    assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    ("data", "expected_dat"),
+    [
+        (["", None, "a"], ["", None, "b"]),
+        ([None, None, "a"], [None, None, "b"]),
+        (["", "", ""], ["", "", ""]),
+        ([None, None, None], [None, None, None]),
+        (["a", "", None], ["b", "", None]),
+    ],
+)
+def test_replace_lit_n_char_13385(
+    data: list[str | None], expected_dat: list[str | None]
+) -> None:
+    s = pl.Series(data, dtype=pl.String)
+    res = s.str.replace("a", "b", literal=True)
+    expected_s = pl.Series(expected_dat, dtype=pl.String)
+    assert_series_equal(res, expected_s)

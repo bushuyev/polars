@@ -1,10 +1,10 @@
 # Data structures
 
-The core base data structures provided by Polars are `Series` and `DataFrames`.
+The core base data structures provided by Polars are `Series` and `DataFrame`.
 
 ## Series
 
-Series are a 1-dimensional data structure. Within a series all elements have the same [Data Type](data-types.md) .
+Series are a 1-dimensional data structure. Within a series all elements have the same [Data Type](data-types/overview.md) .
 The snippet below shows how to create a simple named `Series` object.
 
 {{code_block('getting-started/series-dataframes','series',['Series'])}}

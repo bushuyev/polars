@@ -1,8 +1,13 @@
+#[cfg(feature = "timezones")]
+use polars_core::chunked_array::temporal::parse_time_zone;
 use polars_core::prelude::*;
 use polars_core::series::Series;
 use polars_time::{datetime_range_impl, ClosedWindow, Duration};
 
-use super::utils::{ensure_range_bounds_contain_exactly_one_value, temporal_series_to_i64_scalar};
+use super::utils::{
+    ensure_range_bounds_contain_exactly_one_value, temporal_ranges_impl_broadcast,
+    temporal_series_to_i64_scalar,
+};
 use crate::dsl::function_expr::FieldsMapper;
 
 const CAPACITY_FACTOR: usize = 5;
@@ -14,10 +19,10 @@ pub(super) fn datetime_range(
     time_unit: Option<TimeUnit>,
     time_zone: Option<TimeZone>,
 ) -> PolarsResult<Series> {
-    let start = &s[0];
-    let end = &s[1];
+    let mut start = s[0].clone();
+    let mut end = s[1].clone();
 
-    ensure_range_bounds_contain_exactly_one_value(start, end)?;
+    ensure_range_bounds_contain_exactly_one_value(&start, &end)?;
 
     // Note: `start` and `end` have already been cast to their supertype,
     // so only `start`'s dtype needs to be matched against.
@@ -36,26 +41,7 @@ pub(super) fn datetime_range(
         (DataType::Datetime(_, _), None) => start.dtype().clone(),
         // overwrite time unit, keep timezone
         (DataType::Datetime(_, tz), Some(tu)) => DataType::Datetime(tu, tz.clone()),
-        _ => unreachable!(),
-    };
-
-    let (start, end) = match dtype {
-        #[cfg(feature = "timezones")]
-        DataType::Datetime(_, Some(_)) => (
-            polars_ops::prelude::replace_time_zone(
-                start.cast(&dtype)?.datetime().unwrap(),
-                None,
-                &Utf8Chunked::from_iter(std::iter::once("raise")),
-            )?
-            .into_series(),
-            polars_ops::prelude::replace_time_zone(
-                end.cast(&dtype)?.datetime().unwrap(),
-                None,
-                &Utf8Chunked::from_iter(std::iter::once("raise")),
-            )?
-            .into_series(),
-        ),
-        _ => (start.cast(&dtype)?, end.cast(&dtype)?),
+        (dt, _) => polars_bail!(InvalidOperation: "expected a temporal datatype, got {}", dt),
     };
 
     // overwrite time zone, if specified
@@ -67,6 +53,35 @@ pub(super) fn datetime_range(
         _ => {},
     };
 
+    if start.dtype() == &DataType::Date {
+        start = start.cast(&DataType::Datetime(TimeUnit::Milliseconds, None))?;
+        end = end.cast(&DataType::Datetime(TimeUnit::Milliseconds, None))?;
+    }
+
+    // If `start` and `end` are naive, but a time zone was specified,
+    // then first localize them
+    let (start, end) = match (start.dtype(), time_zone) {
+        #[cfg(feature = "timezones")]
+        (DataType::Datetime(_, None), Some(tz)) => (
+            polars_ops::prelude::replace_time_zone(
+                start.datetime().unwrap(),
+                Some(&tz),
+                &StringChunked::from_iter(std::iter::once("raise")),
+            )?
+            .cast(&dtype)?
+            .into_series(),
+            polars_ops::prelude::replace_time_zone(
+                end.datetime().unwrap(),
+                Some(&tz),
+                &StringChunked::from_iter(std::iter::once("raise")),
+            )?
+            .cast(&dtype)?
+            .into_series(),
+        ),
+        _ => (start.cast(&dtype)?, end.cast(&dtype)?),
+    };
+
+    let name = start.name();
     let start = temporal_series_to_i64_scalar(&start)
         .ok_or_else(|| polars_err!(ComputeError: "start is an out-of-range time."))?;
     let end = temporal_series_to_i64_scalar(&end)
@@ -74,7 +89,12 @@ pub(super) fn datetime_range(
 
     let result = match dtype {
         DataType::Datetime(tu, ref tz) => {
-            datetime_range_impl("datetime", start, end, interval, closed, tu, tz.as_ref())?
+            let tz = match tz {
+                #[cfg(feature = "timezones")]
+                Some(tz) => Some(parse_time_zone(tz)?),
+                _ => None,
+            };
+            datetime_range_impl(name, start, end, interval, closed, tu, tz.as_ref())?
         },
         _ => unimplemented!(),
     };
@@ -88,13 +108,8 @@ pub(super) fn datetime_ranges(
     time_unit: Option<TimeUnit>,
     time_zone: Option<TimeZone>,
 ) -> PolarsResult<Series> {
-    let start = &s[0];
-    let end = &s[1];
-
-    polars_ensure!(
-        start.len() == end.len(),
-        ComputeError: "`start` and `end` must have the same length",
-    );
+    let mut start = s[0].clone();
+    let mut end = s[1].clone();
 
     // Note: `start` and `end` have already been cast to their supertype,
     // so only `start`'s dtype needs to be matched against.
@@ -116,22 +131,40 @@ pub(super) fn datetime_ranges(
         _ => unreachable!(),
     };
 
-    let (start, end) = match dtype {
+    // overwrite time zone, if specified
+    match (&dtype, &time_zone) {
         #[cfg(feature = "timezones")]
-        DataType::Datetime(_, Some(_)) => (
+        (DataType::Datetime(tu, _), Some(tz)) => {
+            dtype = DataType::Datetime(*tu, Some(tz.clone()));
+        },
+        _ => {},
+    };
+
+    if start.dtype() == &DataType::Date {
+        start = start.cast(&DataType::Datetime(TimeUnit::Milliseconds, None))?;
+        end = end.cast(&DataType::Datetime(TimeUnit::Milliseconds, None))?;
+    }
+
+    // If `start` and `end` are naive, but a time zone was specified,
+    // then first localize them
+    let (start, end) = match (start.dtype(), time_zone) {
+        #[cfg(feature = "timezones")]
+        (DataType::Datetime(_, None), Some(tz)) => (
             polars_ops::prelude::replace_time_zone(
-                start.cast(&dtype)?.datetime().unwrap(),
-                None,
-                &Utf8Chunked::from_iter(std::iter::once("raise")),
+                start.datetime().unwrap(),
+                Some(&tz),
+                &StringChunked::from_iter(std::iter::once("raise")),
             )?
+            .cast(&dtype)?
             .into_series()
             .to_physical_repr()
             .cast(&DataType::Int64)?,
             polars_ops::prelude::replace_time_zone(
-                end.cast(&dtype)?.datetime().unwrap(),
-                None,
-                &Utf8Chunked::from_iter(std::iter::once("raise")),
+                end.datetime().unwrap(),
+                Some(&tz),
+                &StringChunked::from_iter(std::iter::once("raise")),
             )?
+            .cast(&dtype)?
             .into_series()
             .to_physical_repr()
             .cast(&DataType::Int64)?,
@@ -147,43 +180,36 @@ pub(super) fn datetime_ranges(
         ),
     };
 
-    // overwrite time zone, if specified
-    match (&dtype, &time_zone) {
-        #[cfg(feature = "timezones")]
-        (DataType::Datetime(tu, _), Some(tz)) => {
-            dtype = DataType::Datetime(*tu, Some(tz.clone()));
-        },
-        _ => {},
-    };
-
     let start = start.i64().unwrap();
     let end = end.i64().unwrap();
 
-    let list = match dtype {
+    let out = match dtype {
         DataType::Datetime(tu, ref tz) => {
             let mut builder = ListPrimitiveChunkedBuilder::<Int64Type>::new(
-                "datetime_range",
+                start.name(),
                 start.len(),
                 start.len() * CAPACITY_FACTOR,
                 DataType::Int64,
             );
-            for (start, end) in start.into_iter().zip(end) {
-                match (start, end) {
-                    (Some(start), Some(end)) => {
-                        let rng =
-                            datetime_range_impl("", start, end, interval, closed, tu, tz.as_ref())?;
-                        builder.append_slice(rng.cont_slice().unwrap())
-                    },
-                    _ => builder.append_null(),
-                }
-            }
-            builder.finish().into_series()
+
+            let tz = match tz {
+                #[cfg(feature = "timezones")]
+                Some(tz) => Some(parse_time_zone(tz)?),
+                _ => None,
+            };
+            let range_impl = |start, end, builder: &mut ListPrimitiveChunkedBuilder<Int64Type>| {
+                let rng = datetime_range_impl("", start, end, interval, closed, tu, tz.as_ref())?;
+                builder.append_slice(rng.cont_slice().unwrap());
+                Ok(())
+            };
+
+            temporal_ranges_impl_broadcast(start, end, range_impl, &mut builder)?
         },
         _ => unimplemented!(),
     };
 
     let to_type = DataType::List(Box::new(dtype));
-    list.cast(&to_type)
+    out.cast(&to_type)
 }
 
 impl<'a> FieldsMapper<'a> {

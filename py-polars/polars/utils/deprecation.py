@@ -41,7 +41,6 @@ def issue_deprecation_warning(message: str, *, version: str) -> None:
         The Polars version number in which the warning is first issued.
         This argument is used to help developers determine when to remove the
         deprecated functionality.
-
     """
     warnings.warn(message, DeprecationWarning, stacklevel=find_stacklevel())
 
@@ -88,7 +87,6 @@ def deprecate_renamed_parameter(
         @deprecate_renamed_parameter("old_name", "new_name", version="0.1.2")
         def myfunc(new_name):
             ...
-
     """
 
     def decorate(function: Callable[P, T]) -> Callable[P, T]:
@@ -146,7 +144,6 @@ def deprecate_nonkeyword_arguments(
         The Polars version number in which the warning is first issued.
         This argument is used to help developers determine when to remove the
         deprecated functionality.
-
     """
 
     def decorate(function: Callable[P, T]) -> Callable[P, T]:
@@ -212,36 +209,6 @@ def _format_argument_list(allowed_args: list[str]) -> str:
         last = allowed_args[-1]
         args = ", ".join([f"{x!r}" for x in allowed_args[:-1]])
         return f" except for {args} and {last!r}"
-
-
-def warn_closed_future_change() -> Callable[[Callable[P, T]], Callable[P, T]]:
-    """
-    Issue a warning to specify a value for `closed` as the default value will change.
-
-    Decorator for rolling functions. Use as follows::
-
-        @warn_closed_future_change()
-        def rolling_min():
-            ...
-
-    """
-
-    def decorate(function: Callable[P, T]) -> Callable[P, T]:
-        @wraps(function)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-            # we only warn if 'by' is passed in, otherwise 'closed' is not used
-            if (kwargs.get("by") is not None) and ("closed" not in kwargs):
-                issue_deprecation_warning(
-                    "The default value for `closed` will change from 'left' to 'right' in a future version."
-                    " Explicitly pass a value for `closed` to silence this warning.",
-                    version="0.18.4",
-                )
-            return function(*args, **kwargs)
-
-        wrapper.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]
-        return wrapper
-
-    return decorate
 
 
 def rename_use_earliest_to_ambiguous(

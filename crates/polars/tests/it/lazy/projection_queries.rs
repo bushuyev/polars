@@ -29,7 +29,7 @@ fn test_swap_rename() -> PolarsResult<()> {
         "b" => [1],
         "a" => [2],
     ]?;
-    assert!(df.frame_equal(&expected));
+    assert!(df.equals(&expected));
     Ok(())
 }
 
@@ -54,17 +54,17 @@ fn test_outer_join_with_column_2988() -> PolarsResult<()> {
             ldf2,
             [col("key1"), col("key2")],
             [col("key1"), col("key2")],
-            JoinType::Outer.into(),
+            JoinType::Outer { coalesce: true }.into(),
         )
         .with_columns([col("key1")])
         .collect()?;
     assert_eq!(out.get_column_names(), &["key1", "key2", "val1", "val2"]);
     assert_eq!(
-        Vec::from(out.column("key1")?.utf8()?),
+        Vec::from(out.column("key1")?.str()?),
         &[Some("bar"), Some("baz"), Some("foo")]
     );
     assert_eq!(
-        Vec::from(out.column("key2")?.utf8()?),
+        Vec::from(out.column("key2")?.str()?),
         &[Some("bar"), Some("baz"), Some("foo")]
     );
     assert_eq!(
@@ -114,7 +114,7 @@ fn test_many_aliasing_projections_5070() -> PolarsResult<()> {
         "val" => [2, 3],
         "output" => [0, 1],
     ]?;
-    assert!(out.frame_equal(&expected));
+    assert!(out.equals(&expected));
 
     Ok(())
 }
@@ -151,7 +151,7 @@ fn test_projection_5086() -> PolarsResult<()> {
         "keep" => [true, false, false, true]
     ]?;
 
-    assert!(out.frame_equal(&expected));
+    assert!(out.equals(&expected));
 
     Ok(())
 }
@@ -161,7 +161,7 @@ fn test_projection_5086() -> PolarsResult<()> {
 fn test_unnest_pushdown() -> PolarsResult<()> {
     let df = df![
         "collection" => Series::full_null("", 1, &DataType::Int32),
-        "users" => Series::full_null("", 1, &DataType::List(Box::new(DataType::Struct(vec![Field::new("email", DataType::Utf8)])))),
+        "users" => Series::full_null("", 1, &DataType::List(Box::new(DataType::Struct(vec![Field::new("email", DataType::String)])))),
     ]?;
 
     let out = df

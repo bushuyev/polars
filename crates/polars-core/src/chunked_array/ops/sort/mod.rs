@@ -3,23 +3,20 @@ mod arg_sort;
 pub mod arg_sort_multiple;
 #[cfg(feature = "dtype-categorical")]
 mod categorical;
-mod slice;
 
 use std::cmp::Ordering;
-use std::hint::unreachable_unchecked;
 use std::iter::FromIterator;
 
 pub(crate) use arg_sort_multiple::argsort_multiple_row_fmt;
+use arrow::array::ValueSize;
 use arrow::bitmap::MutableBitmap;
 use arrow::buffer::Buffer;
-use arrow::legacy::kernels::rolling::compare_fn_nan_max;
-use arrow::legacy::prelude::{FromData, ValueSize};
+use arrow::legacy::prelude::FromData;
 use arrow::legacy::trusted_len::TrustedLenPush;
-use num_traits::Float;
 use rayon::prelude::*;
 pub use slice::*;
 
-use crate::prelude::compare_inner::PartialOrdInner;
+use crate::prelude::compare_inner::TotalOrdInner;
 #[cfg(feature = "dtype-struct")]
 use crate::prelude::sort::arg_sort_multiple::_get_rows_encoded_ca;
 use crate::prelude::sort::arg_sort_multiple::{arg_sort_multiple_impl, args_validate};
@@ -28,95 +25,39 @@ use crate::series::IsSorted;
 use crate::utils::{CustomIterTools, NoNull};
 use crate::POOL;
 
-/// Reverse sorting when there are no nulls
-#[inline]
-fn order_descending<T: Ord>(a: &T, b: &T) -> Ordering {
-    b.cmp(a)
-}
-
-/// Default sorting when there are no nulls
-#[inline]
-fn order_ascending<T: Ord>(a: &T, b: &T) -> Ordering {
-    a.cmp(b)
-}
-
-#[inline]
-fn order_ascending_flt<T: Float>(a: &T, b: &T) -> Ordering {
-    a.partial_cmp(b).unwrap_or_else(|| {
-        match (a.is_nan(), b.is_nan()) {
-            (true, true) => Ordering::Equal,
-            (true, false) => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            // Safety: PlIsNan is only implemented for numbers
-            _ => unsafe { unreachable_unchecked() },
-        }
-    })
-}
-
-#[inline]
-fn order_descending_flt<T: Float>(a: &T, b: &T) -> Ordering {
-    order_ascending_flt(b, a)
-}
-
-#[inline]
-fn sort_branch<T, Fd, Fr>(
-    slice: &mut [T],
-    descending: bool,
-    ascending_order_fn: Fd,
-    descending_order_fn: Fr,
-    parallel: bool,
-) where
-    T: PartialOrd + Send,
-    Fd: FnMut(&T, &T) -> Ordering + for<'r, 's> Fn(&'r T, &'s T) -> Ordering + Sync + Send,
-    Fr: FnMut(&T, &T) -> Ordering + for<'r, 's> Fn(&'r T, &'s T) -> Ordering + Sync + Send,
+pub(crate) fn sort_by_branch<T, C>(slice: &mut [T], descending: bool, cmp: C, parallel: bool)
+where
+    T: Send,
+    C: Send + Sync + Fn(&T, &T) -> Ordering,
 {
     if parallel {
         POOL.install(|| match descending {
-            true => slice.par_sort_unstable_by(descending_order_fn),
-            false => slice.par_sort_unstable_by(ascending_order_fn),
+            true => slice.par_sort_by(|a, b| cmp(b, a)),
+            false => slice.par_sort_by(cmp),
         })
     } else {
         match descending {
-            true => slice.sort_unstable_by(descending_order_fn),
-            false => slice.sort_unstable_by(ascending_order_fn),
+            true => slice.sort_by(|a, b| cmp(b, a)),
+            false => slice.sort_by(cmp),
         }
     }
 }
 
-pub fn arg_sort_no_nulls<Idx, T>(slice: &mut [(Idx, T)], descending: bool, parallel: bool)
+#[inline]
+fn sort_unstable_by_branch<T, C>(slice: &mut [T], descending: bool, cmp: C, parallel: bool)
 where
-    T: PartialOrd + Send + IsFloat,
-    Idx: PartialOrd + Send,
-{
-    arg_sort_branch(
-        slice,
-        descending,
-        |(_, a), (_, b)| compare_fn_nan_max(a, b),
-        |(_, a), (_, b)| compare_fn_nan_max(b, a),
-        parallel,
-    );
-}
-
-pub(crate) fn arg_sort_branch<T, Fd, Fr>(
-    slice: &mut [T],
-    descending: bool,
-    ascending_order_fn: Fd,
-    descending_order_fn: Fr,
-    parallel: bool,
-) where
-    T: PartialOrd + Send,
-    Fd: FnMut(&T, &T) -> Ordering + for<'r, 's> Fn(&'r T, &'s T) -> Ordering + Sync + Send,
-    Fr: FnMut(&T, &T) -> Ordering + for<'r, 's> Fn(&'r T, &'s T) -> Ordering + Sync + Send,
+    T: Send,
+    C: Send + Sync + Fn(&T, &T) -> Ordering,
 {
     if parallel {
         POOL.install(|| match descending {
-            true => slice.par_sort_by(descending_order_fn),
-            false => slice.par_sort_by(ascending_order_fn),
+            true => slice.par_sort_unstable_by(|a, b| cmp(b, a)),
+            false => slice.par_sort_unstable_by(cmp),
         })
     } else {
         match descending {
-            true => slice.sort_by(descending_order_fn),
-            false => slice.sort_by(ascending_order_fn),
+            true => slice.sort_unstable_by(|a, b| cmp(b, a)),
+            false => slice.sort_unstable_by(cmp),
         }
     }
 }
@@ -154,12 +95,7 @@ macro_rules! sort_with_fast_path {
     }}
 }
 
-fn sort_with_numeric<T>(
-    ca: &ChunkedArray<T>,
-    options: SortOptions,
-    order_ascending: fn(&T::Native, &T::Native) -> Ordering,
-    order_descending: fn(&T::Native, &T::Native) -> Ordering,
-) -> ChunkedArray<T>
+fn sort_with_numeric<T>(ca: &ChunkedArray<T>, options: SortOptions) -> ChunkedArray<T>
 where
     T: PolarsNumericType,
 {
@@ -167,11 +103,10 @@ where
     if ca.null_count() == 0 {
         let mut vals = ca.to_vec_null_aware().left().unwrap();
 
-        sort_branch(
+        sort_unstable_by_branch(
             vals.as_mut_slice(),
             options.descending,
-            order_ascending,
-            order_descending,
+            TotalOrd::tot_cmp,
             options.multithreaded,
         );
 
@@ -204,11 +139,10 @@ where
             &mut vals[null_count..]
         };
 
-        sort_branch(
+        sort_unstable_by_branch(
             mut_slice,
             options.descending,
-            order_ascending,
-            order_descending,
+            TotalOrd::tot_cmp,
             options.multithreaded,
         );
 
@@ -256,7 +190,12 @@ where
             vals.extend_trusted_len(iter);
         });
 
-        arg_sort_no_nulls(vals.as_mut_slice(), descending, options.multithreaded);
+        sort_by_branch(
+            vals.as_mut_slice(),
+            descending,
+            |a, b| a.1.tot_cmp(&b.1),
+            options.multithreaded,
+        );
 
         let out: NoNull<IdxCa> = vals.into_iter().map(|(idx, _v)| idx).collect_trusted();
         let mut out = out.into_inner();
@@ -304,11 +243,10 @@ fn arg_sort_multiple_numeric<T: PolarsNumericType>(
 
 impl<T> ChunkSort<T> for ChunkedArray<T>
 where
-    T: PolarsIntegerType,
-    T::Native: Default + Ord,
+    T: PolarsNumericType,
 {
     fn sort_with(&self, options: SortOptions) -> ChunkedArray<T> {
-        sort_with_numeric(self, options, order_ascending, order_descending)
+        sort_with_numeric(self, options)
     }
 
     fn sort(&self, descending: bool) -> ChunkedArray<T> {
@@ -331,58 +269,8 @@ where
     }
 }
 
-impl ChunkSort<Float32Type> for Float32Chunked {
-    fn sort_with(&self, options: SortOptions) -> Float32Chunked {
-        sort_with_numeric(self, options, order_ascending_flt, order_descending_flt)
-    }
-
-    fn sort(&self, descending: bool) -> Float32Chunked {
-        self.sort_with(SortOptions {
-            descending,
-            ..Default::default()
-        })
-    }
-
-    fn arg_sort(&self, options: SortOptions) -> IdxCa {
-        arg_sort_numeric(self, options)
-    }
-
-    /// # Panics
-    ///
-    /// This function is very opinionated.
-    /// We assume that all numeric `Series` are of the same type, if not it will panic
-    fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
-        arg_sort_multiple_numeric(self, options)
-    }
-}
-
-impl ChunkSort<Float64Type> for Float64Chunked {
-    fn sort_with(&self, options: SortOptions) -> Float64Chunked {
-        sort_with_numeric(self, options, order_ascending_flt, order_descending_flt)
-    }
-
-    fn sort(&self, descending: bool) -> Float64Chunked {
-        self.sort_with(SortOptions {
-            descending,
-            ..Default::default()
-        })
-    }
-
-    fn arg_sort(&self, options: SortOptions) -> IdxCa {
-        arg_sort_numeric(self, options)
-    }
-
-    /// # Panics
-    ///
-    /// This function is very opinionated.
-    /// We assume that all numeric `Series` are of the same type, if not it will panic
-    fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
-        arg_sort_multiple_numeric(self, options)
-    }
-}
-
 fn ordering_other_columns<'a>(
-    compare_inner: &'a [Box<dyn PartialOrdInner + 'a>],
+    compare_inner: &'a [Box<dyn TotalOrdInner + 'a>],
     descending: &[bool],
     idx_a: usize,
     idx_b: usize,
@@ -401,12 +289,12 @@ fn ordering_other_columns<'a>(
     Ordering::Equal
 }
 
-impl ChunkSort<Utf8Type> for Utf8Chunked {
-    fn sort_with(&self, options: SortOptions) -> ChunkedArray<Utf8Type> {
-        unsafe { self.as_binary().sort_with(options).to_utf8() }
+impl ChunkSort<StringType> for StringChunked {
+    fn sort_with(&self, options: SortOptions) -> ChunkedArray<StringType> {
+        unsafe { self.as_binary().sort_with(options).to_string() }
     }
 
-    fn sort(&self, descending: bool) -> Utf8Chunked {
+    fn sort(&self, descending: bool) -> StringChunked {
         self.sort_with(SortOptions {
             descending,
             nulls_last: false,
@@ -441,11 +329,10 @@ impl ChunkSort<BinaryType> for BinaryChunked {
             Vec::from_iter(self.into_no_null_iter())
         };
 
-        sort_branch(
+        sort_unstable_by_branch(
             v.as_mut_slice(),
             options.descending,
-            order_ascending,
-            order_descending,
+            Ord::cmp,
             options.multithreaded,
         );
 
@@ -651,9 +538,9 @@ pub(crate) fn convert_sort_column_multi_sort(s: &Series) -> PolarsResult<Series>
     use DataType::*;
     let out = match s.dtype() {
         #[cfg(feature = "dtype-categorical")]
-        Categorical(_) => s.rechunk(),
+        Categorical(_, _) => s.rechunk(),
         Binary | Boolean => s.clone(),
-        Utf8 => s.cast(&Binary).unwrap(),
+        String => s.cast(&Binary).unwrap(),
         #[cfg(feature = "dtype-struct")]
         Struct(_) => {
             let ca = s.struct_().unwrap();
@@ -800,7 +687,7 @@ mod test {
     fn test_arg_sort_multiple() -> PolarsResult<()> {
         let a = Int32Chunked::new("a", &[1, 2, 1, 1, 3, 4, 3, 3]);
         let b = Int64Chunked::new("b", &[0, 1, 2, 3, 4, 5, 6, 1]);
-        let c = Utf8Chunked::new("c", &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let c = StringChunked::new("c", &["a", "b", "c", "d", "e", "f", "g", "h"]);
         let df = DataFrame::new(vec![a.into_series(), b.into_series(), c.into_series()])?;
 
         let out = df.sort(["a", "b", "c"], false, false)?;
@@ -819,7 +706,7 @@ mod test {
         );
 
         // now let the first sort be a string
-        let a = Utf8Chunked::new("a", &["a", "b", "c", "a", "b", "c"]).into_series();
+        let a = StringChunked::new("a", &["a", "b", "c", "a", "b", "c"]).into_series();
         let b = Int32Chunked::new("b", &[5, 4, 2, 3, 4, 5]).into_series();
         let df = DataFrame::new(vec![a, b])?;
 
@@ -828,7 +715,7 @@ mod test {
             "a" => ["a", "a", "b", "b", "c", "c"],
             "b" => [3, 5, 4, 4, 2, 5]
         )?;
-        assert!(out.frame_equal(&expected));
+        assert!(out.equals(&expected));
 
         let df = df!(
             "groups" => [1, 2, 3],
@@ -840,21 +727,21 @@ mod test {
             "groups" => [3, 2, 1],
             "values" => ["b", "a", "a"]
         )?;
-        assert!(out.frame_equal(&expected));
+        assert!(out.equals(&expected));
 
         let out = df.sort(["values", "groups"], vec![false, true], false)?;
         let expected = df!(
             "groups" => [2, 1, 3],
             "values" => ["a", "a", "b"]
         )?;
-        assert!(out.frame_equal(&expected));
+        assert!(out.equals(&expected));
 
         Ok(())
     }
 
     #[test]
-    fn test_sort_utf8() {
-        let ca = Utf8Chunked::new("a", &[Some("a"), None, Some("c"), None, Some("b")]);
+    fn test_sort_string() {
+        let ca = StringChunked::new("a", &[Some("a"), None, Some("c"), None, Some("b")]);
         let out = ca.sort_with(SortOptions {
             descending: false,
             nulls_last: false,
@@ -893,7 +780,7 @@ mod test {
         assert_eq!(Vec::from(&out), expected);
 
         // no nulls
-        let ca = Utf8Chunked::new("a", &[Some("a"), Some("c"), Some("b")]);
+        let ca = StringChunked::new("a", &[Some("a"), Some("c"), Some("b")]);
         let out = ca.sort(false);
         let expected = &[Some("a"), Some("b"), Some("c")];
         assert_eq!(Vec::from(&out), expected);

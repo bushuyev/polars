@@ -1,16 +1,14 @@
-use std::simd::{
-    LaneCount, Mask, Simd, SimdCast, SimdElement, SimdFloat, SimdInt, SimdUint, StdFloat,
-    SupportedLaneCount, ToBitMask,
-};
+use std::simd::prelude::{Mask, Simd, SimdFloat, SimdInt, SimdUint};
+use std::simd::{LaneCount, SimdCast, SimdElement, StdFloat, SupportedLaneCount};
 
 use multiversion::multiversion;
 use num_traits::ToPrimitive;
+use polars_utils::float::IsFloat;
 
 use crate::array::{Array, PrimitiveArray};
 use crate::bitmap::utils::{BitChunkIterExact, BitChunksExact};
 use crate::bitmap::Bitmap;
 use crate::datatypes::PhysicalType::Primitive;
-use crate::legacy::data_types::IsFloat;
 use crate::types::NativeType;
 use crate::with_match_primitive_type;
 
@@ -94,7 +92,7 @@ where
             let chunk = Simd::from(chunk).cast_custom::<f64>();
 
             // construct [bools]
-            let mask = Mask::<i8, LANES>::from_bitmask(validity_chunk);
+            let mask = Mask::<i8, LANES>::from_bitmask(validity_chunk as u64);
             // let's say we have mask
             //      [true, false, true, true]
             // a cast to int gives:

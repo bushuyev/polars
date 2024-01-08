@@ -34,7 +34,7 @@ pub enum AnyValue<'a> {
     /// A binary true or false.
     Boolean(bool),
     /// A UTF8 encoded string type.
-    Utf8(&'a str),
+    String(&'a str),
     /// An unsigned 8-bit integer number.
     UInt8(u8),
     /// An unsigned 16-bit integer number.
@@ -92,7 +92,7 @@ pub enum AnyValue<'a> {
     #[cfg(feature = "dtype-struct")]
     StructOwned(Box<(Vec<AnyValue<'a>>, Vec<Field>)>),
     /// An UTF8 encoded string type.
-    Utf8Owned(smartstring::alias::String),
+    StringOwned(smartstring::alias::String),
     Binary(&'a [u8]),
     BinaryOwned(Vec<u8>),
     /// A 128-bit fixed point decimal number.
@@ -121,10 +121,10 @@ impl Serialize for AnyValue<'_> {
             AnyValue::Float64(v) => serializer.serialize_newtype_variant(name, 10, "Float64", v),
             AnyValue::List(v) => serializer.serialize_newtype_variant(name, 11, "List", v),
             AnyValue::Boolean(v) => serializer.serialize_newtype_variant(name, 12, "Bool", v),
-            // both utf8 variants same number
-            AnyValue::Utf8(v) => serializer.serialize_newtype_variant(name, 13, "Utf8Owned", v),
-            AnyValue::Utf8Owned(v) => {
-                serializer.serialize_newtype_variant(name, 13, "Utf8Owned", v.as_str())
+            // both string variants same number
+            AnyValue::String(v) => serializer.serialize_newtype_variant(name, 13, "StringOwned", v),
+            AnyValue::StringOwned(v) => {
+                serializer.serialize_newtype_variant(name, 13, "StringOwned", v.as_str())
             },
             AnyValue::Binary(v) => serializer.serialize_newtype_variant(name, 14, "BinaryOwned", v),
             AnyValue::BinaryOwned(v) => {
@@ -156,7 +156,7 @@ impl<'a> Deserialize<'a> for AnyValue<'static> {
             Float64,
             List,
             Bool,
-            Utf8Owned,
+            StringOwned,
             BinaryOwned,
         }
         const VARIANTS: &[&str] = &[
@@ -173,7 +173,7 @@ impl<'a> Deserialize<'a> for AnyValue<'static> {
             "Float64",
             "List",
             "Boolean",
-            "Utf8Owned",
+            "StringOwned",
             "BinaryOwned",
         ];
         const LAST: u8 = unsafe { std::mem::transmute::<_, u8>(AvField::BinaryOwned) };
@@ -238,7 +238,7 @@ impl<'a> Deserialize<'a> for AnyValue<'static> {
                     b"Float64" => AvField::Float64,
                     b"List" => AvField::List,
                     b"Bool" => AvField::Bool,
-                    b"Utf8Owned" | b"Utf8" => AvField::Utf8Owned,
+                    b"StringOwned" | b"String" => AvField::StringOwned,
                     b"BinaryOwned" | b"Binary" => AvField::BinaryOwned,
                     _ => {
                         return Err(serde::de::Error::unknown_variant(
@@ -323,9 +323,9 @@ impl<'a> Deserialize<'a> for AnyValue<'static> {
                         let value = variant.newtype_variant()?;
                         AnyValue::List(value)
                     },
-                    (AvField::Utf8Owned, variant) => {
+                    (AvField::StringOwned, variant) => {
                         let value: String = variant.newtype_variant()?;
-                        AnyValue::Utf8Owned(value.into())
+                        AnyValue::StringOwned(value.into())
                     },
                     (AvField::BinaryOwned, variant) => {
                         let value = variant.newtype_variant()?;
@@ -363,9 +363,9 @@ impl<'a> AnyValue<'a> {
             #[cfg(feature = "dtype-duration")]
             Duration(_, tu) => DataType::Duration(tu),
             Boolean(_) => DataType::Boolean,
-            Utf8(_) => DataType::Utf8,
+            String(_) => DataType::String,
             #[cfg(feature = "dtype-categorical")]
-            Categorical(_, _, _) => DataType::Categorical(None),
+            Categorical(_, _, _) => DataType::Categorical(None, Default::default()),
             List(s) => DataType::List(Box::new(s.dtype().clone())),
             #[cfg(feature = "dtype-struct")]
             Struct(_, _, fields) => DataType::Struct(fields.to_vec()),
@@ -429,6 +429,14 @@ impl<'a> AnyValue<'a> {
         })
     }
 
+    pub fn is_boolean(&self) -> bool {
+        matches!(self, AnyValue::Boolean(_))
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, AnyValue::Float32(_) | AnyValue::Float64(_))
+    }
+
     pub fn is_signed_integer(&self) -> bool {
         matches!(
             self,
@@ -443,46 +451,71 @@ impl<'a> AnyValue<'a> {
         )
     }
 
-    pub fn cast(&self, dtype: &'a DataType) -> PolarsResult<AnyValue<'a>> {
-        macro_rules! cast_to (
-            ($av:expr) => {
-                match dtype {
-                    DataType::UInt8 => AnyValue::UInt8($av as u8),
-                    DataType::UInt16 => AnyValue::UInt16($av as u16),
-                    DataType::UInt32 => AnyValue::UInt32($av as u32),
-                    DataType::UInt64 => AnyValue::UInt64($av as u64),
-                    DataType::Int8 => AnyValue::Int8($av as i8),
-                    DataType::Int16 => AnyValue::Int16($av as i16),
-                    DataType::Int32 => AnyValue::Int32($av as i32),
-                    DataType::Int64 => AnyValue::Int64($av as i64),
-                    DataType::Float32 => AnyValue::Float32($av as f32),
-                    DataType::Float64 => AnyValue::Float64($av as f64),
-                    #[cfg(feature="dtype-date")]
-                    DataType::Date => AnyValue::Date($av as i32),
-                    #[cfg(feature="dtype-datetime")]
-                    DataType::Datetime(tu, tz) => AnyValue::Datetime($av as i64, *tu, tz),
-                    #[cfg(feature="dtype-duration")]
-                    DataType::Duration(tu) => AnyValue::Duration($av as i64, *tu),
-                    #[cfg(feature="dtype-time")]
-                    DataType::Time => AnyValue::Time($av as i64),
-                    DataType::Utf8 => AnyValue::Utf8Owned(format_smartstring!("{}", $av)),
-                    _ => polars_bail!(
-                        ComputeError: "cannot cast any-value {:?} to dtype '{}'", self, dtype,
-                    ),
-                }
+    pub fn strict_cast(&self, dtype: &'a DataType) -> PolarsResult<AnyValue<'a>> {
+        fn cast_numeric<'a>(av: &AnyValue, dtype: &'a DataType) -> PolarsResult<AnyValue<'a>> {
+            Ok(match dtype {
+                DataType::UInt8 => AnyValue::UInt8(av.try_extract::<u8>()?),
+                DataType::UInt16 => AnyValue::UInt16(av.try_extract::<u16>()?),
+                DataType::UInt32 => AnyValue::UInt32(av.try_extract::<u32>()?),
+                DataType::UInt64 => AnyValue::UInt64(av.try_extract::<u64>()?),
+                DataType::Int8 => AnyValue::Int8(av.try_extract::<i8>()?),
+                DataType::Int16 => AnyValue::Int16(av.try_extract::<i16>()?),
+                DataType::Int32 => AnyValue::Int32(av.try_extract::<i32>()?),
+                DataType::Int64 => AnyValue::Int64(av.try_extract::<i64>()?),
+                DataType::Float32 => AnyValue::Float32(av.try_extract::<f32>()?),
+                DataType::Float64 => AnyValue::Float64(av.try_extract::<f64>()?),
+                _ => {
+                    polars_bail!(ComputeError: "cannot cast any-value {:?} to dtype '{}'", av, dtype)
+                },
+            })
+        }
 
-            }
-        );
+        fn cast_boolean<'a>(av: &AnyValue) -> PolarsResult<AnyValue<'a>> {
+            Ok(match av {
+                AnyValue::UInt8(v) => AnyValue::Boolean(*v != u8::default()),
+                AnyValue::UInt16(v) => AnyValue::Boolean(*v != u16::default()),
+                AnyValue::UInt32(v) => AnyValue::Boolean(*v != u32::default()),
+                AnyValue::UInt64(v) => AnyValue::Boolean(*v != u64::default()),
+                AnyValue::Int8(v) => AnyValue::Boolean(*v != i8::default()),
+                AnyValue::Int16(v) => AnyValue::Boolean(*v != i16::default()),
+                AnyValue::Int32(v) => AnyValue::Boolean(*v != i32::default()),
+                AnyValue::Int64(v) => AnyValue::Boolean(*v != i64::default()),
+                AnyValue::Float32(v) => AnyValue::Boolean(*v != f32::default()),
+                AnyValue::Float64(v) => AnyValue::Boolean(*v != f64::default()),
+                _ => {
+                    polars_bail!(ComputeError: "cannot cast any-value {:?} to boolean", av)
+                },
+            })
+        }
 
         let new_av = match self {
-            AnyValue::Boolean(v) => cast_to!(*v as u8),
-            AnyValue::Float32(_) | AnyValue::Float64(_) => cast_to!(self.extract::<f64>().unwrap()),
-            av if av.is_signed_integer() => cast_to!(av.extract::<i64>().unwrap()),
-            av if av.is_unsigned_integer() => cast_to!(av.extract::<u64>().unwrap()),
+            _ if (self.is_boolean()
+                | self.is_signed_integer()
+                | self.is_unsigned_integer()
+                | self.is_float()) =>
+            {
+                match dtype {
+                    #[cfg(feature = "dtype-date")]
+                    DataType::Date => AnyValue::Date(self.try_extract::<i32>()?),
+                    #[cfg(feature = "dtype-datetime")]
+                    DataType::Datetime(tu, tz) => {
+                        AnyValue::Datetime(self.try_extract::<i64>()?, *tu, tz)
+                    },
+                    #[cfg(feature = "dtype-duration")]
+                    DataType::Duration(tu) => AnyValue::Duration(self.try_extract::<i64>()?, *tu),
+                    #[cfg(feature = "dtype-time")]
+                    DataType::Time => AnyValue::Time(self.try_extract::<i64>()?),
+                    DataType::String => {
+                        AnyValue::StringOwned(format_smartstring!("{}", self.try_extract::<i64>()?))
+                    },
+                    DataType::Boolean => return cast_boolean(self),
+                    _ => return cast_numeric(self, dtype),
+                }
+            },
             #[cfg(feature = "dtype-datetime")]
             AnyValue::Datetime(v, tu, None) => match dtype {
-                DataType::Int64 => AnyValue::Int64(*v),
                 #[cfg(feature = "dtype-date")]
+                // Datetime to Date
                 DataType::Date => {
                     let convert = match tu {
                         TimeUnit::Nanoseconds => timestamp_ns_to_datetime,
@@ -493,22 +526,43 @@ impl<'a> AnyValue<'a> {
                     let date_value = naive_datetime_to_date(ndt);
                     AnyValue::Date(date_value)
                 },
-                _ => polars_bail!(
-                    ComputeError: format!("cannot cast 'datetime' any-value to dtype {dtype}")
-                ),
+                #[cfg(feature = "dtype-time")]
+                // Datetime to Time
+                DataType::Time => {
+                    let ns_since_midnight = match tu {
+                        TimeUnit::Nanoseconds => *v % NS_IN_DAY,
+                        TimeUnit::Microseconds => (*v % US_IN_DAY) * 1_000i64,
+                        TimeUnit::Milliseconds => (*v % MS_IN_DAY) * 1_000_000i64,
+                    };
+                    AnyValue::Time(ns_since_midnight)
+                },
+                _ => return cast_numeric(self, dtype),
+            },
+            #[cfg(feature = "dtype-duration")]
+            AnyValue::Duration(v, _) => match dtype {
+                DataType::Time | DataType::Date | DataType::Datetime(_, _) => {
+                    polars_bail!(ComputeError: "cannot cast any-value {:?} to dtype '{}'", v, dtype)
+                },
+                _ => return cast_numeric(self, dtype),
             },
             #[cfg(feature = "dtype-time")]
             AnyValue::Time(v) => match dtype {
-                DataType::Int64 => AnyValue::Int64(*v),
-                _ => polars_bail!(
-                    ComputeError: format!("cannot cast 'time' any-value to dtype {dtype}")
-                ),
+                #[cfg(feature = "dtype-duration")]
+                // Time to Duration
+                DataType::Duration(tu) => {
+                    let duration_value = match tu {
+                        TimeUnit::Nanoseconds => *v,
+                        TimeUnit::Microseconds => *v / 1_000i64,
+                        TimeUnit::Milliseconds => *v / 1_000_000i64,
+                    };
+                    AnyValue::Duration(duration_value, *tu)
+                },
+                _ => return cast_numeric(self, dtype),
             },
             #[cfg(feature = "dtype-date")]
             AnyValue::Date(v) => match dtype {
-                DataType::Int32 => AnyValue::Int32(*v),
-                DataType::Int64 => AnyValue::Int64(*v as i64),
                 #[cfg(feature = "dtype-datetime")]
+                // Date to Datetime
                 DataType::Datetime(tu, None) => {
                     let ndt = arrow::temporal_conversions::date32_to_datetime(*v);
                     let func = match tu {
@@ -519,13 +573,21 @@ impl<'a> AnyValue<'a> {
                     let value = func(ndt);
                     AnyValue::Datetime(value, *tu, &None)
                 },
-                _ => polars_bail!(
-                    ComputeError: format!("cannot cast 'date' any-value to dtype {dtype}")
-                ),
+                _ => return cast_numeric(self, dtype),
             },
-            _ => polars_bail!(ComputeError: "cannot cast non numeric any-value to numeric dtype"),
+            AnyValue::String(s) if dtype == &DataType::Binary => AnyValue::Binary(s.as_bytes()),
+            _ => {
+                polars_bail!(ComputeError: "cannot cast any-value '{:?}' to '{:?}'", self.dtype(), dtype)
+            },
         };
         Ok(new_av)
+    }
+
+    pub fn cast(&self, dtype: &'a DataType) -> PolarsResult<AnyValue<'a>> {
+        match self.strict_cast(dtype) {
+            Ok(s) => Ok(s),
+            Err(_) => Ok(AnyValue::Null),
+        }
     }
 }
 
@@ -548,8 +610,8 @@ impl AnyValue<'_> {
             UInt16(v) => v.hash(state),
             UInt32(v) => v.hash(state),
             UInt64(v) => v.hash(state),
-            Utf8(v) => v.hash(state),
-            Utf8Owned(v) => v.hash(state),
+            String(v) => v.hash(state),
+            StringOwned(v) => v.hash(state),
             Float32(v) => v.to_ne_bytes().hash(state),
             Float64(v) => v.to_ne_bytes().hash(state),
             Binary(v) => v.hash(state),
@@ -684,7 +746,7 @@ impl<'a> AnyValue<'a> {
     pub fn as_borrowed(&self) -> AnyValue<'_> {
         match self {
             AnyValue::BinaryOwned(data) => AnyValue::Binary(data),
-            AnyValue::Utf8Owned(data) => AnyValue::Utf8(data),
+            AnyValue::StringOwned(data) => AnyValue::String(data),
             av => av.clone(),
         }
     }
@@ -712,8 +774,8 @@ impl<'a> AnyValue<'a> {
             #[cfg(feature = "dtype-time")]
             Time(v) => Time(v),
             List(v) => List(v),
-            Utf8(v) => Utf8Owned(v.into()),
-            Utf8Owned(v) => Utf8Owned(v),
+            String(v) => StringOwned(v.into()),
+            StringOwned(v) => StringOwned(v),
             Binary(v) => BinaryOwned(v.to_vec()),
             BinaryOwned(v) => BinaryOwned(v),
             #[cfg(feature = "object")]
@@ -746,8 +808,8 @@ impl<'a> AnyValue<'a> {
     /// Get a reference to the `&str` contained within [`AnyValue`].
     pub fn get_str(&self) -> Option<&str> {
         match self {
-            AnyValue::Utf8(s) => Some(s),
-            AnyValue::Utf8Owned(s) => Some(s),
+            AnyValue::String(s) => Some(s),
+            AnyValue::StringOwned(s) => Some(s),
             #[cfg(feature = "dtype-categorical")]
             AnyValue::Categorical(idx, rev, arr) => {
                 let s = if arr.is_null() {
@@ -785,9 +847,9 @@ impl<'a> From<AnyValue<'a>> for Option<i64> {
     }
 }
 
-impl PartialEq for AnyValue<'_> {
+impl AnyValue<'_> {
     #[inline]
-    fn eq(&self, other: &Self) -> bool {
+    pub fn eq_missing(&self, other: &Self, null_equal: bool) -> bool {
         use AnyValue::*;
         match (self, other) {
             (UInt8(l), UInt8(r)) => *l == *r,
@@ -800,17 +862,16 @@ impl PartialEq for AnyValue<'_> {
             (Int64(l), Int64(r)) => *l == *r,
             (Float32(l), Float32(r)) => *l == *r,
             (Float64(l), Float64(r)) => *l == *r,
-            (Utf8(l), Utf8(r)) => l == r,
-            (Utf8(l), Utf8Owned(r)) => l == r,
-            (Utf8Owned(l), Utf8(r)) => l == r,
-            (Utf8Owned(l), Utf8Owned(r)) => l == r,
+            (String(l), String(r)) => l == r,
+            (String(l), StringOwned(r)) => l == r,
+            (StringOwned(l), String(r)) => l == r,
+            (StringOwned(l), StringOwned(r)) => l == r,
             (Boolean(l), Boolean(r)) => *l == *r,
             (Binary(l), Binary(r)) => l == r,
             (BinaryOwned(l), BinaryOwned(r)) => l == r,
             (Binary(l), BinaryOwned(r)) => l == r,
             (BinaryOwned(l), Binary(r)) => l == r,
-            // should it?
-            (Null, Null) => true,
+            (Null, Null) => null_equal,
             #[cfg(feature = "dtype-time")]
             (Time(l), Time(r)) => *l == *r,
             #[cfg(all(feature = "dtype-datetime", feature = "dtype-date"))]
@@ -856,6 +917,13 @@ impl PartialEq for AnyValue<'_> {
     }
 }
 
+impl PartialEq for AnyValue<'_> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.eq_missing(other, true)
+    }
+}
+
 impl PartialOrd for AnyValue<'_> {
     /// Only implemented for the same types and physical types!
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -871,7 +939,7 @@ impl PartialOrd for AnyValue<'_> {
             (Int64(l), Int64(r)) => l.partial_cmp(r),
             (Float32(l), Float32(r)) => l.partial_cmp(r),
             (Float64(l), Float64(r)) => l.partial_cmp(r),
-            (Utf8(l), Utf8(r)) => l.partial_cmp(*r),
+            (String(l), String(r)) => l.partial_cmp(*r),
             (Binary(l), Binary(r)) => l.partial_cmp(*r),
             _ => None,
         }
@@ -1022,7 +1090,7 @@ impl GetAnyValue for ArrayRef {
                     .unwrap_unchecked_release();
                 match arr.get_unchecked(index) {
                     None => AnyValue::Null,
-                    Some(v) => AnyValue::Utf8(v),
+                    Some(v) => AnyValue::String(v),
                 }
             },
             _ => unimplemented!(),
@@ -1112,8 +1180,8 @@ mod test {
                 ArrowDataType::Timestamp(ArrowTimeUnit::Second, Some("".to_string())),
                 DataType::Datetime(TimeUnit::Milliseconds, Some("".to_string())),
             ),
-            (ArrowDataType::LargeUtf8, DataType::Utf8),
-            (ArrowDataType::Utf8, DataType::Utf8),
+            (ArrowDataType::LargeUtf8, DataType::String),
+            (ArrowDataType::Utf8, DataType::String),
             (ArrowDataType::LargeBinary, DataType::Binary),
             (ArrowDataType::Binary, DataType::Binary),
             (
@@ -1160,7 +1228,7 @@ mod test {
             ),
             (
                 ArrowDataType::Dictionary(IntegerType::UInt32, ArrowDataType::Utf8.into(), false),
-                DataType::Categorical(None),
+                DataType::Categorical(None, Default::default()),
             ),
             (
                 ArrowDataType::Dictionary(
@@ -1168,7 +1236,7 @@ mod test {
                     ArrowDataType::LargeUtf8.into(),
                     false,
                 ),
-                DataType::Categorical(None),
+                DataType::Categorical(None, Default::default()),
             ),
             (
                 ArrowDataType::Dictionary(
@@ -1176,7 +1244,7 @@ mod test {
                     ArrowDataType::LargeUtf8.into(),
                     false,
                 ),
-                DataType::Categorical(None),
+                DataType::Categorical(None, Default::default()),
             ),
         ];
 

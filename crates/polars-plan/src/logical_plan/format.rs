@@ -96,6 +96,15 @@ impl LogicalPlan {
                 }
                 write!(f, "\n{:indent$}END {}", "", name)
             },
+            HConcat { inputs, .. } => {
+                let sub_sub_indent = sub_indent + 2;
+                write!(f, "{:indent$}HCONCAT", "")?;
+                for (i, plan) in inputs.iter().enumerate() {
+                    write!(f, "\n{:sub_indent$}PLAN {i}:", "")?;
+                    plan._format(f, sub_sub_indent)?;
+                }
+                write!(f, "\n{:indent$}END HCONCAT", "")
+            },
             Cache { input, id, count } => {
                 write!(f, "{:indent$}CACHE[id: {:x}, count: {}]", "", *id, *count)?;
                 input._format(f, sub_indent)
@@ -254,9 +263,9 @@ impl Debug for Expr {
             Column(name) => write!(f, "col(\"{name}\")"),
             Literal(v) => {
                 match v {
-                    LiteralValue::Utf8(v) => {
+                    LiteralValue::String(v) => {
                         // dot breaks with debug fmt due to \"
-                        write!(f, "Utf8({v})")
+                        write!(f, "String({v})")
                     },
                     _ => {
                         write!(f, "{v:?}")
@@ -286,7 +295,7 @@ impl Debug for Expr {
                 if *returns_scalar {
                     write!(f, "{expr:?}.get({idx:?})")
                 } else {
-                    write!(f, "{expr:?}.take({idx:?})")
+                    write!(f, "{expr:?}.gather({idx:?})")
                 }
             },
             SubPlan(lf, _) => {
@@ -323,7 +332,7 @@ impl Debug for Expr {
                     NUnique(expr) => write!(f, "{expr:?}.n_unique()"),
                     Sum(expr) => write!(f, "{expr:?}.sum()"),
                     AggGroups(expr) => write!(f, "{expr:?}.groups()"),
-                    Count(expr) => write!(f, "{expr:?}.count()"),
+                    Count(expr, _) => write!(f, "{expr:?}.count()"),
                     Var(expr, _) => write!(f, "{expr:?}.var()"),
                     Std(expr, _) => write!(f, "{expr:?}.std()"),
                     Quantile { expr, .. } => write!(f, "{expr:?}.quantile()"),

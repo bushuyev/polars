@@ -6,9 +6,9 @@ use std::mem::MaybeUninit;
 use polars_core::datatypes::PlHashSet;
 use polars_core::prelude::*;
 #[cfg(feature = "polars-time")]
-use polars_time::chunkedarray::utf8::infer as date_infer;
+use polars_time::chunkedarray::string::infer as date_infer;
 #[cfg(feature = "polars-time")]
-use polars_time::prelude::utf8::Pattern;
+use polars_time::prelude::string::Pattern;
 
 #[cfg(any(feature = "decompress", feature = "decompress-fast"))]
 use crate::csv::parser::next_line_position_naive;
@@ -16,7 +16,8 @@ use crate::csv::parser::{next_line_position, skip_bom, skip_line_ending, SplitLi
 use crate::csv::splitfields::SplitFields;
 use crate::csv::CsvEncoding;
 use crate::mmap::ReaderBytes;
-use crate::prelude::NullValues;
+use crate::prelude::parser::is_comment_line;
+use crate::prelude::{CommentPrefix, NullValues};
 use crate::utils::{BOOLEAN_RE, FLOAT_RE, INTEGER_RE};
 
 pub(crate) fn get_file_chunks(
@@ -60,7 +61,7 @@ pub(crate) fn get_file_chunks(
 /// Infer the data type of a record
 fn infer_field_schema(string: &str, try_parse_dates: bool) -> DataType {
     // when quoting is enabled in the reader, these quotes aren't escaped, we default to
-    // Utf8 for them
+    // String for them
     if string.starts_with('"') {
         if try_parse_dates {
             #[cfg(feature = "polars-time")]
@@ -75,7 +76,7 @@ fn infer_field_schema(string: &str, try_parse_dates: bool) -> DataType {
                             DataType::Datetime(TimeUnit::Microseconds, Some("UTC".to_string()))
                         },
                     },
-                    None => DataType::Utf8,
+                    None => DataType::String,
                 }
             }
             #[cfg(not(feature = "polars-time"))]
@@ -83,7 +84,7 @@ fn infer_field_schema(string: &str, try_parse_dates: bool) -> DataType {
                 panic!("activate one of {{'dtype-date', 'dtype-datetime', dtype-time'}} features")
             }
         } else {
-            DataType::Utf8
+            DataType::String
         }
     }
     // match regex in a particular order
@@ -106,7 +107,7 @@ fn infer_field_schema(string: &str, try_parse_dates: bool) -> DataType {
                         DataType::Datetime(TimeUnit::Microseconds, Some("UTC".to_string()))
                     },
                 },
-                None => DataType::Utf8,
+                None => DataType::String,
             }
         }
         #[cfg(not(feature = "polars-time"))]
@@ -114,7 +115,7 @@ fn infer_field_schema(string: &str, try_parse_dates: bool) -> DataType {
             panic!("activate one of {{'dtype-date', 'dtype-datetime', dtype-time'}} features")
         }
     } else {
-        DataType::Utf8
+        DataType::String
     }
 }
 
@@ -142,7 +143,7 @@ pub fn infer_file_schema_inner(
     // on the schema inference
     skip_rows: &mut usize,
     skip_rows_after_header: usize,
-    comment_char: Option<u8>,
+    comment_prefix: Option<&CommentPrefix>,
     quote_char: Option<u8>,
     eol_char: u8,
     null_values: Option<&NullValues>,
@@ -162,30 +163,23 @@ pub fn infer_file_schema_inner(
         polars_ensure!(!bytes.is_empty(), NoData: "empty CSV");
     };
     let mut lines = SplitLines::new(bytes, quote_char.unwrap_or(b'"'), eol_char).skip(*skip_rows);
-    // it can be that we have a single line without eol char
-    let has_eol = bytes.contains(&eol_char);
 
     // get or create header names
     // when has_header is false, creates default column names with column_ prefix
 
     // skip lines that are comments
     let mut first_line = None;
-    if let Some(comment_ch) = comment_char {
-        for (i, line) in (&mut lines).enumerate() {
-            if let Some(ch) = line.first() {
-                if *ch != comment_ch {
-                    first_line = Some(line);
-                    *skip_rows += i;
-                    break;
-                }
-            }
+
+    for (i, line) in (&mut lines).enumerate() {
+        if !is_comment_line(line, comment_prefix) {
+            first_line = Some(line);
+            *skip_rows += i;
+            break;
         }
-    } else {
-        first_line = lines.next();
     }
-    // edge case where we have a single row, no header and no eol char.
-    if first_line.is_none() && !has_eol && !has_header {
-        first_line = Some(bytes);
+
+    if first_line.is_none() {
+        first_line = lines.next();
     }
 
     // now that we've found the first non-comment line we parse the headers, or we create a header
@@ -254,7 +248,7 @@ pub fn infer_file_schema_inner(
             schema_overwrite,
             skip_rows,
             skip_rows_after_header,
-            comment_char,
+            comment_prefix,
             quote_char,
             eol_char,
             null_values,
@@ -310,11 +304,9 @@ pub fn infer_file_schema_inner(
             continue;
         }
 
-        if let Some(c) = comment_char {
-            // line is a comment -> skip
-            if line[0] == c {
-                continue;
-            }
+        // line is a comment -> skip
+        if is_comment_line(line, comment_prefix) {
+            continue;
         }
 
         let len = line.len();
@@ -393,7 +385,7 @@ pub fn infer_file_schema_inner(
         }
 
         // determine data type based on possible types
-        // if there are incompatible types, use DataType::Utf8
+        // if there are incompatible types, use DataType::String
         match possibilities.len() {
             1 => {
                 for dtype in possibilities.iter() {
@@ -408,13 +400,13 @@ pub fn infer_file_schema_inner(
                     fields.push(Field::new(field_name, DataType::Float64));
                 }
                 // prefer a datelike parse above a no parse so choose the date type
-                else if possibilities.contains(&DataType::Utf8)
+                else if possibilities.contains(&DataType::String)
                     && possibilities.contains(&DataType::Date)
                 {
                     fields.push(Field::new(field_name, DataType::Date));
                 }
                 // prefer a datelike parse above a no parse so choose the date type
-                else if possibilities.contains(&DataType::Utf8)
+                else if possibilities.contains(&DataType::String)
                     && possibilities.contains(&DataType::Datetime(TimeUnit::Microseconds, None))
                 {
                     fields.push(Field::new(
@@ -422,11 +414,11 @@ pub fn infer_file_schema_inner(
                         DataType::Datetime(TimeUnit::Microseconds, None),
                     ));
                 } else {
-                    // default to Utf8 for conflicting datatypes (e.g bool and int)
-                    fields.push(Field::new(field_name, DataType::Utf8));
+                    // default to String for conflicting datatypes (e.g bool and int)
+                    fields.push(Field::new(field_name, DataType::String));
                 }
             },
-            _ => fields.push(Field::new(field_name, DataType::Utf8)),
+            _ => fields.push(Field::new(field_name, DataType::String)),
         }
     }
     // if there is a single line after the header without an eol
@@ -448,7 +440,7 @@ pub fn infer_file_schema_inner(
             schema_overwrite,
             skip_rows,
             skip_rows_after_header,
-            comment_char,
+            comment_prefix,
             quote_char,
             eol_char,
             null_values,
@@ -481,7 +473,7 @@ pub fn infer_file_schema(
     // on the schema inference
     skip_rows: &mut usize,
     skip_rows_after_header: usize,
-    comment_char: Option<u8>,
+    comment_prefix: Option<&CommentPrefix>,
     quote_char: Option<u8>,
     eol_char: u8,
     null_values: Option<&NullValues>,
@@ -496,7 +488,7 @@ pub fn infer_file_schema(
         schema_overwrite,
         skip_rows,
         skip_rows_after_header,
-        comment_char,
+        comment_prefix,
         quote_char,
         eol_char,
         null_values,
@@ -626,7 +618,9 @@ pub(crate) fn decompress(
 /// The caller must ensure that:
 ///     - Output buffer must have enough capacity to hold `bytes.len()`
 ///     - bytes ends with the quote character e.g.: `"`
+///     - bytes length > 1.
 pub(super) unsafe fn escape_field(bytes: &[u8], quote: u8, buf: &mut [MaybeUninit<u8>]) -> usize {
+    debug_assert!(bytes.len() > 1);
     let mut prev_quote = false;
 
     let mut count = 0;

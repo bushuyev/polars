@@ -39,7 +39,14 @@ def expr_dispatch(cls: type[T]) -> type[T]:
     expr_lookup = _expr_lookup(namespace)
 
     for name in dir(cls):
-        if not name.startswith("_"):
+        if (
+            # private
+            not name.startswith("_")
+            # Avoid error when building docs
+            # https://github.com/pola-rs/polars/pull/13238#discussion_r1438787093
+            # TODO: is there a better way to do this?
+            and name != "plot"
+        ):
             attr = getattr(cls, name)
             if callable(attr):
                 attr = _undecorated(attr)
@@ -97,7 +104,7 @@ def call_expr(func: SeriesMethod) -> SeriesMethod:
         if namespace is not None:
             expr = getattr(expr, namespace)
         f = getattr(expr, func.__name__)
-        return s.to_frame().select(f(*args, **kwargs)).to_series()
+        return s.to_frame().select_seq(f(*args, **kwargs)).to_series()
 
     # note: applying explicit '__signature__' helps IDEs (especially PyCharm)
     # with proper autocomplete, in addition to what @functools.wraps does
@@ -164,7 +171,6 @@ def get_ffi_func(
     -------
     callable or None
         FFI function, or None if not found.
-
     """
     ffi_name = dtype_to_ffiname(dtype)
     fname = name.replace("<>", ffi_name)

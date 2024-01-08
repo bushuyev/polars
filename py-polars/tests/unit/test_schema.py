@@ -7,7 +7,7 @@ from typing import Any, Iterator, Mapping
 import pytest
 
 import polars as pl
-from polars.testing import assert_frame_equal
+from polars.testing import assert_frame_equal, assert_series_equal
 
 
 class CustomSchema(Mapping[str, Any]):
@@ -52,7 +52,7 @@ def test_schema_on_agg() -> None:
             ]
         )
     ).schema == {
-        "a": pl.Utf8,
+        "a": pl.String,
         "min": pl.Int64,
         "max": pl.Int64,
         "sum": pl.Int64,
@@ -68,20 +68,73 @@ def test_fill_null_minimal_upcast_4056() -> None:
     assert df.with_columns(pl.col(pl.Int8).fill_null(-1000)).dtypes[0] == pl.Int32
 
 
+def test_fill_enum_upcast() -> None:
+    dtype = pl.Enum(["a", "b"])
+    s = pl.Series(["a", "b", None], dtype=dtype)
+    s_filled = s.fill_null("b")
+    expected = pl.Series(["a", "b", "b"], dtype=dtype)
+    assert s_filled.dtype == dtype
+    assert_series_equal(s_filled, expected)
+
+
 def test_pow_dtype() -> None:
     df = pl.DataFrame(
         {
             "foo": [1, 2, 3, 4, 5],
-        }
+            "a": [1, 2, 3, 4, 5],
+            "b": [1, 2, 3, 4, 5],
+            "c": [1, 2, 3, 4, 5],
+            "d": [1, 2, 3, 4, 5],
+            "e": [1, 2, 3, 4, 5],
+            "f": [1, 2, 3, 4, 5],
+            "g": [1, 2, 1, 2, 1],
+            "h": [1, 2, 1, 2, 1],
+        },
+        schema_overrides={
+            "a": pl.Int64,
+            "b": pl.UInt64,
+            "c": pl.Int32,
+            "d": pl.UInt32,
+            "e": pl.Int16,
+            "f": pl.UInt16,
+            "g": pl.Int8,
+            "h": pl.UInt8,
+        },
     ).lazy()
 
-    df = df.with_columns([pl.col("foo").cast(pl.UInt32)]).with_columns(
-        [
-            (pl.col("foo") * 2**2).alias("scaled_foo"),
-            (pl.col("foo") * 2**2.1).alias("scaled_foo2"),
-        ]
+    df = (
+        df.with_columns([pl.col("foo").cast(pl.UInt32)])
+        .with_columns(
+            [
+                (pl.col("foo") * 2**2).alias("scaled_foo"),
+                (pl.col("foo") * 2**2.1).alias("scaled_foo2"),
+                (pl.col("a") ** pl.col("h")).alias("a_pow_h"),
+                (pl.col("b") ** pl.col("h")).alias("b_pow_h"),
+                (pl.col("c") ** pl.col("h")).alias("c_pow_h"),
+                (pl.col("d") ** pl.col("h")).alias("d_pow_h"),
+                (pl.col("e") ** pl.col("h")).alias("e_pow_h"),
+                (pl.col("f") ** pl.col("h")).alias("f_pow_h"),
+                (pl.col("g") ** pl.col("h")).alias("g_pow_h"),
+                (pl.col("h") ** pl.col("h")).alias("h_pow_h"),
+            ]
+        )
+        .drop(["a", "b", "c", "d", "e", "f", "g", "h"])
     )
-    assert df.collect().dtypes == [pl.UInt32, pl.UInt32, pl.Float64]
+    expected = [
+        pl.UInt32,
+        pl.UInt32,
+        pl.Float64,
+        pl.Int64,
+        pl.UInt64,
+        pl.Int32,
+        pl.UInt32,
+        pl.Int16,
+        pl.UInt16,
+        pl.Int8,
+        pl.UInt8,
+    ]
+    assert df.collect().dtypes == expected
+    assert df.dtypes == expected
 
 
 def test_bool_numeric_supertype() -> None:
@@ -160,7 +213,7 @@ def test_lazy_map_schema() -> None:
         df: pl.DataFrame,
     ) -> pl.DataFrame:
         # changes schema
-        return df.select(pl.all().cast(pl.Utf8))
+        return df.select(pl.all().cast(pl.String))
 
     with pytest.raises(
         pl.ComputeError,
@@ -256,7 +309,7 @@ def test_shrink_dtype() -> None:
         pl.Int32,
         pl.Int8,
         pl.Int16,
-        pl.Utf8,
+        pl.String,
         pl.Float32,
         pl.Boolean,
         pl.UInt8,
@@ -316,7 +369,7 @@ def test_lazy_rename() -> None:
 
 
 def test_all_null_cast_5826() -> None:
-    df = pl.DataFrame(data=[pl.Series("a", [None], dtype=pl.Utf8)])
+    df = pl.DataFrame(data=[pl.Series("a", [None], dtype=pl.String)])
     out = df.with_columns(pl.col("a").cast(pl.Boolean))
     assert out.dtypes == [pl.Boolean]
     assert out.item() is None
@@ -327,6 +380,18 @@ def test_empty_list_eval_schema_5734() -> None:
     assert df.filter(False).select(
         pl.col("a").list.eval(pl.element().struct.field("b"))
     ).schema == {"a": pl.List(pl.Int64)}
+
+
+def test_list_eval_type_cast_11188() -> None:
+    df = pl.DataFrame(
+        [
+            {"a": None},
+        ],
+        schema={"a": pl.List(pl.Int64)},
+    )
+    assert df.select(
+        pl.col("a").list.eval(pl.element().cast(pl.String)).alias("a_str")
+    ).schema == {"a_str": pl.List(pl.String)}
 
 
 def test_schema_true_divide_6643() -> None:
@@ -362,7 +427,7 @@ def test_from_dicts_all_cols_6716() -> None:
         pl.ComputeError, match="make sure that all rows have the same schema"
     ):
         pl.from_dicts(dicts, infer_schema_length=20)
-    assert pl.from_dicts(dicts, infer_schema_length=None).dtypes == [pl.Utf8]
+    assert pl.from_dicts(dicts, infer_schema_length=None).dtypes == [pl.String]
 
 
 def test_from_dicts_empty() -> None:
@@ -443,8 +508,8 @@ def test_absence_off_null_prop_8224() -> None:
         (
             {"x": ["x"], "y": ["y"]},
             pl.coalesce(pl.col("x"), pl.col("y")),
-            {"x": pl.Utf8},
-            {"x": pl.List(pl.Utf8)},
+            {"x": pl.String},
+            {"x": pl.List(pl.String)},
         ),
         (
             {"x": [True]},
@@ -559,3 +624,12 @@ def test_nested_binary_literal_super_type_12227() -> None:
         ).item()
         == 0.1
     )
+
+
+def test_literal_subtract_schema_13284() -> None:
+    assert (
+        pl.LazyFrame({"a": [23, 30]}, schema={"a": pl.UInt8})
+        .with_columns(pl.col("a") - pl.lit(1))
+        .group_by(by="a")
+        .count()
+    ).schema == OrderedDict([("a", pl.UInt8), ("count", pl.UInt32)])

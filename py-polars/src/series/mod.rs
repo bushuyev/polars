@@ -9,10 +9,9 @@ mod scatter;
 
 use std::io::Cursor;
 
-use polars_algo::hist;
 use polars_core::series::IsSorted;
 use polars_core::utils::flatten::flatten_series;
-use polars_core::with_match_physical_numeric_polars_type;
+use polars_core::{with_match_physical_numeric_polars_type, with_match_physical_numeric_type};
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -118,7 +117,7 @@ impl PySeries {
     #[cfg(feature = "object")]
     fn get_object(&self, index: usize) -> PyObject {
         Python::with_gil(|py| {
-            if matches!(self.series.dtype(), DataType::Object(_)) {
+            if matches!(self.series.dtype(), DataType::Object(_, _)) {
                 let obj: Option<&ObjectValue> = self.series.get_object(index).map(|any| any.into());
                 obj.to_object(py)
             } else {
@@ -129,7 +128,7 @@ impl PySeries {
 
     fn get_fmt(&self, index: usize, str_lengths: usize) -> String {
         let val = format!("{}", self.series.get(index).unwrap());
-        if let DataType::Utf8 | DataType::Categorical(_) = self.series.dtype() {
+        if let DataType::String | DataType::Categorical(_, _) = self.series.dtype() {
             let v_trunc = &val[..val
                 .char_indices()
                 .take(str_lengths)
@@ -301,14 +300,14 @@ impl PySeries {
         self.series.has_validity()
     }
 
-    fn series_equal(&self, other: &PySeries, null_equal: bool, strict: bool) -> bool {
+    fn equals(&self, other: &PySeries, null_equal: bool, strict: bool) -> bool {
         if strict && (self.series.dtype() != other.series.dtype()) {
             return false;
         }
         if null_equal {
-            self.series.series_equal_missing(&other.series)
+            self.series.equals_missing(&other.series)
         } else {
-            self.series.series_equal(&other.series)
+            self.series.equals(&other.series)
         }
     }
 
@@ -356,7 +355,7 @@ impl PySeries {
             ($self:expr, $method:ident, $($args:expr),*) => {
                 match $self.dtype() {
                     #[cfg(feature = "object")]
-                    DataType::Object(_) => {
+                    DataType::Object(_, _) => {
                         let ca = $self.0.unpack::<ObjectType<ObjectValue>>().unwrap();
                         ca.$method($($args),*)
                     },
@@ -379,7 +378,7 @@ impl PySeries {
                 DataType::Datetime(_, _)
                     | DataType::Date
                     | DataType::Duration(_)
-                    | DataType::Categorical(_)
+                    | DataType::Categorical(_, _)
                     | DataType::Binary
                     | DataType::Array(_, _)
                     | DataType::Time
@@ -521,10 +520,10 @@ impl PySeries {
                     )?;
                     ca.into_series()
                 },
-                Some(DataType::Utf8) => {
+                Some(DataType::String) => {
                     let ca = dispatch_apply!(
                         series,
-                        apply_lambda_with_utf8_out_type,
+                        apply_lambda_with_string_out_type,
                         py,
                         lambda,
                         0,
@@ -534,7 +533,7 @@ impl PySeries {
                     ca.into_series()
                 },
                 #[cfg(feature = "object")]
-                Some(DataType::Object(_)) => {
+                Some(DataType::Object(_, _)) => {
                     let ca = dispatch_apply!(
                         series,
                         apply_lambda_with_object_out_type,
@@ -591,8 +590,9 @@ impl PySeries {
         self.series.shrink_to_fit();
     }
 
-    fn dot(&self, other: &PySeries) -> Option<f64> {
-        self.series.dot(&other.series)
+    fn dot(&self, other: &PySeries) -> PyResult<f64> {
+        let out = self.series.dot(&other.series).map_err(PyPolarsErr::from)?;
+        Ok(out)
     }
 
     #[cfg(feature = "ipc_streaming")]
@@ -679,10 +679,25 @@ impl PySeries {
         self.series.clear().into()
     }
 
-    fn hist(&self, bins: Option<Self>, bin_count: Option<usize>) -> PyResult<PyDataFrame> {
-        let bins = bins.map(|s| s.series);
-        let out = hist(&self.series, bins.as_ref(), bin_count).map_err(PyPolarsErr::from)?;
+    fn head(&self, n: usize) -> Self {
+        self.series.head(Some(n)).into()
+    }
+
+    fn tail(&self, n: usize) -> Self {
+        self.series.tail(Some(n)).into()
+    }
+
+    fn value_counts(&self, sort: bool, parallel: bool) -> PyResult<PyDataFrame> {
+        let out = self
+            .series
+            .value_counts(sort, parallel)
+            .map_err(PyPolarsErr::from)?;
         Ok(out.into())
+    }
+
+    fn slice(&self, offset: i64, length: Option<usize>) -> Self {
+        let length = length.unwrap_or_else(|| self.series.len());
+        self.series.slice(offset, length).into()
     }
 }
 
@@ -709,7 +724,7 @@ macro_rules! impl_set_with_mask {
     };
 }
 
-impl_set_with_mask!(set_with_mask_str, &str, utf8, Utf8);
+impl_set_with_mask!(set_with_mask_str, &str, str, String);
 impl_set_with_mask!(set_with_mask_f64, f64, f64, Float64);
 impl_set_with_mask!(set_with_mask_f32, f32, f32, Float32);
 impl_set_with_mask!(set_with_mask_u8, u8, u8, UInt8);
@@ -752,7 +767,7 @@ impl_get!(get_i8, i8, i8);
 impl_get!(get_i16, i16, i16);
 impl_get!(get_i32, i32, i32);
 impl_get!(get_i64, i64, i64);
-impl_get!(get_str, utf8, &str);
+impl_get!(get_str, str, &str);
 impl_get!(get_date, date, i32);
 impl_get!(get_datetime, datetime, i64);
 impl_get!(get_duration, duration, i64);
@@ -771,12 +786,14 @@ mod test {
 
         let s = unsafe { std::mem::transmute::<PySeries, Series>(ps.clone()) };
 
-        assert_eq!(s.sum::<i32>(), Some(6));
+        assert_eq!(s.sum::<i32>().unwrap(), 6);
         let collection = vec![ps];
         let s = collection.to_series();
         assert_eq!(
-            s.iter().map(|s| s.sum::<i32>()).collect::<Vec<_>>(),
-            vec![Some(6)]
+            s.iter()
+                .map(|s| s.sum::<i32>().unwrap())
+                .collect::<Vec<_>>(),
+            vec![6]
         );
     }
 }

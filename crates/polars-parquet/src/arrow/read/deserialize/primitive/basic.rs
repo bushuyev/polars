@@ -6,8 +6,10 @@ use arrow::datatypes::ArrowDataType;
 use arrow::types::NativeType;
 use polars_error::PolarsResult;
 
-use super::super::utils::{get_selected_rows, FilteredOptionalPageValidity, OptionalPageValidity};
-use super::super::{utils, Pages};
+use super::super::utils::{
+    get_selected_rows, FilteredOptionalPageValidity, MaybeNext, OptionalPageValidity,
+};
+use super::super::{utils, PagesIter};
 use crate::parquet::deserialize::SliceFilteredIter;
 use crate::parquet::encoding::{hybrid_rle, Encoding};
 use crate::parquet::page::{split_buffer, DataPage, DictPage};
@@ -206,7 +208,7 @@ where
         state: &mut Self::State,
         decoded: &mut Self::DecodedState,
         remaining: usize,
-    ) {
+    ) -> PolarsResult<()> {
         let (values, validity) = decoded;
         match state {
             State::Optional(page_validity, page_values) => utils::extend_from_decoder(
@@ -264,6 +266,7 @@ where
                 );
             },
         }
+        Ok(())
     }
 
     fn deserialize_dict(&self, page: &DictPage) -> Self::Dict {
@@ -284,11 +287,11 @@ pub(super) fn finish<T: NativeType>(
     MutablePrimitiveArray::try_new(data_type.clone(), values, validity).unwrap()
 }
 
-/// An [`Iterator`] adapter over [`Pages`] assumed to be encoded as primitive arrays
+/// An [`Iterator`] adapter over [`PagesIter`] assumed to be encoded as primitive arrays
 #[derive(Debug)]
 pub struct Iter<T, I, P, F>
 where
-    I: Pages,
+    I: PagesIter,
     T: NativeType,
     P: ParquetNativeType,
     F: Fn(P) -> T,
@@ -305,7 +308,7 @@ where
 
 impl<T, I, P, F> Iter<T, I, P, F>
 where
-    I: Pages,
+    I: PagesIter,
     T: NativeType,
 
     P: ParquetNativeType,
@@ -333,7 +336,7 @@ where
 
 impl<T, I, P, F> Iterator for Iter<T, I, P, F>
 where
-    I: Pages,
+    I: PagesIter,
     T: NativeType,
     P: ParquetNativeType,
     F: Copy + Fn(P) -> T,
@@ -341,21 +344,23 @@ where
     type Item = PolarsResult<MutablePrimitiveArray<T>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let maybe_state = utils::next(
-            &mut self.iter,
-            &mut self.items,
-            &mut self.dict,
-            &mut self.remaining,
-            self.chunk_size,
-            &PrimitiveDecoder::new(self.op),
-        );
-        match maybe_state {
-            utils::MaybeNext::Some(Ok((values, validity))) => {
-                Some(Ok(finish(&self.data_type, values, validity)))
-            },
-            utils::MaybeNext::Some(Err(e)) => Some(Err(e)),
-            utils::MaybeNext::None => None,
-            utils::MaybeNext::More => self.next(),
+        loop {
+            let maybe_state = utils::next(
+                &mut self.iter,
+                &mut self.items,
+                &mut self.dict,
+                &mut self.remaining,
+                self.chunk_size,
+                &PrimitiveDecoder::new(self.op),
+            );
+            match maybe_state {
+                MaybeNext::Some(Ok((values, validity))) => {
+                    return Some(Ok(finish(&self.data_type, values, validity)))
+                },
+                MaybeNext::Some(Err(e)) => return Some(Err(e)),
+                MaybeNext::None => return None,
+                MaybeNext::More => continue,
+            }
         }
     }
 }
