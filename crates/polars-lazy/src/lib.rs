@@ -196,6 +196,7 @@
 //!      )
 //! }
 //! ```
+#![feature(iter_collect_into)]
 #![allow(ambiguous_glob_reexports)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 extern crate core;

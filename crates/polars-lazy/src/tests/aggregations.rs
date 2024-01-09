@@ -572,3 +572,20 @@ fn test_take_in_groups() -> PolarsResult<()> {
     );
     Ok(())
 }
+
+
+#[test]
+fn test_describe() -> PolarsResult<()> {
+    std::env::set_var("POLARS_FMT_MAX_COLS", "100");//FMT_MAX_COLS is pub(crate) in polars_core :(
+    std::env::set_var("POLARS_FMT_MAX_ROWS", "100");//FMT_MAX_COLS is pub(crate) in polars_core :(
+
+    let df = fruits_cars();
+    println!("{:?}", df);
+
+    let summary_df = df.lazy().describe(None)?;
+
+    println!("{:?}", summary_df.head(Some(10000)));
+
+    Ok(())
+
+}

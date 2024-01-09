@@ -47,6 +47,7 @@ use polars_plan::logical_plan::optimize;
 use polars_plan::utils::expr_output_name;
 use smartstring::alias::String as SmartString;
 use polars_core::log;
+use polars_utils::index::Bounded;
 
 use crate::fallible;
 use crate::physical_plan::executors::Executor;
@@ -1721,10 +1722,49 @@ impl LazyFrame {
     }
 
     // #[cfg(feature = "describe")]
-    pub fn describe(&self, percentiles: Option<&[f64]>) -> PolarsResult<LazyFrame> {
+    pub fn describe(&self, percentiles: Option<&[f64]>) -> PolarsResult<DataFrame> {
         //TODO
 
-        Ok(crate::frame::LazyFrame::default())
+        let exprs = self
+            .schema()?
+            .iter()
+            .enumerate()
+            .flat_map(|(i, (name, dt))| {
+                if dt.is_ord() {
+                    vec![
+                        Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str()),//TODO without alias fails with "column with name 'literal' has more than one occurrences"
+                        col(name).min().alias(format!("{} min", name).as_str()),
+                        col(name).max().alias(format!("{} max", name).as_str()),
+                    ]
+                } else {
+                    vec![
+                        Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str()),
+                        lit(NULL).cast(dt.clone()).alias(format!("{} min", name).as_str()),
+                        lit(NULL).cast(dt.clone()).alias(format!("{} max", name).as_str()),
+                    ]
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let columns_len = exprs.len();
+
+        let mut df_0 = self.clone().select(exprs).collect()?;
+        let index = (0..columns_len/3).flat_map(|i|std::iter::repeat(i as i32).take(3)).collect::<Vec<i32>>();
+
+
+        df_0 = df_0.transpose(None, None)?;
+
+
+        df_0.insert_column(0, Series::new("columns", vec!["name", "min", "max"].into_iter().cycle().take(columns_len).collect::<Vec<&str>>()))?;
+        df_0.insert_column(0, Series::new("index", index))?;
+        df_0 = pivot::pivot(&df_0, ["column_0"], ["index"], ["columns"], false, None, None)?;
+
+        df_0 = df_0.drop("index")?;
+
+        df_0 = df_0.transpose(None, None)?;
+
+        Ok(df_0)
+
     }
 
 }
