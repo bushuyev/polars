@@ -1719,6 +1719,14 @@ impl LazyFrame {
             column: Arc::from(key),
         }))
     }
+
+    // #[cfg(feature = "describe")]
+    pub fn describe(&self, percentiles: Option<&[f64]>) -> PolarsResult<LazyFrame> {
+        //TODO
+
+        Ok(crate::frame::LazyFrame::default())
+    }
+
 }
 
 /// Utility struct for lazy group_by operation.
