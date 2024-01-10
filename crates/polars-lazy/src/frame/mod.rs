@@ -1725,17 +1725,18 @@ impl LazyFrame {
 
     pub fn describe(&self) -> PolarsResult<DataFrame> {
         self.describe_with_extra_aggs(
+            true,
             Some([0.25, 0.50, 0.75].into_iter().map(|p|
                 (
                     format!("{}%", p * 100.),
                     Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
-                    Box::new(move |name: &String| col(name).quantile(lit(p.clone()), QuantileInterpolOptions::Nearest).alias(format!("{} {}", name, p).as_str())) as Box<dyn Fn(&String) -> Expr>
+                    Box::new(move |name: &String| col(name).quantile(lit(p), QuantileInterpolOptions::Nearest).alias(format!("{} {}", name, p).as_str())) as Box<dyn Fn(&String) -> Expr>
                 )
             ).collect::<Vec<_>>())
         )
     }
 
-    pub fn describe_with_extra_aggs(&self, extra_aggs_op: Option<Vec<(String, Box<dyn Fn(&DataType) -> bool>, Box<dyn Fn(&String) -> Expr>)>>) -> PolarsResult<DataFrame> {
+    pub fn describe_with_extra_aggs(&self, fields_to_header:bool, extra_aggs_op: Option<Vec<(String, Box<dyn Fn(&DataType) -> bool>, Box<dyn Fn(&String) -> Expr>)>>) -> PolarsResult<DataFrame> {
         let mut aggs = vec![
             (
                 "name".to_owned(),
@@ -1748,9 +1749,9 @@ impl LazyFrame {
                 Box::new(|name: &String| col(name).count().alias(format!("{} count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
             ),
             (
-                "null count".to_owned(),
+                "null_count".to_owned(),
                 Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).null_count().alias(format!("{} null count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                Box::new(|name: &String| col(name).null_count().alias(format!("{} null_count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
             ),
             (
                 "mean".to_owned(),
@@ -1789,7 +1790,7 @@ impl LazyFrame {
                     if a.1(dt) {
                         a.2(&name.to_string())
                     } else {
-                        lit(NULL).cast(dt.clone()).alias(format!("{} {} {}", i, ai, name).as_str())
+                        lit(NULL).cast(dt.clone()).alias(format!("{} {}", i, ai).as_str())//i and ai to make name unique
                     }
                 }).collect::<Vec<_>>()
             })
@@ -1802,22 +1803,57 @@ impl LazyFrame {
         let aggs_len = aggs.len();
         let index = (0..columns_len / aggs_len).flat_map(|i| std::iter::repeat(i as i32).take(aggs_len)).collect::<Vec<i32>>();
 
-
         summary_df = summary_df.transpose(None, None)?;
 
 
-        summary_df.insert_column(0, Series::new("columns", aggs.iter().map(|q| q.0.clone()).cycle().take(columns_len).collect::<Vec<String>>()))?;
+        summary_df.insert_column(0, Series::new("columns", aggs.iter().map(|agg| agg.0.clone()).cycle().take(columns_len).collect::<Vec<String>>()))?;
         summary_df.insert_column(0, Series::new("index", index))?;
 
         summary_df = pivot::pivot(&summary_df, ["column_0"], ["index"], ["columns"], false, None, None)?;
 
-        summary_df = summary_df.drop("index")?;
+        if !fields_to_header {
+            summary_df = summary_df
+                .clone()
+                .lazy()
+                .select(
+                    aggs.iter().enumerate().map(|(ai, a)| {
+                        if ai > 1 {
+                            col(a.0.as_str()).cast(DataType::Float64)
+                        } else {
+                            col(a.0.as_str())
+                        }
+                    }).collect::<Vec<Expr>>()
+                )
+                .collect()?;
 
+            Ok(summary_df)
 
-        summary_df = summary_df.transpose(None, Some(Either::Left("name".to_owned())))?;
-        summary_df.insert_column(0, Series::new("describe", aggs[1..].iter().map(|q| q.0.clone()).collect::<Vec<String>>()))?;
+        } else {
+            summary_df = summary_df.drop("index")?;
 
-        Ok(summary_df)
+            summary_df = summary_df.transpose(None, Some(Either::Left("name".to_owned())))?;
+
+            summary_df = summary_df
+                .clone()
+                .lazy()
+                .select(
+                    self.schema()?
+                        .iter()
+                        .map(| (name, dt)| {
+                            if dt.is_numeric() {
+                                col(name.as_str()).cast(DataType::Float64)
+                            } else {
+                                col(name.as_str())
+                            }
+                        })
+                        .collect::<Vec<Expr>>()
+                )
+                .collect()?;
+
+            summary_df.insert_column(0, Series::new("describe", aggs[1..].iter().map(|q| q.0.clone()).collect::<Vec<String>>()))?;
+
+            Ok(summary_df)
+        }
     }
 
 }
