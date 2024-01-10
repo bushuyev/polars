@@ -57,6 +57,7 @@ use crate::physical_plan::state::ExecutionState;
 use crate::physical_plan::streaming::insert_streaming_nodes;
 use crate::prelude::*;
 use either::Either;
+use polars_utils::iter::IntoIteratorCopied;
 
 pub trait IntoLazy {
     fn lazy(self) -> LazyFrame;
@@ -1722,55 +1723,97 @@ impl LazyFrame {
         }))
     }
 
-    // #[cfg(feature = "describe")]
     pub fn describe(&self, percentiles: Option<&[f64]>) -> PolarsResult<DataFrame> {
-        //TODO
+
+        let percentiles = percentiles.unwrap_or(&[0.25, 0.50, 0.75]).iter().map(|p|(p.clone(), format!("{}%", *p*100.))).collect::<Vec<_>>();
+
+        let aggs = [
+            vec![
+                (
+                    "name".to_owned(),
+                    Box::new(|dt: &DataType| true) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str())) as Box<dyn Fn(&String) -> Expr>
+                ),
+                (
+                    "count".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).count().alias(format!("{} count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                ),
+                (
+                    "null count".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).null_count().alias(format!("{} null count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                ),
+                (
+                    "mean".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).mean().alias(format!("{} mean", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                ),
+                (
+                    "std".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).std(1).alias(format!("{} std", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                ),
+                (
+                    "min".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).min().alias(format!("{} min", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                ),
+            ],
+            percentiles.iter().map(|(p, l)|
+                (
+                    l.clone(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).quantile(lit(p.clone()), QuantileInterpolOptions::Nearest).alias(format!("{} {}", name, p.clone()).as_str())) as Box<dyn Fn(&String) -> Expr>
+                )
+            ).collect::<Vec<_>>(),
+            vec![
+                (
+                    "max".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| col(name).max().alias(format!("{} max", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+                )
+            ]
+        ];
+        let aggs = aggs.iter().flatten().collect::<Vec<_>>();
 
         let exprs = self
             .schema()?
             .iter()
             .enumerate()
             .flat_map(|(i, (name, dt))| {
-                if dt.is_ord() {
-                    vec![
-                        Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str()),//TODO without alias fails with "column with name 'literal' has more than one occurrences"
-                        col(name).min().alias(format!("{} min", name).as_str()),
-                        col(name).max().alias(format!("{} max", name).as_str()),
-                    ]
-                } else {
-                    vec![
-                        Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str()),
-                        lit(NULL).cast(dt.clone()).alias(format!("{} min", name).as_str()),
-                        lit(NULL).cast(dt.clone()).alias(format!("{} max", name).as_str()),
-                    ]
-                }
+                aggs.iter().enumerate().map(|(ai, a)|{
+                    if a.1(dt) {
+                        a.2(&name.to_string())
+                    } else {
+                        lit(NULL).cast(dt.clone()).alias(format!("{} {} {}", i, ai, name).as_str())
+                    }
+                }).collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
         let columns_len = exprs.len();
 
-        let mut df_0 = self.clone().select(exprs).collect()?;
-        println!("1.\n{:?}", df_0.head(Some(10000)));
+        let mut summary_df = self.clone().select(exprs).collect()?;
 
-        let index = (0..columns_len/3).flat_map(|i|std::iter::repeat(i as i32).take(3)).collect::<Vec<i32>>();
-
-
-        df_0 = df_0.transpose(None, None)?;
+        let index = (0..columns_len/aggs.len()).flat_map(|i|std::iter::repeat(i as i32).take(aggs.len())).collect::<Vec<i32>>();
 
 
-        df_0.insert_column(0, Series::new("columns", vec!["name", "min", "max"].into_iter().cycle().take(columns_len).collect::<Vec<&str>>()))?;
-        df_0.insert_column(0, Series::new("index", index))?;
-        df_0 = pivot::pivot(&df_0, ["column_0"], ["index"], ["columns"], false, None, None)?;
-
-        df_0 = df_0.drop("index")?;
+        summary_df = summary_df.transpose(None, None)?;
 
 
-        println!("2. \n{:?}", df_0.head(Some(10000)));
+        summary_df.insert_column(0, Series::new("columns", aggs.iter().map(|q|q.0.clone()).cycle().take(columns_len).collect::<Vec<String>>()))?;
+        summary_df.insert_column(0, Series::new("index", index))?;
 
-        df_0 = df_0.transpose(None, Some(Either::Left("name".to_owned())))?;
-        df_0.insert_column(0, Series::new("describe",  vec!["min", "max"]))?;
+        summary_df = pivot::pivot(&summary_df, ["column_0"], ["index"], ["columns"], false, None, None)?;
 
-        Ok(df_0)
+        summary_df = summary_df.drop("index")?;
+
+
+        summary_df = summary_df.transpose(None, Some(Either::Left("name".to_owned())))?;
+        summary_df.insert_column(0, Series::new("describe", aggs[1..].iter().map(|q|q.0.clone()).collect::<Vec<String>>()))?;
+
+        Ok(summary_df)
 
     }
 
