@@ -28,6 +28,8 @@ pyo3 = { workspace = true, optional = true }
 rayon = { workspace = true }
 smartstring = { workspace = true }
 tokio = { workspace = true, optional = true }
+either = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

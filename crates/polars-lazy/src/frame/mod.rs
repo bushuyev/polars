@@ -56,6 +56,7 @@ use crate::physical_plan::state::ExecutionState;
 #[cfg(feature = "streaming")]
 use crate::physical_plan::streaming::insert_streaming_nodes;
 use crate::prelude::*;
+use either::Either;
 
 pub trait IntoLazy {
     fn lazy(self) -> LazyFrame;
@@ -1749,6 +1750,8 @@ impl LazyFrame {
         let columns_len = exprs.len();
 
         let mut df_0 = self.clone().select(exprs).collect()?;
+        println!("1.\n{:?}", df_0.head(Some(10000)));
+
         let index = (0..columns_len/3).flat_map(|i|std::iter::repeat(i as i32).take(3)).collect::<Vec<i32>>();
 
 
@@ -1761,7 +1764,11 @@ impl LazyFrame {
 
         df_0 = df_0.drop("index")?;
 
-        df_0 = df_0.transpose(None, None)?;
+
+        println!("2. \n{:?}", df_0.head(Some(10000)));
+
+        df_0 = df_0.transpose(None, Some(Either::Left("name".to_owned())))?;
+        df_0.insert_column(0, Series::new("describe",  vec!["min", "max"]))?;
 
         Ok(df_0)
 
