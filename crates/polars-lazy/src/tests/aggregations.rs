@@ -591,10 +591,39 @@ fn test_describe() -> PolarsResult<()> {
 
     println!("{:?}", df);
 
-    let summary_df = df.lazy().describe(None)?;
+    let summary_df = df.lazy().describe()?;
 
     println!("{:?}", summary_df.head(Some(10000)));
 
     Ok(())
 
+}
+
+#[test]
+fn test_describe_with_extra_aggs() -> PolarsResult<()> {
+    std::env::set_var("POLARS_FMT_MAX_COLS", "100");//FMT_MAX_COLS is pub(crate) in polars_core :(
+    std::env::set_var("POLARS_FMT_MAX_ROWS", "100");//FMT_MAX_COLS is pub(crate) in polars_core :(
+
+    let df =  df![
+        "float" => [Some(1.0), Some(2.8), Some(3.0)],
+        "int" =>  [Some(4), Some(5), None],
+        "bool" =>  [true, false, true],
+        "str" =>  [None, Some("b"), Some("c")],
+        "str2" =>  [Some("usd"), Some("eur"), None],
+        "date" =>  [NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), NaiveDate::from_ymd_opt(2021, 1, 1).unwrap(), NaiveDate::from_ymd_opt(2022, 1, 1).unwrap()],
+    ].unwrap();
+
+    println!("{:?}", df);
+
+    let summary_df = df.lazy().describe_with_extra_aggs(
+        Some(vec![(
+            "kurtosis".to_owned(),
+            Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+            Box::new(move |name: &String| col(name).kurtosis(true, true).alias(format!("{} kurtosis", name).as_str())) as Box<dyn Fn(&String) -> Expr>
+        )])
+    )?;
+
+    println!("{:?}", summary_df.head(Some(10000)));
+
+    Ok(())
 }
