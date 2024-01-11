@@ -1,8 +1,8 @@
+use chrono::NaiveDate;
 use polars_ops::prelude::ListNameSpaceImpl;
 use polars_utils::idxvec;
 
 use super::*;
-use chrono::NaiveDate;
 
 #[test]
 #[cfg(feature = "dtype-datetime")]
@@ -574,65 +574,142 @@ fn test_take_in_groups() -> PolarsResult<()> {
     Ok(())
 }
 
-
 #[test]
 fn test_describe() -> PolarsResult<()> {
-    std::env::set_var("POLARS_FMT_MAX_COLS", "100");//FMT_MAX_COLS is pub(crate) in polars_core :(
+    std::env::set_var("POLARS_FMT_MAX_COLS", "100"); //FMT_MAX_COLS is pub(crate) in polars_core :(
     std::env::set_var("POLARS_FMT_MAX_ROWS", "100");
 
     let df = all_types_df();
 
     let summary_df = df.lazy().describe()?;
 
-    let desc_cl   = summary_df.column("describe")?.str()?.into_iter().map(|v|v.unwrap_or_default()).collect::<Vec<&str>>();
-    let float_cl= summary_df.column("float")?.f64()?.into_iter().map(|v|format!("{:.5}", v.unwrap_or_default())).collect::<Vec<String>>();
-    let int_cl  = summary_df.column("int")?.f64()?.into_iter().map(|v|format!("{:.5}", v.unwrap_or_default())).collect::<Vec<String>>();
-    let bool_cl   = summary_df.column("bool")?.str()?.into_iter().map(|v|v.unwrap_or_default()).collect::<Vec<&str>>();
-    let str_cl    = summary_df.column("str")?.str()?.into_iter().map(|v|v.unwrap_or_default()).collect::<Vec<&str>>();
-    let str2_cl   = summary_df.column("str2")?.str()?.into_iter().map(|v|v.unwrap_or_default()).collect::<Vec<&str>>();
-    let date_cl   = summary_df.column("date")?.str()?.into_iter().map(|v|v.unwrap_or_default()).collect::<Vec<&str>>();
+    let desc_cl = summary_df
+        .column("describe")?
+        .str()?
+        .into_iter()
+        .map(|v| v.unwrap_or_default())
+        .collect::<Vec<&str>>();
+    let float_cl = summary_df
+        .column("float")?
+        .f64()?
+        .into_iter()
+        .map(|v| format!("{:.5}", v.unwrap_or_default()))
+        .collect::<Vec<String>>();
+    let int_cl = summary_df
+        .column("int")?
+        .f64()?
+        .into_iter()
+        .map(|v| format!("{:.5}", v.unwrap_or_default()))
+        .collect::<Vec<String>>();
+    let bool_cl = summary_df
+        .column("bool")?
+        .str()?
+        .into_iter()
+        .map(|v| v.unwrap_or_default())
+        .collect::<Vec<&str>>();
+    let str_cl = summary_df
+        .column("str")?
+        .str()?
+        .into_iter()
+        .map(|v| v.unwrap_or_default())
+        .collect::<Vec<&str>>();
+    let str2_cl = summary_df
+        .column("str2")?
+        .str()?
+        .into_iter()
+        .map(|v| v.unwrap_or_default())
+        .collect::<Vec<&str>>();
+    let date_cl = summary_df
+        .column("date")?
+        .str()?
+        .into_iter()
+        .map(|v| v.unwrap_or_default())
+        .collect::<Vec<&str>>();
 
-/*
-        ┌────────────┬──────────┬──────────┬───────┬──────┬──────┬────────────┐
-        │ describe   ┆ float    ┆ int      ┆ bool  ┆ str  ┆ str2 ┆ date      │
-        │ ---        ┆ ---      ┆ ---      ┆ ---   ┆ ---  ┆ ---  ┆ ---       │
-        │ str        ┆ f64      ┆ f64      ┆ str   ┆ str  ┆ str  ┆ str       │
-        ╞════════════╪══════════╪══════════╪═══════╪══════╪══════╪════════════╡
-        │ count      ┆ 3.0      ┆ 2.0      ┆ 3     ┆ 2    ┆ 2    ┆ 3         │
-        │ null_count ┆ 0.0      ┆ 1.0      ┆ 0     ┆ 1    ┆ 1    ┆ 0         │
-        │ mean       ┆ 2.266667 ┆ 4.5      ┆ null  ┆ null ┆ null ┆ null      │
-        │ std        ┆ 1.101514 ┆ 0.707107 ┆ null  ┆ null ┆ null ┆ null      │
-        │ min        ┆ 1.0      ┆ 4.0      ┆ False ┆ b    ┆ eur  ┆ 2020-01-01│
-        │ max        ┆ 3.0      ┆ 5.0      ┆ True  ┆ c    ┆ usd  ┆ 2022-01-01│
-        │ 25%        ┆ 2.8      ┆ 4.0      ┆ null  ┆ null ┆ null ┆ null      │
-        │ 50%        ┆ 2.8      ┆ 5.0      ┆ null  ┆ null ┆ null ┆ null      │
-        │ 75%        ┆ 3.0      ┆ 5.0      ┆ null  ┆ null ┆ null ┆ null      │
-        └────────────┴──────────┴──────────┴───────┴──────┴──────┴────────────┘
- */
+    /*      from py-polars/polars/dataframe/frame.py:4394
+           ┌────────────┬──────────┬──────────┬───────┬──────┬──────┬────────────┐
+           │ describe   ┆ float    ┆ int      ┆ bool  ┆ str  ┆ str2 ┆ date      │
+           │ ---        ┆ ---      ┆ ---      ┆ ---   ┆ ---  ┆ ---  ┆ ---       │
+           │ str        ┆ f64      ┆ f64      ┆ str   ┆ str  ┆ str  ┆ str       │
+           ╞════════════╪══════════╪══════════╪═══════╪══════╪══════╪════════════╡
+           │ count      ┆ 3.0      ┆ 2.0      ┆ 3     ┆ 2    ┆ 2    ┆ 3         │
+           │ null_count ┆ 0.0      ┆ 1.0      ┆ 0     ┆ 1    ┆ 1    ┆ 0         │
+           │ mean       ┆ 2.266667 ┆ 4.5      ┆ null  ┆ null ┆ null ┆ null      │
+           │ std        ┆ 1.101514 ┆ 0.707107 ┆ null  ┆ null ┆ null ┆ null      │
+           │ min        ┆ 1.0      ┆ 4.0      ┆ False ┆ b    ┆ eur  ┆ 2020-01-01│
+           │ 25%        ┆ 2.8      ┆ 4.0      ┆ null  ┆ null ┆ null ┆ null      │
+           │ 50%        ┆ 2.8      ┆ 5.0      ┆ null  ┆ null ┆ null ┆ null      │
+           │ 75%        ┆ 3.0      ┆ 5.0      ┆ null  ┆ null ┆ null ┆ null      │
+           │ max        ┆ 3.0      ┆ 5.0      ┆ True  ┆ c    ┆ usd  ┆ 2022-01-01│
+           └────────────┴──────────┴──────────┴───────┴──────┴──────┴────────────┘
+    */
 
-    assert_eq!(desc_cl[0], "count");       assert_eq!(float_cl[0], "3.00000");    assert_eq!(int_cl[0], "2.00000");   assert_eq!(bool_cl[0], "3"    );
-    assert_eq!(desc_cl[1], "null_count");  assert_eq!(float_cl[1], "0.00000");    assert_eq!(int_cl[1], "1.00000");   assert_eq!(bool_cl[1], "0"    );
-    assert_eq!(desc_cl[2], "mean");        assert_eq!(float_cl[2], "2.26667");    assert_eq!(int_cl[2], "4.50000");   assert_eq!(bool_cl[2], ""     );
-    assert_eq!(desc_cl[3], "std");         assert_eq!(float_cl[3], "1.10151");    assert_eq!(int_cl[3], "0.70711");   assert_eq!(bool_cl[3], ""     );
-    assert_eq!(desc_cl[4], "min");         assert_eq!(float_cl[4], "1.00000");    assert_eq!(int_cl[4], "4.00000");   assert_eq!(bool_cl[4], "false");
-    assert_eq!(desc_cl[5], "max");         assert_eq!(float_cl[5], "3.00000");    assert_eq!(int_cl[5], "5.00000");   assert_eq!(bool_cl[5], "true" );
-    assert_eq!(desc_cl[6], "25%");         assert_eq!(float_cl[6], "2.80000");    assert_eq!(int_cl[6], "4.00000");   assert_eq!(bool_cl[6], ""     );
-    assert_eq!(desc_cl[7], "50%");         assert_eq!(float_cl[7], "2.80000");    assert_eq!(int_cl[7], "5.00000");   assert_eq!(bool_cl[7], ""     );
-    assert_eq!(desc_cl[8], "75%");         assert_eq!(float_cl[8], "3.00000");    assert_eq!(int_cl[8], "5.00000");   assert_eq!(bool_cl[8], ""     );
+    assert_eq!(desc_cl[0], "count");
+    assert_eq!(float_cl[0], "3.00000");
+    assert_eq!(int_cl[0], "2.00000");
+    assert_eq!(bool_cl[0], "3");
+    assert_eq!(desc_cl[1], "null_count");
+    assert_eq!(float_cl[1], "0.00000");
+    assert_eq!(int_cl[1], "1.00000");
+    assert_eq!(bool_cl[1], "0");
+    assert_eq!(desc_cl[2], "mean");
+    assert_eq!(float_cl[2], "2.26667");
+    assert_eq!(int_cl[2], "4.50000");
+    assert_eq!(bool_cl[2], "");
+    assert_eq!(desc_cl[3], "std");
+    assert_eq!(float_cl[3], "1.10151");
+    assert_eq!(int_cl[3], "0.70711");
+    assert_eq!(bool_cl[3], "");
+    assert_eq!(desc_cl[4], "min");
+    assert_eq!(float_cl[4], "1.00000");
+    assert_eq!(int_cl[4], "4.00000");
+    assert_eq!(bool_cl[4], "false");
+    assert_eq!(desc_cl[5], "25%");
+    assert_eq!(float_cl[5], "2.80000");
+    assert_eq!(int_cl[5], "4.00000");
+    assert_eq!(bool_cl[5], "");
+    assert_eq!(desc_cl[6], "50%");
+    assert_eq!(float_cl[6], "2.80000");
+    assert_eq!(int_cl[6], "5.00000");
+    assert_eq!(bool_cl[6], "");
+    assert_eq!(desc_cl[7], "75%");
+    assert_eq!(float_cl[7], "3.00000");
+    assert_eq!(int_cl[7], "5.00000");
+    assert_eq!(bool_cl[7], "");
+    assert_eq!(desc_cl[8], "max");
+    assert_eq!(float_cl[8], "3.00000");
+    assert_eq!(int_cl[8], "5.00000");
+    assert_eq!(bool_cl[8], "true");
 
-
-    assert_eq!(str_cl[0], "2");            assert_eq!(str2_cl[0], "2"  );         assert_eq!(date_cl[0], "3"         );
-    assert_eq!(str_cl[1], "1");            assert_eq!(str2_cl[1], "1"  );         assert_eq!(date_cl[1], "0"         );
-    assert_eq!(str_cl[2], "" );            assert_eq!(str2_cl[2], ""   );         assert_eq!(date_cl[2], ""          );
-    assert_eq!(str_cl[3], "" );            assert_eq!(str2_cl[3], ""   );         assert_eq!(date_cl[3], ""          );
-    assert_eq!(str_cl[4], "b");            assert_eq!(str2_cl[4], "eur");         assert_eq!(date_cl[4], "2020-01-01");
-    assert_eq!(str_cl[5], "c");            assert_eq!(str2_cl[5], "usd");         assert_eq!(date_cl[5], "2022-01-01");
-    assert_eq!(str_cl[6], "" );            assert_eq!(str2_cl[6], ""   );         assert_eq!(date_cl[6], ""          );
-    assert_eq!(str_cl[7], "" );            assert_eq!(str2_cl[7], ""   );         assert_eq!(date_cl[7], ""          );
-    assert_eq!(str_cl[8], "" );            assert_eq!(str2_cl[8], ""   );         assert_eq!(date_cl[8], ""          );
+    assert_eq!(str_cl[0], "2");
+    assert_eq!(str2_cl[0], "2");
+    assert_eq!(date_cl[0], "3");
+    assert_eq!(str_cl[1], "1");
+    assert_eq!(str2_cl[1], "1");
+    assert_eq!(date_cl[1], "0");
+    assert_eq!(str_cl[2], "");
+    assert_eq!(str2_cl[2], "");
+    assert_eq!(date_cl[2], "");
+    assert_eq!(str_cl[3], "");
+    assert_eq!(str2_cl[3], "");
+    assert_eq!(date_cl[3], "");
+    assert_eq!(str_cl[4], "b");
+    assert_eq!(str2_cl[4], "eur");
+    assert_eq!(date_cl[4], "2020-01-01");
+    assert_eq!(str_cl[5], "");
+    assert_eq!(str2_cl[5], "");
+    assert_eq!(date_cl[5], "");
+    assert_eq!(str_cl[6], "");
+    assert_eq!(str2_cl[6], "");
+    assert_eq!(date_cl[6], "");
+    assert_eq!(str_cl[7], "");
+    assert_eq!(str2_cl[7], "");
+    assert_eq!(date_cl[7], "");
+    assert_eq!(str_cl[8], "c");
+    assert_eq!(str2_cl[8], "usd");
+    assert_eq!(date_cl[8], "2022-01-01");
 
     Ok(())
-
 }
 
 #[test]
@@ -642,23 +719,81 @@ fn test_describe_with_extra_aggs() -> PolarsResult<()> {
 
     let df = all_types_df();
 
-    let summary_df = df.lazy().describe_with_extra_aggs(
+    let summary_df = df.lazy().describe_with_params(
         false,
-        Some(vec![(
+        vec![(
             "kurtosis".to_owned(),
             Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
-            Box::new(move |name: &String| col(name).kurtosis(true, true).alias(format!("{} kurtosis", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-        )])
+            Box::new(move |name: &String| {
+                col(name)
+                    .kurtosis(true, true)
+                    .alias(format!("{} kurtosis", name).as_str())
+            }) as Box<dyn Fn(&String) -> Expr>,
+        )],
+        Some(vec!["float"]),
     )?;
 
-    let kurtosis_cl = summary_df.column("kurtosis")?.f64()?.into_iter().map(|v|format!("{:.5}", v.unwrap_or_default())).collect::<Vec<String>>();
+    assert_eq!(
+        summary_df
+            .get_columns()
+            .iter()
+            .map(|s| s.name())
+            .collect::<Vec<&str>>(),
+        vec!["name", "kurtosis"]
+    );
 
-    assert_eq!(kurtosis_cl, ["-1.50000", "-2.00000", "0.00000", "0.00000", "0.00000", "0.00000"]);
+    assert_eq!(
+        summary_df
+            .column("name")?
+            .str()?
+            .into_iter()
+            .collect::<Vec<Option<&str>>>()[0],
+        Some("float"),
+    );
+
+    let kurtosis_cl = summary_df
+        .column("kurtosis")?
+        .f64()?
+        .into_iter()
+        .map(|v| format!("{:.5}", v.unwrap_or_default()))
+        .collect::<Vec<String>>();
+
+    assert_eq!(kurtosis_cl, ["-1.50000"]);
 
     Ok(())
 }
 
-//from py-polars/polars/dataframe/frame.py:4376
+#[test]
+fn test_describe_nan() -> PolarsResult<()> {
+    std::env::set_var("POLARS_FMT_MAX_COLS", "100");
+    std::env::set_var("POLARS_FMT_MAX_ROWS", "100");
+
+    let df = DataFrame::new(vec![Series::new("days", [f32::NAN].as_ref())])?;
+
+    let summary_df = df.lazy().describe()?;
+
+    assert_eq!(
+        summary_df
+            .column("days")?
+            .f64()?
+            .into_iter()
+            .collect::<Vec<Option<f64>>>()[0..2],
+        vec![
+            Some(1.0),
+            Some(0.0),
+            Some(f64::NAN),
+            None,
+            Some(f64::NAN),
+            Some(f64::NAN),
+            Some(f64::NAN),
+            Some(f64::NAN),
+            Some(f64::NAN)
+        ][0..2]
+    );
+
+    Ok(())
+}
+
 fn all_types_df() -> DataFrame {
     df![
         "float" => [Some(1.0), Some(2.8), Some(3.0)],

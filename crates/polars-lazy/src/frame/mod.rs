@@ -9,6 +9,7 @@ mod exitable;
 pub mod pivot;
 
 use std::borrow::Cow;
+use std::iter::once;
 #[cfg(any(
     feature = "parquet",
     feature = "ipc",
@@ -22,6 +23,7 @@ pub use anonymous_scan::*;
 use arrow::legacy::prelude::QuantileInterpolOptions;
 #[cfg(feature = "csv")]
 pub use csv::*;
+use either::Either;
 #[cfg(not(target_arch = "wasm32"))]
 pub use exitable::*;
 pub use file_list_reader::*;
@@ -33,7 +35,7 @@ pub use ndjson::*;
 pub use parquet::*;
 use polars_core::frame::explode::MeltArgs;
 use polars_core::prelude::*;
-use polars_io::RowCount;
+use polars_io::RowIndex;
 pub use polars_plan::frame::{AllowedOptimizations, OptState};
 use polars_plan::global::FETCH_ROWS;
 #[cfg(any(
@@ -45,9 +47,8 @@ use polars_plan::global::FETCH_ROWS;
 use polars_plan::logical_plan::collect_fingerprints;
 use polars_plan::logical_plan::optimize;
 use polars_plan::utils::expr_output_name;
-use smartstring::alias::String as SmartString;
-use polars_core::log;
 use polars_utils::index::Bounded;
+use smartstring::alias::String as SmartString;
 
 use crate::fallible;
 use crate::physical_plan::executors::Executor;
@@ -56,8 +57,6 @@ use crate::physical_plan::state::ExecutionState;
 #[cfg(feature = "streaming")]
 use crate::physical_plan::streaming::insert_streaming_nodes;
 use crate::prelude::*;
-use either::Either;
-use polars_utils::iter::IntoIteratorCopied;
 
 pub trait IntoLazy {
     fn lazy(self) -> LazyFrame;
@@ -668,11 +667,7 @@ impl LazyFrame {
     /// }
     /// ```
     pub fn collect(self) -> PolarsResult<DataFrame> {
-        
         let (mut state, mut physical_plan, _) = self.prepare_collect(false)?;
-
-        //log(format!("polars: collect").as_str());
-        
         let out = physical_plan.execute(&mut state);
         #[cfg(debug_assertions)]
         {
@@ -1210,6 +1205,8 @@ impl LazyFrame {
     /// over how columns are renamed and parallelization options, use
     /// [`join_builder`](LazyFrame::join_builder).
     ///
+    /// Any provided `args.slice` parameter is not considered, but set by the internal optimizer.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -1233,12 +1230,23 @@ impl LazyFrame {
 
         let left_on = left_on.as_ref().to_vec();
         let right_on = right_on.as_ref().to_vec();
-        self.join_builder()
+
+        let mut builder = self
+            .join_builder()
             .with(other)
             .left_on(left_on)
             .right_on(right_on)
             .how(args.how)
-            .finish()
+            .validate(args.validation)
+            .join_nulls(args.join_nulls);
+
+        if let Some(suffix) = args.suffix {
+            builder = builder.suffix(suffix);
+        }
+
+        // Note: args.slice is set by the optimizer
+
+        builder.finish()
     }
 
     /// Consume `self` and return a [`JoinBuilder`] to customize a join on this LazyFrame.
@@ -1651,14 +1659,14 @@ impl LazyFrame {
     /// This can have a negative effect on query performance. This may for instance block
     /// predicate pushdown optimization.
     pub fn with_row_index(mut self, name: &str, offset: Option<IdxSize>) -> LazyFrame {
-        let add_row_count_in_map = match &mut self.logical_plan {
+        let add_row_index_in_map = match &mut self.logical_plan {
             LogicalPlan::Scan {
                 file_options: options,
                 file_info,
                 scan_type,
                 ..
             } if !matches!(scan_type, FileScan::Anonymous { .. }) => {
-                options.row_count = Some(RowCount {
+                options.row_index = Some(RowIndex {
                     name: name.to_string(),
                     offset: offset.unwrap_or(0),
                 });
@@ -1673,13 +1681,13 @@ impl LazyFrame {
             _ => true,
         };
 
-        if add_row_count_in_map {
+        if add_row_index_in_map {
             let schema = fallible!(self.schema(), &self);
             let schema = schema
                 .new_inserting_at_index(0, name.into(), IDX_DTYPE)
                 .unwrap();
 
-            self.map_private(FunctionNode::RowCount {
+            self.map_private(FunctionNode::RowIndex {
                 name: Arc::from(name),
                 offset,
                 schema: Arc::new(schema),
@@ -1724,75 +1732,117 @@ impl LazyFrame {
     }
 
     pub fn describe(&self) -> PolarsResult<DataFrame> {
-        self.describe_with_extra_aggs(
+        self.describe_with_params(
             true,
-            Some([0.25, 0.50, 0.75].into_iter().map(|p|
+            vec![
                 (
-                    format!("{}%", p * 100.),
+                    "count".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| {
+                        col(name).count().alias(format!("{} count", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "null_count".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| {
+                        col(name)
+                            .null_count()
+                            .alias(format!("{} null_count", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "mean".to_owned(),
                     Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
-                    Box::new(move |name: &String| col(name).quantile(lit(p), QuantileInterpolOptions::Nearest).alias(format!("{} {}", name, p).as_str())) as Box<dyn Fn(&String) -> Expr>
-                )
-            ).collect::<Vec<_>>())
+                    Box::new(|name: &String| {
+                        col(name).mean().alias(format!("{} mean", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "std".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| {
+                        col(name).std(1).alias(format!("{} std", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "min".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| {
+                        col(name).min().alias(format!("{} min", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "25%".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(move |name: &String| {
+                        col(name)
+                            .quantile(lit(0.25), QuantileInterpolOptions::Nearest)
+                            .alias(format!("0.25 {}", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "50%".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(move |name: &String| {
+                        col(name)
+                            .quantile(lit(0.5), QuantileInterpolOptions::Nearest)
+                            .alias(format!("0.5 {}", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "75%".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(move |name: &String| {
+                        col(name)
+                            .quantile(lit(0.75), QuantileInterpolOptions::Nearest)
+                            .alias(format!("0.75 {}", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+                (
+                    "max".to_owned(),
+                    Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
+                    Box::new(|name: &String| {
+                        col(name).max().alias(format!("{} max", name).as_str())
+                    }) as Box<dyn Fn(&String) -> Expr>,
+                ),
+            ],
+            None,
         )
     }
 
-    pub fn describe_with_extra_aggs(&self, fields_to_header:bool, extra_aggs_op: Option<Vec<(String, Box<dyn Fn(&DataType) -> bool>, Box<dyn Fn(&String) -> Expr>)>>) -> PolarsResult<DataFrame> {
-        let mut aggs = vec![
-            (
-                "name".to_owned(),
-                Box::new(|_dt: &DataType| true) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-            (
-                "count".to_owned(),
-                Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).count().alias(format!("{} count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-            (
-                "null_count".to_owned(),
-                Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).null_count().alias(format!("{} null_count", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-            (
-                "mean".to_owned(),
-                Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).mean().alias(format!("{} mean", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-            (
-                "std".to_owned(),
-                Box::new(|dt: &DataType| dt.is_numeric()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).std(1).alias(format!("{} std", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-            (
-                "min".to_owned(),
-                Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).min().alias(format!("{} min", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-            (
-                "max".to_owned(),
-                Box::new(|dt: &DataType| dt.is_ord()) as Box<dyn Fn(&DataType) -> bool>,
-                Box::new(|name: &String| col(name).max().alias(format!("{} max", name).as_str())) as Box<dyn Fn(&String) -> Expr>
-            ),
-        ];
-        let aggs = if let Some(extra_aggs) = extra_aggs_op {
-            aggs.extend(extra_aggs);
-            aggs
-        } else {
-            aggs
-        };
-
-        let exprs = self
+    pub fn describe_with_params(
+        &self,
+        fields_to_header: bool,
+        aggs: Vec<(
+            String,
+            Box<dyn Fn(&DataType) -> bool>,
+            Box<dyn Fn(&String) -> Expr>,
+        )>,
+        only_columns: Option<Vec<&str>>,
+    ) -> PolarsResult<DataFrame> {
+        let mut exprs = self
             .schema()?
             .iter()
+            .map(|(name, dt)| (name.to_string(), dt))
+            .filter(|(name, _)| {
+                only_columns
+                    .as_ref()
+                    .map_or(true, |v| v.contains(&name.as_str()))
+            })
             .enumerate()
             .flat_map(|(i, (name, dt))| {
-                aggs.iter().enumerate().map(|(ai, a)| {
-                    if a.1(dt) {
-                        a.2(&name.to_string())
-                    } else {
-                        lit(NULL).cast(dt.clone()).alias(format!("{} {}", i, ai).as_str())//i and ai to make name unique
-                    }
-                }).collect::<Vec<_>>()
+                once(Expr::Literal(LiteralValue::String(name.to_string())).alias(name.as_str()))
+                    .chain(aggs.iter().enumerate().map(|(ai, a)| {
+                        if a.1(dt) {
+                            a.2(&name)
+                        } else {
+                            lit(NULL)
+                                .cast(dt.clone())
+                                .alias(format!("{} {}", i, ai).as_str()) //i and ai to keep names unique
+                        }
+                    }))
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
@@ -1800,34 +1850,56 @@ impl LazyFrame {
 
         let mut summary_df = self.clone().select(exprs).collect()?;
 
-        let aggs_len = aggs.len();
-        let index = (0..columns_len / aggs_len).flat_map(|i| std::iter::repeat(i as i32).take(aggs_len)).collect::<Vec<i32>>();
+        let aggs_len = aggs.len() + 1;
+        let index = (0..columns_len / aggs_len)
+            .flat_map(|i| std::iter::repeat(i as i32).take(aggs_len))
+            .collect::<Vec<i32>>();
 
         summary_df = summary_df.transpose(None, None)?;
 
-
-        summary_df.insert_column(0, Series::new("columns", aggs.iter().map(|agg| agg.0.clone()).cycle().take(columns_len).collect::<Vec<String>>()))?;
+        summary_df.insert_column(
+            0,
+            Series::new(
+                "columns",
+                once("name".to_owned())
+                    .chain(aggs.iter().map(|agg| agg.0.clone()))
+                    .cycle()
+                    .take(columns_len)
+                    .collect::<Vec<String>>(),
+            ),
+        )?;
         summary_df.insert_column(0, Series::new("index", index))?;
 
-        summary_df = pivot::pivot(&summary_df, ["column_0"], ["index"], ["columns"], false, None, None)?;
+        summary_df = pivot::pivot(
+            &summary_df,
+            ["column_0"],
+            ["index"],
+            ["columns"],
+            false,
+            None,
+            None,
+        )?;
 
         if !fields_to_header {
             summary_df = summary_df
                 .clone()
                 .lazy()
                 .select(
-                    aggs.iter().enumerate().map(|(ai, a)| {
-                        if ai > 1 {
-                            col(a.0.as_str()).cast(DataType::Float64)
-                        } else {
-                            col(a.0.as_str())
-                        }
-                    }).collect::<Vec<Expr>>()
+                    once("name")
+                        .chain(aggs.iter().map(|agg| agg.0.as_str()))
+                        .enumerate()
+                        .map(|(i, name)| {
+                            if i > 0 {
+                                col(name).cast(DataType::Float64)
+                            } else {
+                                col(name)
+                            }
+                        })
+                        .collect::<Vec<Expr>>(),
                 )
                 .collect()?;
 
             Ok(summary_df)
-
         } else {
             summary_df = summary_df.drop("index")?;
 
@@ -1839,23 +1911,28 @@ impl LazyFrame {
                 .select(
                     self.schema()?
                         .iter()
-                        .map(| (name, dt)| {
+                        .map(|(name, dt)| {
                             if dt.is_numeric() {
                                 col(name.as_str()).cast(DataType::Float64)
                             } else {
                                 col(name.as_str())
                             }
                         })
-                        .collect::<Vec<Expr>>()
+                        .collect::<Vec<Expr>>(),
                 )
                 .collect()?;
 
-            summary_df.insert_column(0, Series::new("describe", aggs[1..].iter().map(|q| q.0.clone()).collect::<Vec<String>>()))?;
+            summary_df.insert_column(
+                0,
+                Series::new(
+                    "describe",
+                    aggs.iter().map(|q| q.0.clone()).collect::<Vec<String>>(),
+                ),
+            )?;
 
             Ok(summary_df)
         }
     }
-
 }
 
 /// Utility struct for lazy group_by operation.
